@@ -246,6 +246,10 @@ func RunServe(version string, args []string) error {
 	if cfg.Notify.SilenceEnabled() && ledger.Enabled() {
 		threadResponder.Silence = ledger
 		threadResponder.SilenceMax = cfg.Notify.Silence.MaxWindow.Std()
+		// Whether the acknowledgement may promise the 👎 escape. Deployment-wide,
+		// because votes and silences share this one ledger — see
+		// config.Notify.FeedbackEnabled and thread.SilenceAck.
+		threadResponder.FeedbackEnabled = cfg.Notify.FeedbackEnabled()
 		log.Info("thread silence command enabled", "max_window", threadResponder.SilenceMax)
 	}
 	queue := investigate.NewQueue(inv, log)
@@ -480,6 +484,9 @@ func RunServe(version string, args []string) error {
 	// when a Slack message can actually carry the control.
 	if cfg.Notify.Slack.SilenceButton && ledger.Enabled() {
 		acts.Silence = ledger
+		// Same deployment-wide fact the thread responder carries, for the same
+		// acknowledgement — see server.Actions.FeedbackEnabled.
+		acts.FeedbackEnabled = cfg.Notify.FeedbackEnabled()
 		if SlackFeedbackDeliverable(cfg, log) {
 			log.Info("slack silence button enabled", "endpoint", "/slack/interactions",
 				"windows", cfg.Notify.Silence.Std(), "max_window", cfg.Notify.Silence.MaxWindow.Std())

@@ -61,10 +61,34 @@ const silenceExpiryLayout = "2006-01-02 15:04 MST"
 // It lives here, shared, rather than being spelled once per transport: two
 // copies would drift, and a silence meaning something subtly different in Slack
 // than in Matrix is exactly the confusion the warning exists to prevent.
-func SilenceAck(user string, window time.Duration, until time.Time) string {
+//
+// feedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
+// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions). It is a
+// deployment-wide fact rather than a per-transport one because the votes and the
+// silences share one ledger: a 👎 cast in Matrix re-arms a silence clicked in
+// Slack.
+//
+// It exists because the ack promised "a 👎 … re-arms it immediately"
+// unconditionally, while the Slack docs RECOMMEND the deployment where that is
+// false — feedback_buttons off, silence_button on, which the same page describes
+// as showing "the 🔕 menu and nothing else". There is then no way to cast a 👎 at
+// all; the Matrix equivalent (silence_reactions on, feedback_reactions off) drops
+// a 👎 in handleReaction. Pair that with a GitOps-sourced trigger — no severity,
+// so the CRITICAL carve-out never fires; a synthetic fingerprint, so no resolve
+// can ever arrive — and the real bound is EXPIRY ALONE, while the ack named
+// three escapes and the security argument for leaving silencing unprivileged
+// rested on four. The escape is named only where it exists, and its absence is
+// stated rather than quietly dropped: a reader who was told three bounds and has
+// one is worse off than one who was told the truth.
+func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnabled bool) string {
+	escapes := "A CRITICAL firing still breaks through; a 👎 re-arms it immediately, " +
+		"and so does the alert resolving."
+	if !feedbackEnabled {
+		escapes = "A CRITICAL firing still breaks through, and the alert resolving re-arms it. " +
+			"👍/👎 feedback is not enabled here, so no 👎 can lift this silence early."
+	}
 	return fmt.Sprintf("🔕 Silenced by @%s until %s (%s).\n\n"+
 		"⚠️ RunLore will NOT investigate this incident while the silence stands — "+
-		"no model call, no notification, no record. A CRITICAL firing still breaks "+
-		"through; a 👎 or a resolved alert re-arms it immediately.",
-		user, until.Format(silenceExpiryLayout), ShortDuration(window))
+		"no model call, no notification, no record. %s",
+		user, until.Format(silenceExpiryLayout), ShortDuration(window), escapes)
 }

@@ -1234,6 +1234,21 @@ func (n Notify) SilenceEnabled() bool {
 	return n.Slack.SilenceButton || n.Matrix.SilenceReactions
 }
 
+// FeedbackEnabled reports whether ANY transport offers a 👍/👎 control. It is a
+// DEPLOYMENT-WIDE fact rather than a per-transport one on purpose: votes and
+// silences share one outcome ledger and are keyed by TriggerKey alone, so a 👎
+// cast in Matrix re-arms a silence clicked in Slack.
+//
+// It exists because one of the four documented escapes from a 🔕 — "a standing
+// 👎 re-arms it" — simply does not exist when no such control is enabled, and
+// the deployment where that is true is the one the Slack docs RECOMMEND
+// (feedback_buttons off, silence_button on). Read by the silence acknowledgement
+// so it never promises an escape this deployment lacks, and by the startup
+// warning that tells an operator the bound is narrower than four.
+func (n Notify) FeedbackEnabled() bool {
+	return n.Slack.FeedbackButtons || n.Matrix.FeedbackReactions
+}
+
 // GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
 type GitOps struct {
 	Engine string       `yaml:"engine"` // "flux" (default) | "argocd"

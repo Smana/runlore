@@ -90,8 +90,11 @@ The silence stands until one of **four** things happens:
 - the window **expires**;
 - the incident fires again as **CRITICAL** — a silence never mutes a page, the same carve-out the
   debouncer makes for criticals;
-- a colleague casts a standing **👎** on the trigger — a human contesting the diagnosis outranks an
-  earlier human silencing it, and re-arms investigation immediately;
+- a colleague casts a standing **👎** on the trigger — the **newest human wins**, so a 👎 cast
+  *after* the silence re-arms investigation immediately (and a 🔕 clicked *after* the newest standing
+  👎 still suppresses). **This escape only exists where a 👍/👎 control is actually enabled** —
+  `feedback_buttons` here, or `matrix.feedback_reactions` — since a 👎 nobody can cast bounds
+  nothing. Votes and silences share one outcome ledger, so a 👎 on *either* transport counts;
 - the incident **resolves** — a resolve clears the silence outright, so the next occurrence gets a
   fresh look.
 
@@ -102,14 +105,23 @@ silence early. **For a GitOps failure, a silence is bounded by its expiry and a 
 nothing else.** The same loss of the resolve escape (but not the CRITICAL one, since a real severity
 is still present) applies to an Alertmanager receiver configured with `send_resolved: false`.
 
+**And a third is config-specific.** With no 👍/👎 control enabled on any transport — the
+`feedback_buttons: false` + `silence_button: true` deployment described further down — there is no way
+to cast a 👎, so that escape does not exist either. Combine *that* with a GitOps trigger and **the
+expiry is the only bound left**: a mistaken `24h` click cannot be lifted by anyone. RunLore warns at
+startup when silencing is enabled with no 👍/👎 control anywhere, and the acknowledgement below names
+only the escapes that deployment actually has. If you want the silence-only card, keep
+`notify.silence.max_window` short.
+
 The click is acknowledged with a message naming who silenced it, until when, and restating the escapes
-above, so nobody has to guess why the channel went quiet.
+that apply to *this* deployment, so nobody has to guess why the channel went quiet.
 
 Like `feedback_buttons`, silencing is deliberately **unprivileged**: any signature-valid member of
 your workspace can silence an incident — there is no `approver_ids`-style allowlist. That is safe for
-an alert-sourced incident, where the blast radius is bounded four independent ways (the escapes
-above); for a GitOps failure, or a `send_resolved: false` receiver, it is narrower — per above — but
-still bounded by expiry and a 👎. Every silence is attributed to the clicking Slack user's id in the
+an alert-sourced incident **with a 👍/👎 control enabled**, where the blast radius is bounded four
+independent ways (the escapes above); for a GitOps failure, a `send_resolved: false` receiver, or a
+deployment with no 👍/👎 control, it is narrower — per above — and in the worst combination the
+expiry is the only bound, which is why `max_window` matters most there. Every silence is attributed to the clicking Slack user's id in the
 outcome ledger (so a bad click is auditable, not anonymous), and the window itself is capped by
 `notify.silence.max_window` — nothing can be silenced indefinitely.
 
@@ -128,7 +140,10 @@ outcome:
 
 `silence_button` is gated **independently** of `feedback_buttons` — a deployment can enable either
 without the other, and each renders only its own control on the card. With `feedback_buttons: false`
-and `silence_button: true`, an investigation message shows the 🔕 menu and nothing else.
+and `silence_button: true`, an investigation message shows the 🔕 menu and nothing else — **which
+also means no 👎 can be cast, so that escape from a silence is gone.** Enable
+`matrix.feedback_reactions` (votes and silences share one ledger, so a 👎 there still counts) or
+accept the narrower bound; startup warns either way.
 
 **The button is not the only way in.** With `thread_capture` also on (see below), replying
 `@runlore silence: 4h` in the investigation thread does exactly what the button does — same parser,

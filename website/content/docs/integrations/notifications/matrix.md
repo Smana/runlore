@@ -95,8 +95,12 @@ outcome ledger as Slack's `silence_button`:
 
 Either path suppresses re-investigating this exact `TriggerKey` — **no model call, no notification,
 no ledger open** — until the window expires, the incident fires again as **CRITICAL**, a standing
-**👎** re-arms it, or the incident **resolves**. Every silence, whichever path recorded it, gets the
-same acknowledgement: a message naming who silenced it, until when, and restating those four escapes.
+**👎** re-arms it (newest human wins: a 👎 cast *after* the silence lifts it, a 🔕 clicked after the
+newest 👎 still suppresses), or the incident **resolves**. The **`silence:` thread command** is
+acknowledged with a message naming who silenced it, until when, and restating the escapes that apply
+to this deployment. A bare **🔕 reaction** is recorded and logged but gets no reply — a reaction has
+no thread to answer in, so check `runlore_investigations_completed_total{result="silenced"}` or the
+`msg="matrix silence recorded"` log line if you need confirmation.
 
 **Two of those four are alert-specific**, exactly as on the Slack side (see [Slack → Silence a
 recurring incident]({{< relref "/docs/integrations/notifications/slack.md#silence-a-recurring-incident" >}})
@@ -105,6 +109,12 @@ fires, and its fingerprint is synthetic with no resolve channel, so the resolve 
 either. **For a GitOps failure, a silence is bounded by its expiry and a 👎 — and nothing else.** The
 same loss of the resolve escape applies to an Alertmanager receiver configured with
 `send_resolved: false`.
+
+**A third is config-specific.** The 👎 escape only exists where a 👍/👎 control is actually enabled
+somewhere: with `silence_reactions: true` and `feedback_reactions: false`, `handleReaction` drops a
+👎, so nobody can cast one. Combine that with a GitOps trigger and the expiry is the only bound left.
+RunLore warns at startup when silencing is on with no 👍/👎 control on any transport; votes and
+silences share one outcome ledger, so Slack's `feedback_buttons` satisfies it too.
 
 ```yaml
 notify:
@@ -122,13 +132,16 @@ outcome:
 
 Like Matrix's feedback reactions, silencing is deliberately **unprivileged** — any member of the
 room can silence an incident, with no allowlist — which is safe for the same reason Slack's button
-is: for an alert-sourced incident the blast radius is bounded by the four escapes above (narrower for
-a GitOps failure or a `send_resolved: false` receiver, per above), every silence is attributed to the
-sender's Matrix id in the outcome ledger, and the window is capped by `notify.silence.max_window`.
+is: for an alert-sourced incident **with a 👍/👎 control enabled** the blast radius is bounded by the
+four escapes above (narrower for a GitOps failure, a `send_resolved: false` receiver, or a deployment
+with no 👍/👎 control anywhere, per above), every silence is attributed to the sender's Matrix id in
+the outcome ledger, and the window is capped by `notify.silence.max_window`.
 Use an **invite-only room**, as for feedback reactions.
 
 `silence_reactions` is gated **independently** of `feedback_reactions` — enabling it on its own
-records 🔕 silences without recording 👍/👎 votes, and vice versa.
+records 🔕 silences without recording 👍/👎 votes, and vice versa. Turning silencing on *without*
+either transport's 👍/👎 control removes the 👎 escape entirely; startup warns when that is the
+configuration.
 
 ### Write knowledge back from a thread
 

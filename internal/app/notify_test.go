@@ -1305,3 +1305,51 @@ func TestRecurrenceGateBuiltForSilenceWithoutACooldown(t *testing.T) {
 		})
 	}
 }
+
+// TestWarnSilenceWithoutFeedback pins the startup warning for the deployment
+// the Slack docs actively RECOMMEND — feedback_buttons off, silence_button on,
+// which that page describes as showing "the 🔕 menu and nothing else". There is
+// then no way to cast a 👎 at all, so one of the four documented escapes does
+// not exist; pair it with a GitOps-sourced trigger (no severity, synthetic
+// fingerprint) and the expiry is the ONLY bound left. That is defensible, but
+// only if the operator is told, because the security argument for leaving
+// silencing unprivileged rests on the four-way bound.
+func TestWarnSilenceWithoutFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		silence  bool
+		feedback bool
+		wantWarn bool
+	}{
+		{name: "silence with no feedback control anywhere", silence: true, wantWarn: true},
+		{name: "silence with Slack feedback buttons", silence: true, feedback: true},
+		{name: "no silencing at all", feedback: true},
+		{name: "nothing enabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			cfg := &config.Config{}
+			cfg.Notify.Slack.SilenceButton = tc.silence
+			cfg.Notify.Slack.FeedbackButtons = tc.feedback
+
+			warnSilenceWithoutFeedback(cfg, log)
+
+			got := buf.String()
+			if tc.wantWarn {
+				if got == "" {
+					t.Fatal("nothing was logged: the missing 👎 escape is invisible to the operator")
+				}
+				for _, want := range []string{"level=WARN", "feedback_buttons", "feedback_reactions"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("log = %q, want it to mention %q", got, want)
+					}
+				}
+				return
+			}
+			if got != "" {
+				t.Errorf("log = %q, want nothing", got)
+			}
+		})
+	}
+}

@@ -249,6 +249,16 @@ type Responder struct {
 	// remains the single place that does.
 	Silence    SilenceRecorder
 	SilenceMax time.Duration
+	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
+	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions). It is a
+	// deployment-wide fact, not a per-transport one — this Responder is SHARED
+	// across Slack's thread capture and Matrix's, and the votes and silences share
+	// one ledger, so a 👎 cast in Matrix re-arms a silence recorded in Slack.
+	//
+	// It exists solely so the acknowledgement does not promise an escape hatch the
+	// deployment does not have; see SilenceAck. False (the zero value) is the safe
+	// default: it under-promises rather than over-promises.
+	FeedbackEnabled bool
 }
 
 // SilenceRecorder records a human 🔕 silence (implemented by *outcome.Ledger).
@@ -827,7 +837,7 @@ func (r *Responder) silence(tc Context, author, text string) (string, error) {
 	if err := r.Silence.Silence(tc.TriggerKey, window, author, now); err != nil {
 		return "Couldn't silence this: " + err.Error(), nil
 	}
-	return SilenceAck(author, window, now.Add(window)), nil
+	return SilenceAck(author, window, now.Add(window), r.FeedbackEnabled), nil
 }
 
 // freeform answers an addressed message that carried no recognised command

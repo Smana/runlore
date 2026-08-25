@@ -596,10 +596,15 @@ default `false`/empty).** A third feedback verdict beside 👍/👎, and the onl
 RunLore *does* rather than how it weighs a recalled entry: picking a window suppresses
 re-investigating that incident's `TriggerKey` for the duration chosen — no model call, no
 notification, no ledger open — until it expires, a CRITICAL firing breaks through, a standing 👎
-re-arms it, or the incident resolves. **The CRITICAL and resolve escapes are alert-specific**: a
-GitOps-sourced failure sets no severity and its fingerprint has no resolve channel at all, so such a
-silence is bounded only by its expiry and a 👎 (same for an Alertmanager receiver configured with
-`send_resolved: false`, which loses only the resolve escape). See [Slack → Silence a recurring
+re-arms it (newest human wins: a 👎 cast *after* the silence lifts it, a 🔕 clicked after the newest
+👎 still suppresses), or the incident resolves. **The CRITICAL and resolve escapes are
+alert-specific**: a GitOps-sourced failure sets no severity and its fingerprint has no resolve channel
+at all, so such a silence is bounded only by its expiry and a 👎 (same for an Alertmanager receiver
+configured with `send_resolved: false`, which loses only the resolve escape). **And the 👎 escape is
+config-specific**: it needs a 👍/👎 control enabled on some transport (`slack.feedback_buttons` or
+`matrix.feedback_reactions` — votes and silences share one ledger, so either counts). With none
+enabled, and a GitOps trigger, the expiry is the only bound; startup warns when silencing is on with
+no 👍/👎 control anywhere. See [Slack → Silence a recurring
 incident]({{< relref "/docs/integrations/notifications/slack.md#silence-a-recurring-incident" >}})
 and [Matrix → Silence a recurring
 incident]({{< relref "/docs/integrations/notifications/matrix.md#silence-a-recurring-incident" >}})

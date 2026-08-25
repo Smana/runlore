@@ -209,7 +209,10 @@ config:
       # OPT-IN 🔕: a third control beside 👍/👎 that suppresses re-investigating a
       # trigger for the chosen window (notify.silence below) — no model call, no
       # notification, no ledger open — until it expires, a CRITICAL fires, a 👎
-      # lands, or the incident resolves. Gated independently of feedback_buttons.
+      # lands (newest human wins), or the incident resolves. Gated independently
+      # of feedback_buttons — but the 👎 escape needs a 👍/👎 control enabled on
+      # SOME transport, so turning this on with neither feedback_buttons nor
+      # matrix.feedback_reactions removes it (startup warns).
       silence_button: true
     # Shared presets for the 🔕 control above: windows[0] is used wherever no
     # duration can be carried (a bare Matrix reaction). Requires outcome.ledger_path

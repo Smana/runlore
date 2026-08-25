@@ -73,6 +73,7 @@ type Server struct {
 	approvals        *action.Approvals  // nil unless action mode "approve" is configured
 	pauser           Pauser             // nil unless action mode "auto" is configured (kill-switch)
 	feedback         FeedbackRecorder   // nil unless notify.slack.feedback_buttons is on (with an enabled ledger)
+	feedbackEnabled  bool               // any transport offers 👍/👎 — see Actions.FeedbackEnabled
 	silence          SilenceRecorder    // nil unless notify.slack.silence_button is on (with an enabled ledger)
 	token            string             // shared secret for the approval/control endpoints (required when actions enabled)
 	slackSecret      string             // Slack signing secret; verifies interactive button clicks
@@ -192,6 +193,14 @@ type Actions struct {
 	ApproverIDs  []string           // Slack user IDs permitted to approve actions
 	Threads      ThreadHandler      // opt-in thread capture (notify.slack.thread_capture)
 	Metrics      *telemetry.Metrics // optional; nil-safe — powers the mentions-dropped-on-saturation counter
+	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
+	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions) — a
+	// deployment-wide fact, since votes and silences share one ledger and a 👎 cast
+	// in Matrix re-arms a silence clicked in Slack. Read only by the silence
+	// acknowledgement, so it never promises an escape hatch this deployment lacks;
+	// see thread.SilenceAck. Deliberately NOT `Feedback != nil`, which would answer
+	// the narrower "can Slack record a rating".
+	FeedbackEnabled bool
 }
 
 // New builds a Server. ready reports whether this replica should serve; nil =
@@ -215,8 +224,8 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	s := &Server{
 		ready:     ready,
 		approvals: acts.Approvals, pauser: liveIface(acts.Pauser), feedback: liveIface(acts.Feedback),
-		silence: liveIface(acts.Silence),
-		token:   acts.Token, slackSecret: acts.SlackSecret,
+		silence: liveIface(acts.Silence), feedbackEnabled: acts.FeedbackEnabled,
+		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
 		threads:          liveIface(acts.Threads),
@@ -516,10 +525,15 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		// Unprivileged, like feedback and unlike approve/reject: the signature
 		// proves the workspace, and for an alert-sourced incident the blast radius
 		// is bounded four independent ways — the window expires, a CRITICAL firing
-		// is never suppressed, any colleague's 👎 re-arms it, and every silence is
-		// attributed in the ledger. For a GitOps-sourced trigger (no severity, no
-		// resolve channel — see FromFailureEvent / outcome.Derived) only the first
-		// and third bounds apply.
+		// is never suppressed, the alert resolving clears it, and any colleague's
+		// 👎 re-arms it (newest human wins, so a 👎 cast after the silence takes
+		// precedence). Every silence is attributed in the ledger besides.
+		//
+		// Two of those four are conditional, and the acknowledgement below says
+		// which: a GitOps-sourced trigger has no severity and no resolve channel
+		// (see FromFailureEvent / outcome.Derived), and the 👎 escape only exists
+		// where a 👍/👎 control is actually enabled somewhere — see
+		// Actions.FeedbackEnabled.
 		if s.silence == nil {
 			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
 			break
@@ -542,7 +556,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			s.log.Warn("slack silence failed", "key", key, "window", window, "err", serr)
 			break
 		}
-		msg = thread.SilenceAck(p.User.Username, window, now.Add(window))
+		msg = thread.SilenceAck(p.User.Username, window, now.Add(window), s.feedbackEnabled)
 		s.log.Info("slack silence recorded", "key", key, "window", window,
 			"until", now.Add(window), "user_id", p.User.ID, "user", p.User.Username)
 	default:

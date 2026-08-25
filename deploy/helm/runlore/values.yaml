@@ -334,9 +334,12 @@ config:
   #     # silence_button: true          # OPT-IN 🔕: a third control beside 👍/👎 that suppresses
   #     #   re-investigating this TriggerKey for a chosen window (notify.silence.windows below) —
   #     #   no model call, no notification, no ledger open — until it expires, a CRITICAL fires, a
-  #     #   👎 lands, or the incident resolves. Gated INDEPENDENTLY of feedback_buttons: enabling
-  #     #   one does not render the other. Same requirements as feedback_buttons (signing_secret_env
-  #     #   + a delivery target), plus notify.silence and outcome.ledger_path below.
+  #     #   👎 lands (newest human wins), or the incident resolves. Gated INDEPENDENTLY of
+  #     #   feedback_buttons: enabling one does not render the other — but the 👎 escape needs a
+  #     #   👍/👎 control on SOME transport, so enabling this with neither feedback_buttons nor
+  #     #   matrix.feedback_reactions removes it (startup warns). Same requirements as
+  #     #   feedback_buttons (signing_secret_env + a delivery target), plus notify.silence and
+  #     #   outcome.ledger_path below.
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
   #   # matrix.feedback_reactions: true  # OPT-IN 👍/👎 reactions feeding the learning loop.
   #   #   ZERO-INGRESS (outbound /sync long-poll — nothing to expose, unlike Slack buttons).
@@ -348,7 +351,9 @@ config:
   #   # OPT-IN: shared presets for the 🔕 control above, on either transport. Requires
   #   # outcome.ledger_path and at least one of slack.silence_button / matrix.silence_reactions.
   #   # silence:
-  #   #   windows: [1h, 4h, 24h]   # presets offered; windows[0] is also the Matrix-reaction default
+  #   #   windows: [1h, 4h, 24h]   # presets offered (2-5 entries when slack.silence_button is on:
+  #   #                             #   Slack's overflow limits — outside that Slack rejects the
+  #   #                             #   WHOLE message); windows[0] is the Matrix-reaction default
   #   #   max_window: 24h         # hard cap every window (and every silence: command) must respect
   #   webhook:
   #     url_env: RUNLORE_WEBHOOK_NOTIFY_URL   # POST findings JSON to this URL

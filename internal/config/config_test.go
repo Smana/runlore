@@ -2121,3 +2121,31 @@ notify:
 		t.Fatalf("notify.silence.max_window: got %v, want 24h", got)
 	}
 }
+
+// TestNotifyFeedbackEnabled pins the deployment-wide fact the silence
+// acknowledgement and the startup warning both read: whether ANY transport
+// offers a 👍/👎 control. It is deployment-wide rather than per-transport
+// because votes and silences share one outcome ledger — a 👎 cast in Matrix
+// re-arms a silence clicked in Slack.
+func TestNotifyFeedbackEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		slack  bool
+		matrix bool
+		want   bool
+	}{
+		{name: "neither", want: false},
+		{name: "slack buttons only", slack: true, want: true},
+		{name: "matrix reactions only", matrix: true, want: true},
+		{name: "both", slack: true, matrix: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var n Notify
+			n.Slack.FeedbackButtons = tc.slack
+			n.Matrix.FeedbackReactions = tc.matrix
+			if got := n.FeedbackEnabled(); got != tc.want {
+				t.Errorf("FeedbackEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

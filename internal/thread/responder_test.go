@@ -1116,7 +1116,7 @@ func TestHandleSilenceRecordsAndAcks(t *testing.T) {
 	if got.triggerKey != "trig-1" || got.window != 4*time.Hour || got.user != "alice" || !got.at.Equal(noteAt) {
 		t.Errorf("Silence called with %+v", got)
 	}
-	want := SilenceAck("alice", 4*time.Hour, noteAt.Add(4*time.Hour))
+	want := SilenceAck("alice", 4*time.Hour, noteAt.Add(4*time.Hour), r.FeedbackEnabled)
 	if reply != want {
 		t.Errorf("reply = %q, want the shared SilenceAck text %q", reply, want)
 	}
