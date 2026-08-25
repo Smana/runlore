@@ -3,8 +3,10 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -260,6 +262,49 @@ func TestMatrixSilenceOptionGuardsMisconfiguration(t *testing.T) {
 			f := NewMatrixFeedback("http://unused", room, "tok", sink, matrixTestLog(), WithSilenceReactions(tc.defaultWindow, tc.maxWindow))
 			if f.silenceReactions {
 				t.Fatal("silenceReactions = true, want the capability left off on a misconfigured window")
+			}
+		})
+	}
+}
+
+// TestMatrixSilenceOptionWarnsWhenItDropsTheCapability pins the promise
+// WithSilenceReactions' own doc comment makes two lines above its guards — that
+// threading maxWindow here makes "a misconfiguration visible at construction
+// rather than at the first click". Both guards returned bare, so nothing was
+// emitted anywhere: the operator set notify.matrix.silence_reactions: true,
+// startup said nothing, and every 🔕 was ignored in silence.
+func TestMatrixSilenceOptionWarnsWhenItDropsTheCapability(t *testing.T) {
+	const room = "!r:hs"
+	for _, tc := range []struct {
+		name          string
+		sink          FeedbackSink
+		defaultWindow time.Duration
+		maxWindow     time.Duration
+		want          string
+	}{
+		{name: "zero default window", sink: &silenceRecordSink{}, defaultWindow: 0, maxWindow: 24 * time.Hour, want: "window"},
+		{name: "default exceeds max", sink: &silenceRecordSink{}, defaultWindow: 48 * time.Hour, maxWindow: 24 * time.Hour, want: "window"},
+		{name: "sink cannot record silences", sink: &recordSink{}, defaultWindow: 4 * time.Hour, maxWindow: 24 * time.Hour, want: "ledger"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			f := NewMatrixFeedback("http://unused", room, "tok", tc.sink, log, WithSilenceReactions(tc.defaultWindow, tc.maxWindow))
+			if f.silenceReactions {
+				t.Fatal("silenceReactions = true, want the capability left off")
+			}
+			got := buf.String()
+			if got == "" {
+				t.Fatal("nothing was logged: the dropped capability is invisible until the first ignored 🔕")
+			}
+			if !strings.Contains(got, "level=WARN") {
+				t.Errorf("log = %q, want a WARN — an ignored opt-in is not routine information", got)
+			}
+			if !strings.Contains(got, "silence_reactions") {
+				t.Errorf("log = %q, want it to name the config key the operator turned on", got)
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("log = %q, want it to say why (%q)", got, tc.want)
 			}
 		})
 	}

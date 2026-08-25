@@ -253,14 +253,26 @@ func WithFeedbackReactions() MatrixFeedbackOption {
 // express. maxWindow is carried for the `silence:` command path and is enforced
 // by the ledger regardless; it is threaded here so a misconfiguration is visible
 // at construction rather than at the first click.
+//
+// "Visible" has to mean visible: both guards below leave the capability OFF, and
+// both used to return bare. Nothing was emitted anywhere, so an operator who set
+// notify.matrix.silence_reactions: true saw a clean startup and then had every
+// 🔕 in the room ignored, with no line to grep for. Each branch now warns, names
+// the config key the operator actually turned on, and says why it was dropped.
 func WithSilenceReactions(defaultWindow, maxWindow time.Duration) MatrixFeedbackOption {
 	return func(f *MatrixFeedback) {
+		// A misconfigured window leaves the capability off rather than silently
+		// clamping — clamping would silence for a duration nobody chose.
 		if defaultWindow <= 0 || (maxWindow > 0 && defaultWindow > maxWindow) {
-			return // a misconfigured window leaves the capability off rather than silently clamping
+			f.log.Warn("matrix silence_reactions ignored: notify.silence.windows[0] is not a usable window",
+				"window", defaultWindow, "max_window", maxWindow)
+			return
 		}
 		sink, ok := f.sink.(SilenceSink)
 		if !ok {
-			return // the configured sink cannot record silences; leave the capability off
+			f.log.Warn("matrix silence_reactions ignored: the configured outcome ledger cannot record silences",
+				"sink", fmt.Sprintf("%T", f.sink))
+			return
 		}
 		f.silenceReactions = true
 		f.silenceWindow = defaultWindow
