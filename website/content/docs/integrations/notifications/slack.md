@@ -314,9 +314,12 @@ notify:
   slack:
     bot_token_env: SLACK_BOT_TOKEN
     channel: C0123456789
+    signing_secret_env: SLACK_SIGNING_SECRET
     thread_capture: true
   thread:
     announce_kb_updates: channel  # default false; also true (= channel), thread, both
+outcome:
+  ledger_path: /var/lib/runlore/outcome.jsonl   # required by thread_capture, as above
 ```
 
 The post names the pull request, the entry that was created, who the note came
@@ -360,10 +363,15 @@ model:
     model: claude-haiku-4-5      # required — never inherited from model.model
 notify:
   slack:
+    bot_token_env: SLACK_BOT_TOKEN
+    channel: C0123456789
+    signing_secret_env: SLACK_SIGNING_SECRET
     thread_capture: true         # the chat layer has no channel without it
   thread:
     chat_calls_per_hour: 30      # default 30
     chat_tokens_per_hour: 109480 # default 109480 — derived, not round
+outcome:
+  ledger_path: /var/lib/runlore/outcome.jsonl   # required by thread_capture, as above
 ```
 
 **This is a paid path anyone in the channel can trigger.** With `model.chat` set,

@@ -39,6 +39,7 @@ Without a `judge:` block, `--judge-*` flags, or a config file's `config.model`,
 A small YAML listing the models to benchmark and (optionally) the judge. See
 [`eval/compare.example.yaml`](../eval/compare.example.yaml):
 
+<!-- docsguard:ignore `lore bench` comparison spec, a separate file format from runlore.yaml -->
 ```yaml
 judge:                       # optional; one fixed judge for every entry (blind grading)
   provider: anthropic

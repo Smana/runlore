@@ -21,6 +21,7 @@ triggers:
 
 Point Alertmanager at the mounted webhook:
 
+<!-- docsguard:ignore Alertmanager receiver config, not a runlore.yaml -->
 ```yaml
 # alertmanager config
 receivers:

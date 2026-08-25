@@ -76,6 +76,7 @@ RunLore's MCP client speaks **streamable HTTP only** — there is no stdio clien
 RunLore runs in-cluster and remote servers are network services. So `mcp-grafana` runs as a
 Deployment with `-t streamable-http`, not as a subprocess.
 
+<!-- docsguard:ignore Kubernetes manifests for the MCP server, not a runlore.yaml -->
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -190,6 +191,7 @@ blocked either way, in the same namespace or not.
 
 Add it via `extraEgress`, which is appended verbatim in both modes:
 
+<!-- docsguard:ignore Helm chart values, not a runlore.yaml -->
 ```yaml
 networkPolicy:
   egress:
