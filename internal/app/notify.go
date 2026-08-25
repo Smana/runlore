@@ -497,7 +497,7 @@ func buildMatrixThreadMention(cfg *config.Config, responder *thread.Responder, n
 // dropped Slack mention already is.
 func BuildMatrixFeedback(cfg *config.Config, ledger *outcome.Ledger, responder *thread.Responder, dispatch, busyDispatch *thread.Dispatcher, notifier *notify.Multi, metrics *telemetry.Metrics, log *slog.Logger) *notify.MatrixFeedback {
 	mc := cfg.Notify.Matrix
-	if !mc.FeedbackReactions && !mc.ThreadCapture {
+	if !mc.FeedbackReactions && !mc.ThreadCapture && !mc.SilenceReactions {
 		return nil
 	}
 	if !ledger.Enabled() {

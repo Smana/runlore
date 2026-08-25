@@ -73,6 +73,7 @@ type Server struct {
 	approvals        *action.Approvals  // nil unless action mode "approve" is configured
 	pauser           Pauser             // nil unless action mode "auto" is configured (kill-switch)
 	feedback         FeedbackRecorder   // nil unless notify.slack.feedback_buttons is on (with an enabled ledger)
+	silence          SilenceRecorder    // nil unless notify.slack.silence_button is on (with an enabled ledger)
 	token            string             // shared secret for the approval/control endpoints (required when actions enabled)
 	slackSecret      string             // Slack signing secret; verifies interactive button clicks
 	webhookToken     string             // optional bearer token required on POST /webhook/alertmanager
@@ -106,6 +107,15 @@ type Pauser interface {
 // (implemented by *outcome.Ledger).
 type FeedbackRecorder interface {
 	Feedback(triggerKey, rating, user string, at time.Time) error
+}
+
+// SilenceRecorder persists a human 🔕 silence on a delivered investigation — the
+// verdict that suppresses re-investigating the same trigger for a window
+// (implemented by *outcome.Ledger). Kept SEPARATE from FeedbackRecorder rather
+// than widening it: a deployment may enable ratings without silencing, and the
+// server's nil-means-off guards must be able to express that per capability.
+type SilenceRecorder interface {
+	Silence(triggerKey string, window time.Duration, user string, at time.Time) error
 }
 
 // ThreadHandler processes a human message addressed to RunLore inside a thread.
@@ -175,6 +185,7 @@ type Actions struct {
 	Approvals    *action.Approvals
 	Pauser       Pauser
 	Feedback     FeedbackRecorder // opt-in 👍/👎 recording (notify.slack.feedback_buttons)
+	Silence      SilenceRecorder  // opt-in 🔕 silencing (notify.slack.silence_button)
 	Token        string
 	SlackSecret  string
 	WebhookToken string             // optional bearer token required on POST /webhook/alertmanager
@@ -204,7 +215,8 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	s := &Server{
 		ready:     ready,
 		approvals: acts.Approvals, pauser: liveIface(acts.Pauser), feedback: liveIface(acts.Feedback),
-		token: acts.Token, slackSecret: acts.SlackSecret,
+		silence: acts.Silence,
+		token:   acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
 		threads:          liveIface(acts.Threads),
@@ -399,11 +411,12 @@ type slackInteraction struct {
 // (unprivileged — an opinion, not a cluster mutation), updating the message via
 // response_url.
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	// The endpoint drives Approve/Reject on queued actions and the opt-in 👍/👎
-	// feedback; it stays 404 unless at least one is wired, so a deployment that
-	// enabled neither exposes no interactive callback at all. The signing secret
-	// stays mandatory: signature verification is never optional.
-	if (s.approvals == nil && s.feedback == nil) || s.slackSecret == "" {
+	// The endpoint drives Approve/Reject on queued actions, the opt-in 👍/👎
+	// feedback, and the opt-in 🔕 silence; it stays 404 unless at least one is
+	// wired, so a deployment that enabled none of them exposes no interactive
+	// callback at all. The signing secret stays mandatory: signature verification
+	// is never optional.
+	if (s.approvals == nil && s.feedback == nil && s.silence == nil) || s.slackSecret == "" {
 		http.Error(w, "slack interactions not enabled", http.StatusNotFound)
 		return
 	}

@@ -192,6 +192,11 @@ func RunServe(version string, args []string) error {
 	if cfg.Outcome.LedgerPath != "" {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath, "max_events", maxEvents)
 	}
+	// The silence cap lives on the ledger so there is ONE place the invariant
+	// holds: a Matrix `silence:` command is free text and must not be able to
+	// exceed what the Slack presets offer. Zero when silencing is off, which the
+	// ledger reads as uncapped — harmless, since nothing can then record one.
+	ledger.MaxSilenceWindow = cfg.Notify.Silence.MaxWindow.Std()
 	// Built ONCE and shared: a second Deps means a second catalog, hence a second
 	// git-sync goroutine racing the first on the same on-disk checkout.
 	deps := BuildDeps(ctx, cfg, gitops, metrics, ledger, log)
@@ -456,6 +461,16 @@ func RunServe(version string, args []string) error {
 		acts.Feedback = ledger
 		if SlackFeedbackDeliverable(cfg, log) {
 			log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
+		}
+	}
+	// Opt-in 🔕 silencing, wired on the same terms as feedback: the recorder is
+	// wired whenever a click could arrive, but the capability is only ANNOUNCED
+	// when a Slack message can actually carry the control.
+	if cfg.Notify.Slack.SilenceButton && ledger.Enabled() {
+		acts.Silence = ledger
+		if SlackFeedbackDeliverable(cfg, log) {
+			log.Info("slack silence button enabled", "endpoint", "/slack/interactions",
+				"windows", cfg.Notify.Silence.Std(), "max_window", cfg.Notify.Silence.MaxWindow.Std())
 		}
 	}
 	// Opt-in thread capture: wire the handler ONLY when the option is on, the

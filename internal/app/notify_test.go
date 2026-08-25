@@ -1248,3 +1248,34 @@ func mustPut(t *testing.T, reg *thread.Registry, tc thread.Context) {
 		t.Fatalf("Registry.Put(%q): %v", tc.Root, err)
 	}
 }
+
+// TestRecurrenceGateBuiltForSilenceWithoutACooldown pins the nil-gate trap.
+//
+// recurrence_cooldown defaults to 0. If the gate is only constructed when a
+// cooldown is set, a deployment that turned on silencing and nothing else gets a
+// nil gate — every click is durably recorded, the ack says it worked, and not one
+// investigation is ever suppressed. The failure is invisible from outside.
+func TestRecurrenceGateBuiltForSilenceWithoutACooldown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cooldown time.Duration
+		silence  bool
+		want     bool // is a gate expected?
+	}{
+		{name: "neither: no gate", want: false},
+		{name: "cooldown only", cooldown: time.Hour, want: true},
+		{name: "silence only — the regression", silence: true, want: true},
+		{name: "both", cooldown: time.Hour, silence: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Investigation.RecurrenceCooldown = config.Duration(tc.cooldown)
+			cfg.Notify.Slack.SilenceButton = tc.silence
+
+			got := recurrenceGateWanted(cfg)
+			if got != tc.want {
+				t.Errorf("recurrenceGateWanted() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
