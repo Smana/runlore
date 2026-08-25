@@ -3,6 +3,9 @@
 package investigate
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,26 +22,30 @@ func TestDecideSilence(t *testing.T) {
 	future := now.Add(2 * time.Hour)
 	past := now.Add(-2 * time.Hour)
 
+	// wantSkip pins suppressed() — the predicate Investigate actually branches on
+	// — independently of the decision name, so the silence arm cannot quietly stop
+	// skipping the paid loop while still reporting itself as silenced.
 	for _, tc := range []struct {
-		name  string
-		gate  *RecurrenceGate
-		req   Request
-		prior outcome.TriggerRecurrence
-		want  recurrenceDecision
+		name     string
+		gate     *RecurrenceGate
+		req      Request
+		prior    outcome.TriggerRecurrence
+		want     recurrenceDecision
+		wantSkip bool
 	}{
 		{
 			name:  "a standing silence suppresses, with the cooldown OFF",
 			gate:  &RecurrenceGate{Cooldown: 0},
 			req:   Request{TriggerKey: "k", Severity: "warning"},
 			prior: outcome.TriggerRecurrence{SilencedUntil: future},
-			want:  recurrenceSilenced,
+			want:  recurrenceSilenced, wantSkip: true,
 		},
 		{
 			name:  "a standing silence suppresses even with NO conclusive prior",
 			gate:  &RecurrenceGate{Cooldown: time.Hour},
 			req:   Request{TriggerKey: "k", Severity: "warning"},
 			prior: outcome.TriggerRecurrence{Count: 3, Last: now, SilencedUntil: future},
-			want:  recurrenceSilenced,
+			want:  recurrenceSilenced, wantSkip: true,
 		},
 		{
 			name:  "a LAPSED silence does not suppress",
@@ -84,8 +91,12 @@ func TestDecideSilence(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.gate.decide(tc.req, tc.prior, now); got != tc.want {
+			got := tc.gate.decide(tc.req, tc.prior, now)
+			if got != tc.want {
 				t.Errorf("decide() = %q, want %q", got, tc.want)
+			}
+			if got.suppressed() != tc.wantSkip {
+				t.Errorf("decision %q suppressed() = %v, want %v", got, got.suppressed(), tc.wantSkip)
 			}
 		})
 	}
@@ -221,5 +232,54 @@ func TestPruningALapsedSilenceChangesNoDecision(t *testing.T) {
 					gate.Cooldown, sev, got, want)
 			}
 		}
+	}
+}
+
+// TestInvestigateSkipsExactlyWhatSuppressedReports is the coupling between the
+// gate's vocabulary and what Investigate DOES with it. Investigate gates its early
+// return on decision.suppressed(); the switch that follows only picks the metric
+// label and the log line. Asserting the skip against suppressed() rather than
+// against a literal is the point — a decision added to suppressed() later has to
+// keep skipping the paid loop, not merely claim it did in a log line.
+func TestInvestigateSkipsExactlyWhatSuppressedReports(t *testing.T) {
+	now := time.Now()
+	gate := &RecurrenceGate{Cooldown: time.Hour}
+	for _, tc := range []struct {
+		name  string
+		prior outcome.TriggerRecurrence
+	}{
+		{"a human silence", outcome.TriggerRecurrence{
+			Count: 1, Last: now.Add(-time.Minute), SilencedUntil: now.Add(2 * time.Hour), SilencedAt: now}},
+		{"the machine cooldown", outcome.TriggerRecurrence{Count: 1, Last: now.Add(-time.Minute),
+			Verdict:    string(providers.VerdictNoAction),
+			Conclusive: outcome.ConclusivePrior{At: now.Add(-time.Minute), Verdict: string(providers.VerdictNoAction)}}},
+		{"neither: the cooldown has lapsed", outcome.TriggerRecurrence{Count: 1, Last: now.Add(-2 * time.Hour),
+			Verdict:    string(providers.VerdictNoAction),
+			Conclusive: outcome.ConclusivePrior{At: now.Add(-2 * time.Hour), Verdict: string(providers.VerdictNoAction)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := Request{Title: "t", TriggerKey: "k", Severity: "warning"}
+			wantSkip := gate.decide(req, tc.prior, time.Now()).suppressed()
+
+			model := &blockingModel{}
+			delivered := 0
+			li := &LoopInvestigator{
+				Model:          model,
+				Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+				OnComplete:     func(providers.Investigation) { delivered++ },
+				Recurrence:     gate,
+				TriggerHistory: fakeRecurrenceStats{tc.prior},
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			_ = li.Investigate(ctx, req)
+
+			if gotSkip := model.calls == 0; gotSkip != wantSkip {
+				t.Fatalf("model calls = %d (skipped=%v), but suppressed() = %v", model.calls, gotSkip, wantSkip)
+			}
+			if wantSkip && delivered != 0 {
+				t.Fatalf("OnComplete called %d times on a suppressed occurrence, want 0", delivered)
+			}
+		})
 	}
 }

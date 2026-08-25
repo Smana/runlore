@@ -437,38 +437,49 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// the last look of any kind, but only a STANDING conclusive answer earns
 	// suppression, and a standing 👎 re-arms investigation immediately.
 	prior := li.priorForTrigger(req.TriggerKey)
-	switch decision := li.Recurrence.decide(req, prior, time.Now()); decision {
-	case recurrenceSuppressed:
-		result = "recurrence_suppressed"
-		// Two groups of facts, deliberately distinct: what the LAST look was
-		// (occurrences/last_investigated/verdict/prev_url) and what the answer being
-		// stood on is (standing_*). Reading the standing KB link off Conclusive rather
-		// than off the newest open matters — in the #471 case the newest open is a
-		// mislabelled run that filed no PR, and if it filed a DIFFERENT one, prev_url
-		// points somewhere other than the answer justifying the suppression.
-		li.Log.Info("recurrence cooldown: suppressing re-investigation",
-			"title", req.Title, "trigger_key", req.TriggerKey,
-			"occurrences", prior.Count, "last_investigated", prior.Last,
-			"verdict", prior.Verdict, "prev_url", prior.CuratedURL,
-			"standing_answer", prior.Conclusive.Title, "standing_verdict", prior.Conclusive.Verdict,
-			"answered_at", prior.Conclusive.At, "standing_url", prior.Conclusive.CuratedURL)
+	decision := li.Recurrence.decide(req, prior, time.Now())
+	// ONE gate on whether the paid loop is skipped, asked of the decision itself.
+	// The switch below only picks the metric label and the log line — it never
+	// decides. Testing `== recurrenceSuppressed` here instead would mean a decision
+	// added to suppressed() later still ran the full investigation while every log
+	// line claimed it had been suppressed.
+	if decision.suppressed() {
+		switch decision {
+		case recurrenceSilenced:
+			// A distinct metric label from recurrence_suppressed, deliberately: an
+			// operator asking "why is RunLore quiet?" must be able to tell a machine
+			// decision from a human one on the dashboard alone. Spelled as a LITERAL,
+			// like every other result value — see recurrenceDecision's doc comment for
+			// why the internal name must never become the label.
+			result = "silenced"
+			// INFO, not DEBUG, for the same reason recurrenceNoAnswer is INFO: a human
+			// deliberately switched something off, and the operator who did not click it
+			// must be able to find out why the channel went quiet without raising log
+			// levels on a production deployment.
+			li.Log.Info("silenced by a human: skipping re-investigation",
+				"title", req.Title, "trigger_key", req.TriggerKey,
+				"silenced_until", prior.SilencedUntil,
+				"occurrences", prior.Count, "last_investigated", prior.Last)
+		default:
+			// recurrenceSuppressed, and any future machine reason: the label stays the
+			// documented dashboard value rather than gaining a per-reason variant.
+			result = "recurrence_suppressed"
+			// Two groups of facts, deliberately distinct: what the LAST look was
+			// (occurrences/last_investigated/verdict/prev_url) and what the answer being
+			// stood on is (standing_*). Reading the standing KB link off Conclusive rather
+			// than off the newest open matters — in the #471 case the newest open is a
+			// mislabelled run that filed no PR, and if it filed a DIFFERENT one, prev_url
+			// points somewhere other than the answer justifying the suppression.
+			li.Log.Info("recurrence cooldown: suppressing re-investigation",
+				"title", req.Title, "trigger_key", req.TriggerKey,
+				"occurrences", prior.Count, "last_investigated", prior.Last,
+				"verdict", prior.Verdict, "prev_url", prior.CuratedURL,
+				"standing_answer", prior.Conclusive.Title, "standing_verdict", prior.Conclusive.Verdict,
+				"answered_at", prior.Conclusive.At, "standing_url", prior.Conclusive.CuratedURL)
+		}
 		return nil
-	case recurrenceSilenced:
-		// A distinct metric label from recurrence_suppressed, deliberately: an
-		// operator asking "why is RunLore quiet?" must be able to tell a machine
-		// decision from a human one on the dashboard alone. Spelled as a LITERAL,
-		// like every other result value — see recurrenceDecision's doc comment for
-		// why the internal name must never become the label.
-		result = "silenced"
-		// INFO, not DEBUG, for the same reason recurrenceNoAnswer is INFO: a human
-		// deliberately switched something off, and the operator who did not click it
-		// must be able to find out why the channel went quiet without raising log
-		// levels on a production deployment.
-		li.Log.Info("silenced by a human: skipping re-investigation",
-			"title", req.Title, "trigger_key", req.TriggerKey,
-			"silenced_until", prior.SilencedUntil,
-			"occurrences", prior.Count, "last_investigated", prior.Last)
-		return nil
+	}
+	switch decision {
 	case recurrenceNoAnswer:
 		// The one bypass worth saying out loud at INFO: the trigger fired again inside
 		// its cooldown and we paid for a full investigation anyway, because no prior run

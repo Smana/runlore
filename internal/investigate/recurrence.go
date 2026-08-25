@@ -109,9 +109,15 @@ const (
 )
 
 // suppressed reports whether d is a decision that skips the paid loop. Two now
-// do: the machine's cooldown and the human's silence. Callers must never test
-// `== recurrenceSuppressed` directly, or the human branch silently stops
-// suppressing while every log line still claims it decided.
+// do: the machine's cooldown and the human's silence.
+//
+// This is the ONLY test of that question in the tree, by construction rather
+// than by convention: LoopInvestigator.Investigate gates its early return on it
+// and switches on the individual constants afterwards purely to pick the metric
+// label and the log line. Gating on `== recurrenceSuppressed` instead would mean
+// a decision added here later still bought a full investigation while every log
+// line claimed it had been suppressed — which is precisely the failure the named
+// decisions exist to make visible.
 func (d recurrenceDecision) suppressed() bool {
 	return d == recurrenceSuppressed || d == recurrenceSilenced
 }
