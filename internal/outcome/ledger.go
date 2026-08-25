@@ -600,6 +600,23 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 // while now < SilencedUntil, so an entry with until <= now can no longer suppress
 // anything and removing it is invisible to every reader. That equality is what
 // makes this a prune rather than a policy — see Ledger.silences.
+//
+// Correctness assumes decide()'s now is never earlier than the now used at the
+// most recent call to this function (loadLocked on New/Reload, or compactLocked):
+// an entry dropped as lapsed here is gone for good, so an earlier now would find no
+// standing silence where a fresh replay at that now still would. That holds today
+// because the only production caller, internal/investigate/loop.go, reads
+// time.Now() at request time — strictly after the time.Now() this ran with, since
+// wall-clock time only moves forward within a process.
+//
+// This is also the first wall-clock read inside a ledger fold. loadLocked and
+// compactLocked used to be a pure function of the file's event sequence alone (see
+// OpenCounts's "equal to a fresh full replay for any event sequence"), and folding
+// the same file at two different times can now leave the silences map with
+// slightly different entries. Benign — every entry the difference can touch is
+// already lapsed and inert to every reader — but it ends that purity, and the next
+// reader relying on "same file in, same state out" should know it no longer holds
+// exactly.
 func (l *Ledger) pruneLapsedSilencesLocked(now time.Time) int {
 	dropped := 0
 	for tk, s := range l.silences {
@@ -1532,10 +1549,9 @@ func (l *Ledger) SetMaxSilenceWindow(d time.Duration) {
 //
 // Validation is deliberately at the write, not the caller: window must be positive
 // and within the cap SetMaxSilenceWindow installed, so a Matrix `silence:` command
-// (free text) cannot
-// exceed what the Slack presets offer. triggerKey must be non-empty — with nothing
-// to key the suppression on there is nothing for the gate to read back, and a line
-// that can never be read is worse than a refused write.
+// (free text) cannot exceed what the Slack presets offer. triggerKey must be
+// non-empty — with nothing to key the suppression on there is nothing for the gate
+// to read back, and a line that can never be read is worse than a refused write.
 //
 // Durable-first, like Open/Resolve/Feedback: a failed append leaves the fold
 // untouched. Attribution is entirely TriggerKey-based; user is recorded for the
