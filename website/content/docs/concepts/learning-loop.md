@@ -714,9 +714,10 @@ this ahead of the cooldown also means a silence reaches the one case the cooldow
 refuses to touch: a trigger that has *never* concluded, which the cooldown always lets
 through (there is no answer to stand on) but which a human may still want quiet — a vendor
 ticket already open on a known-flaky, still-inconclusive check being the obvious case. The
-two share every human escape hatch (a 👎, a resolve) but are otherwise independent: a
-silence works with the cooldown at `0`, and expires on its own even if the cooldown never
-would.
+two share the 👎 escape (both read `prior.Contested()`) but not the resolve one — a resolve
+clears the silence outright while the cooldown keeps counting from the last investigation
+regardless. Otherwise independent: a silence works with the cooldown at `0`, and expires on
+its own even if the cooldown never would.
 
 **Past the cooldown, the agent is told what it already concluded.** A recurrence
 that outlives its cooldown gets a deliberate fresh look — but not a blind one: the
