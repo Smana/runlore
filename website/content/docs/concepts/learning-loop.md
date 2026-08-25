@@ -359,6 +359,16 @@ Two read APIs turn this raw log into a learning signal:
   weigh nothing), deduplicated to **one live vote per (trigger key, user)** —
   a duplicate click is idempotent, changing your mind *moves* the vote — and folded
   into `OpenCounts()` as per-entry `FeedbackUp` / `FeedbackDown`.
+- **`Silence()`** appends a human **`silence`** event — the 🔕 control beside 👍/👎 (opt-in,
+  `notify.slack.silence_button` or `notify.matrix.silence_reactions`; see
+  [configuration.md]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}})). It is the **third**
+  feedback verdict, and unlike the other two it does not weigh anything: 👍/👎 are *opinions* about
+  a diagnosis that feed the decay math below, while a silence is a *decision* that suppresses
+  re-investigating the trigger's key outright — see §6's recurrence-cooldown discussion for the
+  gate it shares. A silence does **not** currently feed the curator: "this trigger is known-noisy"
+  is a genuine signal about an entry, but wiring it in without real data would mean guessing its
+  weight, and a wrong weight silently distorts recall trust — deliberately deferred until there is
+  evidence from real silences to weigh it by.
 
 Design choices worth calling out:
 
@@ -694,6 +704,19 @@ design: a trigger that has **never** concluded is re-investigated on every firin
 investigation immediately. So feedback does two jobs: it weighs *recalled knowledge*
 (the decay above) and it governs *when the agent may repeat itself* — both steered
 by the same single human 👍/👎 signal.
+
+**A standing 🔕 silence is checked first, before the cooldown itself.** The same
+`RecurrenceGate` that enforces the cooldown also enforces a human 🔕 (§4 above): whenever
+`SilencedUntil` on the trigger's snapshot is still in the future, the firing is suppressed
+regardless of whether `recurrence_cooldown` is even configured — deliberately, since the
+cooldown defaults to **off** and a silence must still work on a default install. Ordering
+this ahead of the cooldown also means a silence reaches the one case the cooldown itself
+refuses to touch: a trigger that has *never* concluded, which the cooldown always lets
+through (there is no answer to stand on) but which a human may still want quiet — a vendor
+ticket already open on a known-flaky, still-inconclusive check being the obvious case. The
+two share every human escape hatch (a 👎, a resolve) but are otherwise independent: a
+silence works with the cooldown at `0`, and expires on its own even if the cooldown never
+would.
 
 **Past the cooldown, the agent is told what it already concluded.** A recurrence
 that outlives its cooldown gets a deliberate fresh look — but not a blind one: the

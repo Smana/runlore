@@ -4,8 +4,8 @@ weight: 401
 integration: {kind: notifier, id: slack}
 ---
 
-**What it gives you** — findings delivered to a channel, with optional Approve/Reject buttons and
-one-click 👍/👎 diagnosis feedback.
+**What it gives you** — findings delivered to a channel, with optional Approve/Reject buttons,
+one-click 👍/👎 diagnosis feedback, and a 🔕 control to silence a known incident.
 
 ## Minimal config
 
@@ -48,18 +48,21 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
   *does* carry interaction buttons: incoming webhooks follow the same messaging rules as
   `chat.postMessage`, and a click is answered through the interaction's `response_url`, so neither
   Approve/Reject nor `feedback_buttons` needs a bot token.
-- **Approve/Reject buttons** (`actions.mode: approve`) and **`feedback_buttons`** (opt-in 👍/👎 rating)
-  both need `signing_secret_env` set **and** the same exposure: Slack **Interactivity** turned on, with
-  Request URL `https://<your-runlore-host>/slack/interactions` reachable **from Slack's servers**.
+- **Approve/Reject buttons** (`actions.mode: approve`), **`feedback_buttons`** (opt-in 👍/👎 rating)
+  and **`silence_button`** (opt-in 🔕 control — see [Silence a recurring
+  incident](#silence-a-recurring-incident) below) all need `signing_secret_env` set **and** the same
+  exposure: Slack **Interactivity** turned on, with Request URL
+  `https://<your-runlore-host>/slack/interactions` reachable **from Slack's servers**.
   - `api.slack.com/apps` → your app → **Interactivity & Shortcuts** → toggle **On**, Request URL =
     `https://<your-runlore-host>/slack/interactions`.
-  - Read-only deployments (no actions, no feedback buttons) need none of this.
+  - Read-only deployments (no actions, no feedback buttons, no silence button) need none of this.
   - Route it through your ingress/gateway; if you use the chart's `networkPolicy.ingressFrom`, allow
     your ingress controller, not the internet.
 - `feedback_buttons: true` also requires `outcome.ledger_path` **and a delivery target**
   (`webhook_url_env`, or `bot_token_env` with `channel`) — startup fails loud otherwise, since a button
   only exists on a message RunLore actually delivered. Ratings land in the outcome ledger and weigh the
-  recalled entry's trust, exactly like resolve signals do.
+  recalled entry's trust, exactly like resolve signals do. `silence_button` has the identical
+  requirement, for the identical reason — its control lives on the same message.
 - Mount the credential too: an env var that is set but **empty** skips the Slack notifier altogether —
   nothing is delivered, no buttons render, no rating can be recorded. Validation cannot see that, so
   startup warns (`no slack delivery target resolved`) instead of reporting the feature enabled.
@@ -67,6 +70,65 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
   (approve/reject keep their own `approver_ids` allowlist). One live vote per (trigger key, Slack user);
   latest wins.
 - `signing_secret_env` HMAC-verifies every button click (±5 min replay window).
+
+### Silence a recurring incident
+
+**`notify.slack.silence_button` (opt-in, default `false`)** adds a third control to investigation
+messages, beside 👍/👎: a 🔕 overflow menu offering the durations listed in `notify.silence.windows`
+(e.g. `1h`, `4h`, `24h`). Where a 👍/👎 records an *opinion* about the diagnosis, picking a window
+from the 🔕 menu changes what RunLore **does**: it suppresses re-investigating this exact
+`TriggerKey` for the chosen window — **no model call, no notification, no ledger open** — enforced in
+`RecurrenceGate.decide` before the paid investigation loop even starts. It works even with
+`investigation.recurrence_cooldown` left at its default of `0` (off): the human silence check and the
+machine cooldown are independent, and the silence is checked first.
+
+The silence stands until one of **four** things happens:
+
+- the window **expires**;
+- the incident fires again as **CRITICAL** — a silence never mutes a page, the same carve-out the
+  debouncer makes for criticals;
+- a colleague casts a standing **👎** on the trigger — a human contesting the diagnosis outranks an
+  earlier human silencing it, and re-arms investigation immediately;
+- the incident **resolves** — a resolve clears the silence outright, so the next occurrence gets a
+  fresh look.
+
+The click is acknowledged with a message naming who silenced it, until when, and restating the escapes
+above, so nobody has to guess why the channel went quiet.
+
+Like `feedback_buttons`, silencing is deliberately **unprivileged**: any signature-valid member of
+your workspace can silence an incident — there is no `approver_ids`-style allowlist. That is safe
+because the blast radius is bounded four independent ways (the escapes above), every silence is
+attributed to the clicking Slack user's id in the outcome ledger (so a bad click is auditable, not
+anonymous), and the window itself is capped by `notify.silence.max_window` — nothing can be silenced
+indefinitely.
+
+```yaml
+notify:
+  silence:
+    windows: [1h, 4h, 24h]
+    max_window: 24h
+  slack:
+    silence_button: true
+    signing_secret_env: SLACK_SIGNING_SECRET
+outcome:
+  ledger_path: /data/outcome.jsonl
+```
+
+`silence_button` is gated **independently** of `feedback_buttons` — a deployment can enable either
+without the other, and each renders only its own control on the card. With `feedback_buttons: false`
+and `silence_button: true`, an investigation message shows the 🔕 menu and nothing else.
+
+**The button is not the only way in.** With `thread_capture` also on (see below), replying
+`@runlore silence: 4h` in the investigation thread does exactly what the button does — same parser,
+same ledger write, same acknowledgement — because Slack's thread mentions and the 🔕 button both
+route through the one shared `thread.Responder`. That command path is gated on
+`notify.silence` being enabled at all (either `silence_button` here **or** Matrix's
+`silence_reactions` — whichever transport you turned it on for) plus Slack's own `thread_capture`,
+**not** specifically on `silence_button` — so a deployment running `thread_capture: true` with
+`silence_button: false` still accepts `silence: 4h` typed in a thread, as long as silencing is
+enabled somewhere. See [Matrix → Silence a recurring
+incident]({{< relref "matrix.md#silence-a-recurring-incident" >}}) for the same command in detail —
+the grammar and the ledger write are identical across both transports.
 
 ### Write knowledge back from a thread
 

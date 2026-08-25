@@ -331,10 +331,25 @@ config:
   #     #   exposed POST /slack/events endpoint and must be signature-verified, same as
   #     #   feedback_buttons above). Startup fails loud if either is missing; that endpoint
   #     #   404s whenever this is off.
+  #     # silence_button: true          # OPT-IN 🔕: a third control beside 👍/👎 that suppresses
+  #     #   re-investigating this TriggerKey for a chosen window (notify.silence.windows below) —
+  #     #   no model call, no notification, no ledger open — until it expires, a CRITICAL fires, a
+  #     #   👎 lands, or the incident resolves. Gated INDEPENDENTLY of feedback_buttons: enabling
+  #     #   one does not render the other. Same requirements as feedback_buttons (signing_secret_env
+  #     #   + a delivery target), plus notify.silence and outcome.ledger_path below.
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
   #   # matrix.feedback_reactions: true  # OPT-IN 👍/👎 reactions feeding the learning loop.
   #   #   ZERO-INGRESS (outbound /sync long-poll — nothing to expose, unlike Slack buttons).
   #   #   Requires outcome.ledger_path; use an invite-only room (any member can vote).
+  #   # matrix.silence_reactions: true   # OPT-IN: a 🔕 reaction silences at notify.silence.windows[0]
+  #   #   (a bare reaction carries no duration). A `silence: <duration>` thread command offering the
+  #   #   full choice also needs matrix.thread_capture on. Gated independently of feedback_reactions,
+  #   #   sharing the same listener. Requires outcome.ledger_path and notify.silence below.
+  #   # OPT-IN: shared presets for the 🔕 control above, on either transport. Requires
+  #   # outcome.ledger_path and at least one of slack.silence_button / matrix.silence_reactions.
+  #   # silence:
+  #   #   windows: [1h, 4h, 24h]   # presets offered; windows[0] is also the Matrix-reaction default
+  #   #   max_window: 24h         # hard cap every window (and every silence: command) must respect
   #   webhook:
   #     url_env: RUNLORE_WEBHOOK_NOTIFY_URL   # POST findings JSON to this URL
   # forge:
