@@ -2288,6 +2288,7 @@ notify:
     windows: [1h, 4h, 24h]
     max_window: 24h
   slack:
+    webhook_url_env: SLACK_WEBHOOK_URL   # or bot_token_env + channel — either delivery target works
     silence_button: true
     signing_secret_env: SLACK_SIGNING_SECRET
 outcome:
