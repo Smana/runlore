@@ -50,7 +50,8 @@ type RecurrenceStats interface {
 //
 // The gate is deliberately human-deferential in the other direction too: a standing
 // 👎 on the trigger breaks the cooldown immediately — a human saying "that diagnosis
-// is wrong" re-arms the very next occurrence.
+// is wrong" re-arms the very next occurrence. Against a 🔕 SILENCE the same 👎 is
+// weighed by RECENCY rather than taken as an absolute veto: see decide.
 //
 // A suppressed occurrence makes no model call, sends no notification, and
 // records no ledger open. (It does still consume a workqueue turn and a
@@ -139,8 +140,20 @@ func (g *RecurrenceGate) decide(req Request, prior outcome.TriggerRecurrence, no
 	// become true AFTER a silence was recorded: a CRITICAL firing (a silence must
 	// never mute a page — the same carve-out the debouncer makes, see
 	// source/debounce.go) and a standing 👎 (a colleague saying the diagnosis is
-	// wrong, read through the ONE shared definition of contested-ness, #288).
-	if now.Before(prior.SilencedUntil) && !req.IsCritical() && !prior.Contested() {
+	// wrong).
+	//
+	// The 👎 escape is read through SilenceOutranksFeedback, NOT through
+	// Contested() alone, and the difference is the whole feature working or not.
+	// Contested() compares no timestamps — it is `FeedbackDown > 0` — so reading it
+	// bare made a 👎 cast on Monday outrank a 🔕 clicked on Tuesday forever: the
+	// click was written to the ledger, the human was acked "RunLore will NOT
+	// investigate this incident", and every firing re-investigated anyway. NEWEST
+	// HUMAN WINS instead: a silence recorded after the newest standing 👎
+	// suppresses, a 👎 cast after a silence re-arms, mirroring the latest-wins rule
+	// silences already use among themselves. Contested() keeps its meaning for the
+	// coalescer and the prompt-replay path (#288) — the ordering is added beside
+	// it, in outcome, never folded into it.
+	if now.Before(prior.SilencedUntil) && !req.IsCritical() && prior.SilenceOutranksFeedback() {
 		return recurrenceSilenced
 	}
 	if g.Cooldown <= 0 {

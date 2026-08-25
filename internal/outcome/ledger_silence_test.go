@@ -238,3 +238,143 @@ func TestSilenceNilReceiverIsSafe(t *testing.T) {
 		t.Fatalf("Silence on a nil *Ledger returned %v, want nil (quiet no-op)", err)
 	}
 }
+
+// TestNewestHumanWinsBetweenFeedbackAndSilence pins the ordering rule the
+// suppression gate reads: a silence recorded AFTER the newest standing 👎
+// outranks it, and a 👎 cast AFTER a silence outranks that. The snapshot has to
+// carry both timestamps for the gate to be able to tell, which is exactly what
+// was missing — Contested() compares no times at all, so a Monday 👎 outranked
+// every later silence forever.
+func TestNewestHumanWinsBetweenFeedbackAndSilence(t *testing.T) {
+	t.Run("a silence recorded after the thumbs-down is the newer human", func(t *testing.T) {
+		l := newTestLedger(t)
+		mon := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+		if err := l.Feedback("k", "down", "U1", mon); err != nil {
+			t.Fatalf("Feedback: %v", err)
+		}
+		if err := l.Silence("k", 24*time.Hour, "U2", mon.Add(24*time.Hour)); err != nil {
+			t.Fatalf("Silence: %v", err)
+		}
+		r := l.Recurrence("k")
+		if r.FeedbackDown != 1 {
+			t.Fatalf("FeedbackDown = %d, want 1 (Contested must keep its meaning)", r.FeedbackDown)
+		}
+		if !r.FeedbackDownLatest.Equal(mon) {
+			t.Errorf("FeedbackDownLatest = %v, want %v", r.FeedbackDownLatest, mon)
+		}
+		if !r.SilencedAt.Equal(mon.Add(24 * time.Hour)) {
+			t.Errorf("SilencedAt = %v, want %v", r.SilencedAt, mon.Add(24*time.Hour))
+		}
+		if !r.SilenceOutranksFeedback() {
+			t.Error("SilenceOutranksFeedback() = false, want true — the silence is the newer human")
+		}
+	})
+
+	t.Run("a thumbs-down cast after the silence re-arms it", func(t *testing.T) {
+		l := newTestLedger(t)
+		now := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+		if err := l.Silence("k", 24*time.Hour, "U2", now); err != nil {
+			t.Fatalf("Silence: %v", err)
+		}
+		if err := l.Feedback("k", "down", "U1", now.Add(time.Hour)); err != nil {
+			t.Fatalf("Feedback: %v", err)
+		}
+		if r := l.Recurrence("k"); r.SilenceOutranksFeedback() {
+			t.Error("SilenceOutranksFeedback() = true, want false — the 👎 is the newer human")
+		}
+	})
+
+	t.Run("a repeat thumbs-down after a silence still re-arms it", func(t *testing.T) {
+		// The vote's fold is idempotent on the AGGREGATE, but its TIME must still
+		// move: re-clicking 👎 after a silence is a fresh human refusal, and freezing
+		// the timestamp at the first click would leave the silence outranking it.
+		l := newTestLedger(t)
+		now := time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+		if err := l.Feedback("k", "down", "U1", now); err != nil {
+			t.Fatalf("Feedback: %v", err)
+		}
+		if err := l.Silence("k", 24*time.Hour, "U2", now.Add(time.Hour)); err != nil {
+			t.Fatalf("Silence: %v", err)
+		}
+		if err := l.Feedback("k", "down", "U1", now.Add(2*time.Hour)); err != nil {
+			t.Fatalf("Feedback (repeat): %v", err)
+		}
+		r := l.Recurrence("k")
+		if r.FeedbackDown != 1 {
+			t.Errorf("FeedbackDown = %d, want 1 — a repeat vote must not stack", r.FeedbackDown)
+		}
+		if r.SilenceOutranksFeedback() {
+			t.Error("SilenceOutranksFeedback() = true, want false — the repeat 👎 is the newest human")
+		}
+	})
+
+	t.Run("an unknown ordering leaves the thumbs-down standing", func(t *testing.T) {
+		// A checkpoint written before either timestamp existed replays a live 👎 with
+		// a zero time. Unknown ordering must degrade to "the 👎 wins" — RunLore
+		// investigates — never to a silence that cannot be argued for.
+		var r TriggerRecurrence
+		r.FeedbackDown = 1
+		r.SilencedAt = time.Date(2026, 8, 24, 9, 0, 0, 0, time.UTC)
+		if r.SilenceOutranksFeedback() {
+			t.Error("SilenceOutranksFeedback() = true with an unknown 👎 time, want false")
+		}
+		r.FeedbackDownLatest = r.SilencedAt.Add(-time.Hour)
+		r.SilencedAt = time.Time{}
+		if r.SilenceOutranksFeedback() {
+			t.Error("SilenceOutranksFeedback() = true with an unknown silence time, want false")
+		}
+	})
+
+	t.Run("no thumbs-down at all: nothing to outrank", func(t *testing.T) {
+		var r TriggerRecurrence
+		if !r.SilenceOutranksFeedback() {
+			t.Error("SilenceOutranksFeedback() = false with no 👎 standing, want true")
+		}
+	})
+}
+
+// TestVoteAndSilenceTimesSurviveCompaction is the load-bearing round-trip: both
+// timestamps live only in the checkpoint once their events fall past the
+// horizon, and losing either silently flips the ordering rule. THREE loads, for
+// the reason TestSilenceSurvivesCompaction states.
+func TestVoteAndSilenceTimesSurviveCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.jsonl")
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	l, err := NewWithMaxEvents(path, 8)
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents: %v", err)
+	}
+	if err := l.Feedback("k", "down", "U1", now); err != nil {
+		t.Fatalf("Feedback: %v", err)
+	}
+	if err := l.Silence("k", 24*time.Hour, "U2", now.Add(time.Hour)); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		if err := l.Open(Event{Fingerprint: "fp", Title: "noise", At: now}); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+	}
+
+	compacting, err := NewWithMaxEvents(path, 8) // folds all 22, THEN rewrites the file
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents (compacting load): %v", err)
+	}
+	_ = compacting
+
+	replayed, err := NewWithMaxEvents(path, 8) // reads [checkpoint][tail] — the real assertion
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents (replaying load): %v", err)
+	}
+	r := replayed.Recurrence("k")
+	if !r.FeedbackDownLatest.Equal(now) {
+		t.Errorf("after compaction FeedbackDownLatest = %v, want %v — the checkpoint dropped the vote time", r.FeedbackDownLatest, now)
+	}
+	if !r.SilencedAt.Equal(now.Add(time.Hour)) {
+		t.Errorf("after compaction SilencedAt = %v, want %v — the checkpoint dropped the silence time", r.SilencedAt, now.Add(time.Hour))
+	}
+	if !r.SilenceOutranksFeedback() {
+		t.Error("after compaction the silence no longer outranks the older 👎")
+	}
+}

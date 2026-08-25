@@ -105,3 +105,66 @@ func TestDecideSilenceDoesNotDisturbTheCooldown(t *testing.T) {
 		t.Errorf("decide() = %q, want %q — the cooldown ladder changed", got, recurrenceSuppressed)
 	}
 }
+
+// TestDecideSilenceVersusFeedbackOrdering pins NEWEST HUMAN WINS at the gate.
+// Before it, decide read prior.Contested() — which compares no timestamps — so a
+// 👎 cast once outranked every later silence permanently: the click was recorded,
+// the human was told "RunLore will NOT investigate this incident", and every
+// firing re-investigated anyway.
+func TestDecideSilenceVersusFeedbackOrdering(t *testing.T) {
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	future := now.Add(2 * time.Hour)
+	monday := now.Add(-48 * time.Hour)
+	tuesday := now.Add(-24 * time.Hour)
+
+	for _, tc := range []struct {
+		name     string
+		severity string
+		prior    outcome.TriggerRecurrence
+		want     recurrenceDecision
+	}{
+		{
+			name:     "the silence is newer than the standing thumbs-down: it suppresses",
+			severity: "warning",
+			prior: outcome.TriggerRecurrence{
+				SilencedUntil: future, SilencedAt: tuesday,
+				FeedbackDown: 1, FeedbackDownLatest: monday,
+			},
+			want: recurrenceSilenced,
+		},
+		{
+			name:     "the thumbs-down is newer than the silence: it re-arms",
+			severity: "warning",
+			prior: outcome.TriggerRecurrence{
+				SilencedUntil: future, SilencedAt: monday,
+				FeedbackDown: 1, FeedbackDownLatest: tuesday,
+			},
+			want: recurrenceOff,
+		},
+		{
+			name:     "an unknown ordering leaves the thumbs-down standing",
+			severity: "warning",
+			prior: outcome.TriggerRecurrence{
+				SilencedUntil: future, SilencedAt: tuesday, FeedbackDown: 1,
+			},
+			want: recurrenceOff,
+		},
+		{
+			name:     "a newer silence still loses to a CRITICAL firing",
+			severity: "critical",
+			prior: outcome.TriggerRecurrence{
+				SilencedUntil: future, SilencedAt: tuesday,
+				FeedbackDown: 1, FeedbackDownLatest: monday,
+			},
+			want: recurrenceOff,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &RecurrenceGate{Cooldown: 0}
+			req := Request{TriggerKey: "k", Severity: tc.severity}
+			if got := g.decide(req, tc.prior, now); got != tc.want {
+				t.Errorf("decide() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

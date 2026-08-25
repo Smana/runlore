@@ -713,10 +713,14 @@ cooldown defaults to **off** and a silence must still work on a default install.
 this ahead of the cooldown also means a silence reaches the one case the cooldown itself
 refuses to touch: a trigger that has *never* concluded, which the cooldown always lets
 through (there is no answer to stand on) but which a human may still want quiet — a vendor
-ticket already open on a known-flaky, still-inconclusive check being the obvious case. The
-two share the 👎 escape (both read `prior.Contested()`) but not the resolve one — a resolve
-clears the silence outright while the cooldown keeps counting from the last investigation
-regardless. Otherwise independent: a silence works with the cooldown at `0`, and expires on
+ticket already open on a known-flaky, still-inconclusive check being the obvious case. Both
+yield to a standing 👎, but not in the same way: the cooldown treats one as an absolute
+veto, while a silence weighs it by **recency** — newest human wins, so a 🔕 recorded
+*after* the newest standing 👎 still suppresses, and a 👎 cast *after* a 🔕 re-arms
+investigation immediately. (That escape only exists where a 👍/👎 control is actually
+enabled on some transport — see the Slack and Matrix pages.) They do not share the resolve
+escape at all: a resolve clears the silence outright while the cooldown keeps counting from
+the last investigation regardless. Otherwise independent: a silence works with the cooldown at `0`, and expires on
 its own even if the cooldown never would.
 
 **Past the cooldown, the agent is told what it already concluded.** A recurrence

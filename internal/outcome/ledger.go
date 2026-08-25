@@ -173,8 +173,8 @@ type Ledger struct {
 	// OutcomeFloor. Folded on replay like agg; checkpointed on compaction.
 	votes map[string]feedbackVote
 
-	// silences holds the expiry of the standing human silence per TriggerKey — the
-	// 🔕 verdict, which suppresses re-investigation rather than weighing an entry.
+	// silences holds the standing human silence per TriggerKey — the 🔕 verdict,
+	// which suppresses re-investigation rather than weighing an entry.
 	//
 	// LATEST WINS, keyed by TriggerKey ALONE. This is deliberately unlike votes,
 	// which dedup per (TriggerKey, user) because ratings AGGREGATE: a silence is one
@@ -182,7 +182,7 @@ type Ledger struct {
 	// including shortening or effectively lifting a colleague's. Rebuilt on load and
 	// checkpointed on compaction like votes; a lapsed entry is inert (see Recurrence)
 	// and pruned opportunistically rather than swept by a timer.
-	silences map[string]time.Time
+	silences map[string]silenceState
 
 	// MaxSilenceWindow caps what Silence accepts (zero = uncapped). Set by the serve
 	// wiring from notify.silence.max_window. It lives HERE, not in each caller, so
@@ -250,7 +250,18 @@ type checkpointData struct {
 	// checkpoint written before this field existed; a replay then reconstructs from the
 	// retained tail only, which degrades to "no silence stands" — conservative
 	// (RunLore investigates), never the reverse.
-	Silences        map[string]time.Time `json:"silences,omitempty"`
+	Silences map[string]time.Time `json:"silences,omitempty"`
+	// SilencedAt carries WHEN each standing silence was recorded, the comparison key
+	// behind TriggerRecurrence.SilenceOutranksFeedback ("newest human wins"). It is a
+	// SIBLING map rather than a field folded into Silences above on purpose: a
+	// checkpoint line that fails to decode takes every other aggregate down with it, so
+	// widening an existing map's VALUE type from a bare timestamp to an object would
+	// turn any checkpoint written by an earlier build into one unreadable line that
+	// drops agg, byTrigger and the open index too. Two additive maps cost one extra
+	// key and cannot fail that way. Absent from an older checkpoint; a replay then
+	// reads a zero recorded-at, which SilenceOutranksFeedback treats as unknown
+	// ordering and resolves in the 👎's favour — conservative (RunLore investigates).
+	SilencedAt      map[string]time.Time `json:"silenced_at,omitempty"`
 	TriggerConfirms map[string]int       `json:"trigger_confirms,omitempty"`
 	DroppedResolves int                  `json:"dropped_resolves,omitempty"`
 	StaleResolves   int                  `json:"stale_resolves,omitempty"`
@@ -283,6 +294,13 @@ type triggerAggJSON struct {
 type feedbackVoteJSON struct {
 	Rating string `json:"rating"`
 	Entry  string `json:"entry,omitempty"`
+	// At mirrors feedbackVote.at — when the vote was cast. Without it a compaction
+	// silently strips every live vote of its timestamp and the newest-human-wins
+	// comparison loses its left-hand side. omitzero (not omitempty, which does not
+	// apply to a struct) keeps it out of the file for a vote replayed from a
+	// checkpoint written before this field existed; that reads back as zero, which
+	// SilenceOutranksFeedback resolves in the 👎's favour.
+	At time.Time `json:"at,omitzero"`
 }
 
 type pendingOpenJSON struct {
@@ -312,6 +330,23 @@ type triggerAgg struct {
 type feedbackVote struct {
 	rating string // "up" | "down"
 	entry  string // agg key credited; "" when the newest open was fresh (nothing credited)
+	// at is WHEN this vote was cast, and it exists for one reason: a 👎 and a 🔕 are
+	// both standing human decisions about the same trigger that say opposite things,
+	// so deciding between them needs their order. See
+	// TriggerRecurrence.SilenceOutranksFeedback. It advances on a repeat click of the
+	// SAME rating even though the aggregate does not — re-clicking 👎 after a silence
+	// is a fresh refusal, not a no-op.
+	at time.Time
+}
+
+// silenceState is the fold state of the standing 🔕 on one trigger: when a human
+// recorded it, and when it lapses. The recorded-at half is not decoration — it is
+// the comparison key that decides a standing 👎 and a standing 🔕 against each
+// other (newest human wins), which an expiry alone cannot answer: a long window
+// clicked minutes ago and a short one clicked last week can share an expiry.
+type silenceState struct {
+	at    time.Time // when the human recorded it
+	until time.Time // at + the chosen window; the expiry the gate compares against now
 }
 
 // maxPendingResolvesPerFingerprint bounds the resolve-before-open buffer per
@@ -438,7 +473,7 @@ func (l *Ledger) resetStateLocked() {
 	l.pendingResolves = map[string][]time.Time{}
 	l.byTrigger = map[string]triggerAgg{}
 	l.votes = map[string]feedbackVote{}
-	l.silences = map[string]time.Time{}
+	l.silences = map[string]silenceState{}
 	l.triggerConfirms = map[string]int{}
 	l.droppedResolves = 0
 	l.staleResolves = 0
@@ -501,10 +536,10 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive}
 	}
 	for k, v := range cd.Votes {
-		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
+		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry, at: v.At}
 	}
 	for k, v := range cd.Silences {
-		l.silences[k] = v
+		l.silences[k] = silenceState{at: cd.SilencedAt[k], until: v}
 	}
 	for k, v := range cd.TriggerConfirms {
 		l.triggerConfirms[k] = v
@@ -569,13 +604,15 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 	if len(l.votes) > 0 {
 		cd.Votes = make(map[string]feedbackVoteJSON, len(l.votes))
 		for k, v := range l.votes {
-			cd.Votes[k] = feedbackVoteJSON{Rating: v.rating, Entry: v.entry}
+			cd.Votes[k] = feedbackVoteJSON{Rating: v.rating, Entry: v.entry, At: v.at}
 		}
 	}
 	if len(l.silences) > 0 {
 		cd.Silences = make(map[string]time.Time, len(l.silences))
+		cd.SilencedAt = make(map[string]time.Time, len(l.silences))
 		for k, v := range l.silences {
-			cd.Silences[k] = v
+			cd.Silences[k] = v.until
+			cd.SilencedAt[k] = v.at
 		}
 	}
 	if len(l.triggerConfirms) > 0 {
@@ -935,6 +972,10 @@ type TriggerRecurrence struct {
 	Verdict      string // newest open's verdict ("" for pre-verdict events)
 	CuratedURL   string
 	FeedbackDown int // LIVE 👎 votes for this trigger, after per-user dedup
+	// FeedbackDownLatest is when the NEWEST live 👎 on this trigger was cast; zero
+	// when none stands (or when it was replayed from a checkpoint written before
+	// votes carried a time). Paired with SilencedAt by SilenceOutranksFeedback.
+	FeedbackDownLatest time.Time
 	// Conclusive is the newest prior that actually ANSWERED — not necessarily the
 	// newest one. Zero value when this trigger has never concluded.
 	Conclusive ConclusivePrior
@@ -942,6 +983,11 @@ type TriggerRecurrence struct {
 	// zero when none stands. Read by the suppression gate, which compares it against
 	// now — a lapsed silence is simply inert, never swept.
 	SilencedUntil time.Time
+	// SilencedAt is when that silence was RECORDED. It is carried alongside the
+	// expiry because the expiry cannot order two humans: a 24h silence clicked an
+	// hour ago and a 1h one clicked yesterday say different things about who spoke
+	// last while both being live. See SilenceOutranksFeedback.
+	SilencedAt time.Time
 }
 
 // ConclusivePrior is the newest investigation of a trigger whose verdict was an
@@ -964,6 +1010,39 @@ type ConclusivePrior struct {
 // different notions of contested-ness is exactly the divergence that issue was
 // about; add nuance here, not at the call sites.
 func (r TriggerRecurrence) Contested() bool { return r.FeedbackDown > 0 }
+
+// SilenceOutranksFeedback reports whether the standing 🔕 on this trigger is the
+// NEWEST HUMAN decision about it — the rule that settles a standing 👎 and a
+// standing 🔕 saying opposite things.
+//
+// It exists BESIDE Contested rather than inside it. Contested is the one shared
+// definition of contested-ness (#288), read by the coalescer and the prompt-replay
+// path as well as by suppression, and none of those asks "…but was it superseded?".
+// Folding the ordering in there would silently change all three.
+//
+// The bug it closes: Contested compares no timestamps at all, so a 👎 cast on
+// Monday outranked a 🔕 clicked on Tuesday forever. The click was recorded
+// durably, the human was acked "RunLore will NOT investigate this incident", and
+// every later firing re-investigated anyway — on precisely the triggers people
+// most want silenced, since a trigger nobody contests is rarely worth muting.
+//
+// Newest human wins, in both directions: a silence recorded after the newest live
+// 👎 suppresses; a 👎 cast after a silence re-arms investigation. It mirrors the
+// rule silences already use among themselves (latest wins per trigger).
+//
+// An UNKNOWN ordering — either timestamp zero, which is what a checkpoint written
+// before those fields existed replays — resolves in the 👎's favour. That is the
+// conservative direction: RunLore investigates and the human sees a notification
+// they can silence again, rather than going quiet on an argument it cannot settle.
+func (r TriggerRecurrence) SilenceOutranksFeedback() bool {
+	if !r.Contested() {
+		return true // nothing standing to outrank
+	}
+	if r.SilencedAt.IsZero() || r.FeedbackDownLatest.IsZero() {
+		return false
+	}
+	return r.SilencedAt.After(r.FeedbackDownLatest)
+}
 
 // Concluded reports whether an ANSWER stands for this trigger — some prior
 // investigation reached a conclusive verdict, whether or not the most recent one
@@ -990,11 +1069,15 @@ func (l *Ledger) Recurrence(triggerKey string) TriggerRecurrence {
 	defer l.mu.Unlock()
 	a := l.byTrigger[triggerKey]
 	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL, Conclusive: a.conclusive}
-	tr.SilencedUntil = l.silences[triggerKey]
+	s := l.silences[triggerKey]
+	tr.SilencedUntil, tr.SilencedAt = s.until, s.at
 	prefix := triggerKey + "\x00"
 	for k, v := range l.votes {
 		if v.rating == "down" && strings.HasPrefix(k, prefix) {
 			tr.FeedbackDown++
+			if v.at.After(tr.FeedbackDownLatest) {
+				tr.FeedbackDownLatest = v.at
+			}
 		}
 	}
 	return tr
@@ -1287,11 +1370,21 @@ func (l *Ledger) applyFeedbackLocked(e Event) {
 	entry := l.byTrigger[e.TriggerKey].entry
 	if prev, ok := l.votes[key]; ok {
 		if prev.rating == e.Kind && prev.entry == entry {
-			return // duplicate click — idempotent
+			// Idempotent for the AGGREGATE — nothing is re-credited — but the vote's
+			// TIME still moves forward. Under newest-human-wins a repeat 👎 cast after
+			// a colleague's 🔕 is a fresh human refusal, and freezing the timestamp at
+			// the first click would leave the silence permanently outranking it: the
+			// same "recorded, acked, then ignored" failure this whole ordering exists
+			// to close. Guarded on After so a replay can never rewind it.
+			if e.At.After(prev.at) {
+				prev.at = e.At
+				l.votes[key] = prev
+			}
+			return
 		}
 		l.creditFeedbackLocked(prev.entry, prev.rating, -1)
 	}
-	l.votes[key] = feedbackVote{rating: e.Kind, entry: entry}
+	l.votes[key] = feedbackVote{rating: e.Kind, entry: entry, at: e.At}
 	l.creditFeedbackLocked(entry, e.Kind, +1)
 }
 
@@ -1357,7 +1450,7 @@ func (l *Ledger) applySilenceLocked(e Event) {
 	if err != nil || window <= 0 {
 		return
 	}
-	l.silences[e.TriggerKey] = e.At.Add(window)
+	l.silences[e.TriggerKey] = silenceState{at: e.At, until: e.At.Add(window)}
 }
 
 // Confirm appends a machine confirmation: a FRESH investigation independently
