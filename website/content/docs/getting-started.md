@@ -455,6 +455,7 @@ schema, so a block you copy out of one is known to load.
 This is the whole file — investigate and notify, nothing else. It references the Secret from
 [step 3](#step-3--credentials) by env-var name:
 
+<!-- docsguard:ignore Helm chart values (values-minimal.yaml), not a runlore.yaml — the chart unwraps .Values.config -->
 ```yaml
 replicaCount: 1              # one worker; values-full.yaml adds leader-elected HA
 image:
@@ -564,6 +565,7 @@ this is the issue you're hitting.
 RunLore reacts to Alertmanager's webhook. Route the alerts you care about to its Service (the
 **trigger policy** in `config` is the real filter — Alertmanager routing is just the firehose):
 
+<!-- docsguard:ignore Alertmanager receiver config, not a runlore.yaml -->
 ```yaml
 # alertmanager config
 receivers:
@@ -589,12 +591,14 @@ source), so lock that down before pointing a real alert stream at it:
 1. **Require a bearer token.** Name an env var in `server.webhook_token_env` (wired from your Secret);
    unauthenticated requests are then rejected with `401`. This token is **required whenever a model is
    configured** (and therefore also under `actions.mode=auto`) — `serve` refuses to start without it.
+   <!-- docsguard:ignore Helm chart values, not a runlore.yaml -->
    ```yaml
    # values.yaml
    config:
      server:
        webhook_token_env: RUNLORE_WEBHOOK_TOKEN
    ```
+   <!-- docsguard:ignore Alertmanager receiver config, not a runlore.yaml -->
    ```yaml
    # alertmanager — send the same token as a bearer credential
    webhook_configs:
@@ -605,6 +609,7 @@ source), so lock that down before pointing a real alert stream at it:
            credentials_file: /etc/alertmanager/secrets/runlore-webhook-token
    ```
 2. **Scope ingress** to only the namespace that should reach the webhook (e.g. your monitoring stack):
+   <!-- docsguard:ignore Helm chart values, not a runlore.yaml -->
    ```yaml
    # values.yaml — spliced into the NetworkPolicy `from:`
    networkPolicy:

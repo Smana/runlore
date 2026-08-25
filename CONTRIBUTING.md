@@ -215,6 +215,42 @@ links **within** one, and a heading containing an em dash renders a **double** h
 (`## Step 2 — GitHub App` → `#step-2--github-app`). `hack/check-anchors.sh` checks both against
 the rendered HTML.
 
+### Every YAML block on the site is loaded as a real config
+
+`internal/docsguard` runs **every** ` ```yaml ` fence under `website/content/` through
+`config.Load` — the same strict loader `lore serve` uses, with unknown keys rejected and
+`Config.Validate` run. A block a reader could paste into `runlore.yaml` only to have the agent
+refuse to start is a **test failure**, not something to catch in review.
+
+Validation is **opt-out**, because the mistake worth catching is a new snippet going silently
+unchecked. If a fence is genuinely *not* a `runlore.yaml` — Helm chart values, a Kubernetes
+manifest, an Alertmanager receiver — put an HTML comment on the line above it:
+
+````markdown
+<!-- docsguard:ignore Helm chart values, not a runlore.yaml -->
+```yaml
+replicaCount: 1
+```
+````
+
+Hugo renders the site with `unsafe: true`, so the comment reaches the HTML as a comment and a
+reader never sees it. Keep it at the fence's own indentation when the fence sits inside a list
+item. The reason is **mandatory** — a reviewer reads it to tell an honest exemption from a
+silenced failure.
+
+Two things the guard will not let you get away with:
+
+- **A marked fence that loads cleanly fails the test.** The marker only covers blocks that are
+  genuinely not a config, so it cannot rubber-stamp a real failure — and it cannot be left behind
+  after the block is fixed.
+- **A marker that is not immediately above a fence fails the test**, instead of quietly exempting
+  nothing.
+
+**Prefer fixing a block to marking it.** A snippet that looks like a complete config is one a
+reader will paste, so if it is missing a required companion key — `outcome.ledger_path` beside
+`notify.*.thread_capture`, a delivery target beside `silence_button` — add the key rather than
+excusing the block.
+
 ## Submitting a change
 
 1. Branch from `main`.

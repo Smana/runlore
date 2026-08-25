@@ -3,10 +3,10 @@
 package docsguard
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -33,15 +33,34 @@ func TestGettingStartedInlinesMinimalProfileVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read getting-started.md: %v", err)
 	}
-	i := bytes.Index(page, []byte(minimalProfileHeading))
-	if i < 0 {
+	// The heading's line number, so the fence can be picked out of the page's
+	// scanned fences by position — one fence-finder for the whole package (see
+	// scanYAMLFences) rather than a second expression that can drift from it.
+	headingLine := -1
+	for n, l := range strings.Split(string(page), "\n") {
+		if strings.TrimSpace(l) == minimalProfileHeading {
+			headingLine = n + 1
+			break
+		}
+	}
+	if headingLine < 0 {
 		// Guard the guard: a renamed heading would leave this test matching nothing
 		// while still reporting success.
 		t.Fatalf("heading %q not found in getting-started.md — the section was renamed "+
 			"and this guard is now inert", minimalProfileHeading)
 	}
-	m := yamlFence.FindSubmatch(page[i:])
-	if m == nil {
+	fences, _, err := scanYAMLFences(gettingStartedPath, page)
+	if err != nil {
+		t.Fatalf("scan fences: %v", err)
+	}
+	var block string
+	for _, f := range fences {
+		if f.Line > headingLine {
+			block = f.Body
+			break
+		}
+	}
+	if block == "" {
 		t.Fatal("no YAML fence after the values-minimal heading — the profile is no longer inlined")
 	}
 
@@ -51,7 +70,7 @@ func TestGettingStartedInlinesMinimalProfileVerbatim(t *testing.T) {
 	}
 
 	var fromPage, fromFile map[string]any
-	if err := yaml.Unmarshal(m[1], &fromPage); err != nil {
+	if err := yaml.Unmarshal([]byte(block), &fromPage); err != nil {
 		t.Fatalf("the inlined block is not valid YAML: %v", err)
 	}
 	if err := yaml.Unmarshal(shipped, &fromFile); err != nil {

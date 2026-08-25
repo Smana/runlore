@@ -51,6 +51,7 @@ kubectl -n runlore logs deploy/runlore | grep -E 'tool=cloud_'
   plain Kubernetes `NetworkPolicy` **cannot** match that entity, so the SDK's credential fetch is
   silently dropped and the cloud tools just hang. Set `networkPolicy.awsPodIdentity: true` (chart
   value) to render a `CiliumNetworkPolicy` that allows it:
+  <!-- docsguard:ignore Helm chart values, not a runlore.yaml -->
   ```yaml
   networkPolicy:
     enabled: true
