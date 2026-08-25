@@ -1170,9 +1170,12 @@ type MatrixNotify struct {
 	// notifier fields and outcome.ledger_path; Validate fails loud otherwise.
 	FeedbackReactions bool `yaml:"feedback_reactions"`
 	// SilenceReactions (opt-in, notify.matrix.silence_reactions) records a 🔕
-	// reaction as a silence at notify.silence.windows[0], and enables the
-	// `silence: <duration>` thread command. Separate from feedback_reactions for
-	// the same reason SlackNotify.SilenceButton is separate from FeedbackButtons.
+	// reaction as a silence at notify.silence.windows[0]. It does NOT by itself
+	// enable the `silence: <duration>` thread command — that additionally needs
+	// ThreadCapture on (below), since the command arrives as a message and the
+	// /sync filter only requests m.room.message when ThreadCapture is set.
+	// Separate from feedback_reactions for the same reason SlackNotify.SilenceButton
+	// is separate from FeedbackButtons.
 	SilenceReactions bool `yaml:"silence_reactions"`
 	// ThreadCapture (opt-in, default off) registers each delivered investigation's
 	// thread root so a later `@runlore note: …` reply in that thread can be

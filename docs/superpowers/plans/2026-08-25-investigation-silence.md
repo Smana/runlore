@@ -1082,9 +1082,12 @@ Add to `MatrixNotify` (~line 1164), beside `FeedbackReactions`:
 
 ```go
 	// SilenceReactions (opt-in, notify.matrix.silence_reactions) records a 🔕
-	// reaction as a silence at notify.silence.windows[0], and enables the
-	// `silence: <duration>` thread command. Separate from feedback_reactions for
-	// the same reason SlackNotify.SilenceButton is separate from FeedbackButtons.
+	// reaction as a silence at notify.silence.windows[0]. It does NOT by itself
+	// enable the `silence: <duration>` thread command — that additionally needs
+	// ThreadCapture on (below), since the command arrives as a message and the
+	// /sync filter only requests m.room.message when ThreadCapture is set.
+	// Separate from feedback_reactions for the same reason SlackNotify.SilenceButton
+	// is separate from FeedbackButtons.
 	SilenceReactions bool `yaml:"silence_reactions"`
 ```
 
@@ -2293,7 +2296,7 @@ outcome:
 
 - [ ] **Step 2: Document the Matrix paths**
 
-The 🔕 reaction (uses `windows[0]`, since an emoji carries no duration) and `silence: 4h`. Note `notify.matrix.silence_reactions` enables both.
+The 🔕 reaction (uses `windows[0]`, since an emoji carries no duration) and `silence: 4h`. Note `notify.matrix.silence_reactions` enables the reaction only — the `silence:` command additionally needs that transport's own `thread_capture` on too (it arrives as a message, and the `/sync` filter only requests `m.room.message` under thread capture), and is transport-neutral (shared `thread.Responder`), so the same command also works in a Slack thread once `notify.slack.thread_capture` is on there.
 
 - [ ] **Step 3: Add the troubleshooting row**
 
