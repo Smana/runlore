@@ -330,6 +330,12 @@ const (
 // unbounded in principle since Kubernetes names run to 253. An over-long option
 // value makes Slack reject the ENTIRE message, so the failure would take out the
 // notification, not just the control.
+//
+// The prefix exists a SECOND time as a literal in internal/server's interactions
+// handler, which strips it back off to recover the key (that package deliberately
+// does not import this one). The two must agree byte for byte or every real click
+// lands in "could not identify the incident to silence" — enforced, not merely
+// documented, by TestSilenceBlockIDPrefixMatchesTheServerHandler.
 const (
 	silenceBlockIDPrefix = "sil:"
 	slackBlockIDMax      = 255
