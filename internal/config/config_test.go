@@ -1946,6 +1946,7 @@ func TestSilenceConfigValidation(t *testing.T) {
 		c := &Config{}
 		c.Outcome.LedgerPath = "/tmp/outcome.jsonl"
 		c.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
+		c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
 		c.Notify.Slack.SilenceButton = true
 		c.Notify.Silence.Windows = []Duration{Duration(time.Hour)}
 		c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
@@ -1989,10 +1990,31 @@ func TestSilenceConfigValidation(t *testing.T) {
 			wantErr: "max_window",
 		},
 		{
+			name:    "a zero max_window is rejected when a transport is enabled",
+			mutate:  func(c *Config) { c.Notify.Silence.MaxWindow = 0 },
+			wantErr: "max_window",
+		},
+		{
+			name:    "the silence button needs a delivery target",
+			mutate:  func(c *Config) { c.Notify.Slack.WebhookURLEnv = "" },
+			wantErr: "delivery target",
+		},
+		{
+			name: "the Matrix path needs listener fields",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+			},
+			wantErr: "homeserver",
+		},
+		{
 			name: "the Matrix path needs a ledger too",
 			mutate: func(c *Config) {
 				c.Notify.Slack.SilenceButton = false
 				c.Notify.Matrix.SilenceReactions = true
+				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+				c.Notify.Matrix.RoomID = "!room:example.org"
+				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
 				c.Outcome.LedgerPath = ""
 			},
 			wantErr: "outcome.ledger_path",
@@ -2027,5 +2049,35 @@ func TestSilenceDefaultIsTheFirstPreset(t *testing.T) {
 	}
 	if got := (SilenceNotify{}).Default(); got != 0 {
 		t.Errorf("Default() with no presets = %v, want 0", got)
+	}
+}
+
+// TestSilenceWindowsParseFromYAML exercises real YAML list parsing, not just Go
+// literals: Windows is the first []Duration in the config package, and a
+// sequence of duration strings goes through a different yaml.v3 decode path
+// than a single scalar Duration.
+func TestSilenceWindowsParseFromYAML(t *testing.T) {
+	const y = `
+notify:
+  silence:
+    windows: ["1h", "4h", "24h"]
+    max_window: "24h"
+`
+	var c Config
+	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := []time.Duration{time.Hour, 4 * time.Hour, 24 * time.Hour}
+	got := c.Notify.Silence.Std()
+	if len(got) != len(want) {
+		t.Fatalf("notify.silence.windows: got %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("notify.silence.windows[%d] = %v, want %v", i, got[i], w)
+		}
+	}
+	if got := c.Notify.Silence.MaxWindow.Std(); got != 24*time.Hour {
+		t.Fatalf("notify.silence.max_window: got %v, want 24h", got)
 	}
 }

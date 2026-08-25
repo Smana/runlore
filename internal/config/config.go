@@ -2152,22 +2152,39 @@ func (c *Config) Validate() error {
 	// pieces a click needs would record every silence durably and then ignore it,
 	// while the UI confirmed success. Fail loud at startup instead — the same
 	// posture feedback_buttons and recurrence_cooldown already take.
-	if c.Notify.Slack.SilenceButton && c.Notify.Slack.SigningSecretEnv == "" {
-		return fmt.Errorf("notify.slack.silence_button requires notify.slack.signing_secret_env: clicks arrive on the exposed POST /slack/interactions endpoint and must be signature-verified")
+	if c.Notify.Slack.SilenceButton {
+		if c.Notify.Slack.SigningSecretEnv == "" {
+			return fmt.Errorf("notify.slack.silence_button requires notify.slack.signing_secret_env: clicks arrive on the exposed POST /slack/interactions endpoint and must be signature-verified")
+		}
+		// …and a delivery target, for the same reason feedback_buttons requires
+		// one above: a 🔕 menu only ever exists on a message the Slack notifier
+		// delivered, and that notifier is skipped silently with neither target set.
+		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
+			return fmt.Errorf("notify.slack.silence_button requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no 🔕 menu renders and no silence can ever be recorded")
+		}
+	}
+	// Same fail-loud contract for the Matrix reaction listener as
+	// feedback_reactions above: without the notifier fields it would sync
+	// nothing, so a 🔕 reaction could never be recorded.
+	if c.Notify.Matrix.SilenceReactions {
+		m := c.Notify.Matrix
+		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+			return fmt.Errorf("notify.matrix.silence_reactions requires homeserver, room_id and access_token_env (the reaction listener long-polls the configured room)")
+		}
 	}
 	if c.Notify.SilenceEnabled() {
 		if c.Outcome.LedgerPath == "" {
 			return fmt.Errorf("notify.silence requires outcome.ledger_path: a silence is recorded in the outcome ledger, and the suppression gate reads it back from there")
 		}
 		if len(c.Notify.Silence.Windows) == 0 {
-			return fmt.Errorf("notify.silence.windows must list at least one duration when a silence transport is enabled")
+			return fmt.Errorf("notify.silence.windows must list at least one duration when a silence transport is enabled: with no presets there is nothing to render, and no duration for a click to record")
 		}
 		if c.Notify.Silence.MaxWindow.Std() <= 0 {
 			return fmt.Errorf("notify.silence.max_window must be positive when a silence transport is enabled: an uncapped silence is indistinguishable from a permanent one")
 		}
 		for _, w := range c.Notify.Silence.Windows {
 			if w.Std() <= 0 {
-				return fmt.Errorf("notify.silence.windows entry %v must be positive", w.Std())
+				return fmt.Errorf("notify.silence.windows entry %v must be positive: zero silences nothing and a negative duration is meaningless as a suppression window", w.Std())
 			}
 			if w.Std() > c.Notify.Silence.MaxWindow.Std() {
 				return fmt.Errorf("notify.silence.windows entry %v exceeds notify.silence.max_window (%v)", w.Std(), c.Notify.Silence.MaxWindow.Std())
