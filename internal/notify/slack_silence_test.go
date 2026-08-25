@@ -295,3 +295,44 @@ func TestSilenceOverflowLabelsReadLikeTheDocs(t *testing.T) {
 		}
 	}
 }
+
+// TestASingleSilenceWindowRendersNoOverflow is the render-site half of the
+// minimum-2 rule. Slack's overflow element requires between 2 and 5 options, and a
+// 1-option overflow does not merely fail to draw: chat.postMessage returns
+// invalid_blocks and the WHOLE finding goes undelivered.
+//
+// Config validation rejects `windows: [4h]` with slack.silence_button on, so this
+// is defence in depth — but the render site is the one place that knows how many
+// options it is about to emit, and dropping one control is a failure mode this card
+// already accepts (see the over-long block_id branch) while losing the notification
+// is not. The 👍/👎 buttons must survive: they are gated independently.
+func TestASingleSilenceWindowRendersNoOverflow(t *testing.T) {
+	inv := providers.Investigation{Title: "boom", TriggerKey: "tooling/harbor:HelmUpgradeFailed"}
+
+	blocks := feedbackBlocks(inv, true, []time.Duration{4 * time.Hour})
+	if el, blockID := findOverflow(t, blocks); el != nil {
+		t.Errorf("a single window rendered an overflow with %v — Slack rejects the entire message", el["options"])
+	} else if blockID != "" {
+		t.Errorf("block_id = %q with no overflow to carry a key for", blockID)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %v, want the actions block with the feedback buttons still on it", blocks)
+	}
+	if _, ok := blocks[0]["block_id"]; ok {
+		t.Errorf("actions block kept a block_id with no overflow: %v", blocks[0])
+	}
+	els, _ := blocks[0]["elements"].([]map[string]any)
+	if len(els) != 2 {
+		t.Fatalf("elements = %v, want the two feedback buttons alone", els)
+	}
+
+	// Two is enough, and is what the config's own floor allows.
+	if el, _ := findOverflow(t, feedbackBlocks(inv, true, []time.Duration{time.Hour, 4 * time.Hour})); el == nil {
+		t.Error("two windows rendered no overflow: the guard is off by one")
+	}
+
+	// With no feedback buttons either, a single window leaves nothing to draw.
+	if got := feedbackBlocks(inv, false, []time.Duration{4 * time.Hour}); got != nil {
+		t.Errorf("feedbackBlocks = %v, want nil — no buttons and no renderable overflow", got)
+	}
+}

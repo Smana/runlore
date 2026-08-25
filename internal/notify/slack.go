@@ -339,6 +339,13 @@ const (
 const (
 	silenceBlockIDPrefix = "sil:"
 	slackBlockIDMax      = 255
+	// slackOverflowMinOptions is Slack's floor on an overflow element: fewer than
+	// two options and chat.postMessage returns invalid_blocks for the WHOLE
+	// message, so the finding is not delivered at all. Config validation already
+	// rejects a single window when slack.silence_button is on; this is the render
+	// site refusing to build a payload it knows Slack will reject, which is the
+	// only place that counts the options it is about to emit.
+	slackOverflowMinOptions = 2
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
@@ -417,6 +424,12 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // even that, the silence element alone is dropped: a pathological resource name
 // must degrade ONE control, never the card.
 //
+// Fewer than slackOverflowMinOptions windows drops it for the same reason and with
+// the same trade: Slack rejects a 1-option overflow by rejecting the entire
+// message, so building one would cost the notification rather than the control.
+// Config validation already refuses that combination at startup, but only the
+// render site can count what it is actually about to emit.
+//
 // Labels are plain_text (never escaped); values are opaque to Slack.
 func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindows []time.Duration) []map[string]any {
 	key := cmp.Or(inv.TriggerKey, inv.Fingerprint)
@@ -433,7 +446,8 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 		)
 	}
 	blockID := silenceBlockIDPrefix + inv.TriggerKey
-	overflowFits := inv.TriggerKey != "" && len(silenceWindows) > 0 && len(blockID) <= slackBlockIDMax
+	overflowFits := inv.TriggerKey != "" && len(silenceWindows) >= slackOverflowMinOptions &&
+		len(blockID) <= slackBlockIDMax
 	if overflowFits {
 		opts := make([]map[string]any, 0, len(silenceWindows))
 		for _, w := range silenceWindows {
