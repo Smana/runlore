@@ -4,18 +4,26 @@ weight: 311
 integration: {kind: cloud, id: gcp}
 ---
 
-**What it gives you** — `cloud_*` tools: Cloud Audit Logs (the `activity` and `system_event`
-streams — a "what changed outside GitOps" lens covering GKE/Compute/IAM/network changes, manual
-actions, and Google-initiated host events like preemption and live migration) plus GKE/MIG/Compute
-Engine resource health. Read-only; auth is in-cluster identity — a GKE Workload Identity **direct
+> **Status: not yet wired into the binary.** `internal/providers/cloud/gcp` exists on `main` as a
+> client skeleton and its model-facing tool vocabulary — both unit-tested. The two lenses,
+> `CloudChanges` and `ResourceHealth`, are stubs: they unconditionally return an "unimplemented
+> lens" error (`TestTheUnimplementedLensesFailLoudlyRatherThanReportingCalm` pins exactly that).
+> And `internal/app/investigate.go`'s cloud-provider switch only matches `cfg.Cloud.Provider ==
+> "aws"` — there is no `gcp` case and no fallback warning. **Setting `cloud.provider: gcp` today is
+> a silent no-op:** the YAML parses, but no tool registers, nothing is logged, nothing errors. This
+> is a different claim from "implemented but not verified on a live cluster" (which is where the
+> AWS provider and most of this project's integrations sit) — GCP genuinely does not run yet. The
+> rest of this page describes the design it is being built to, so it's ready to use the moment the
+> remaining tasks land; every forward-looking claim below is marked.
+
+## What it gives you (by design)
+
+`cloud_*` tools: Cloud Audit Logs (the `activity` and `system_event` streams — a "what changed
+outside GitOps" lens covering GKE/Compute/IAM/network changes, manual actions, and
+Google-initiated host events like preemption and live migration) plus GKE/MIG/Compute Engine
+resource health. Read-only; auth is in-cluster identity — a GKE Workload Identity **direct
 principal binding** — via Application Default Credentials. No service-account key, no Google
 service account, no ServiceAccount annotation.
-
-> **Not yet verified on a live GKE cluster.** The provider is implemented and unit-tested against
-> recorded API fixtures, matching the "functional but less exercised" posture of
-> [Project status](https://github.com/Smana/runlore#project-status--stability). The live-validation
-> runbook (create a Workload Identity cluster, bind the roles below, confirm a real stockout
-> surfaces) is the remaining step before this note comes off.
 
 ## Minimal config
 
@@ -24,9 +32,12 @@ cloud:
   provider: gcp
 ```
 
-Nothing else is needed on GKE: project, location and cluster name are all resolved from the
-metadata server. Set `cloud.gcp.{project,location,cluster_name}` only to override
-autodetection — off-cluster, or to scope reads to a project other than the one GKE runs in:
+This block parses today (`internal/config`'s decoder and validation both accept it — see
+`TestCloudGCPBlockIsFullyOptional`), but **has no effect yet**: nothing in `investigate.go` reads
+`cfg.Cloud.Provider == "gcp"`. Once wiring lands, nothing else will be needed on GKE: project,
+location and cluster name are all resolved from the metadata server. Set
+`cloud.gcp.{project,location,cluster_name}` only to override autodetection — off-cluster, or to
+scope reads to a project other than the one GKE runs in:
 
 ```yaml
 cloud:
@@ -40,15 +51,17 @@ cloud:
 ## IAM — bind the ServiceAccount directly. Do NOT annotate it
 
 GCP auth is a Workload Identity **direct principal binding**: the Kubernetes ServiceAccount is
-granted the IAM roles itself, with no intermediate Google service account.
+granted the IAM roles itself, with no intermediate Google service account. This is true of the
+design regardless of wiring status, and there's no harm in setting the binding up ahead of time.
 
 **Do not set `serviceAccount.annotations` to `iam.gke.io/gcp-service-account`.** That annotation
 is the setup step for the *other*, GSA-impersonation flavor of Workload Identity — almost every
-GKE guide you'll find teaches that one. Setting it here anyway silently redirects every GCP call
-RunLore makes to that GSA instead of the roles bound to the KSA below. If the GSA holds none of
-those roles — the common case, since there usually is no GSA at all in a direct-binding setup —
-the result is a bare 403 that looks exactly like a missing binding, except the fix RunLore prints
-assumes direct binding and does **not** resolve it. Leave `serviceAccount.annotations` empty.
+GKE guide you'll find teaches that one. Setting it here anyway will, once the provider is wired,
+silently redirect every GCP call RunLore makes to that GSA instead of the roles bound to the KSA
+below. If the GSA holds none of those roles — the common case, since there usually is no GSA at
+all in a direct-binding setup — the result is a bare 403 that looks exactly like a missing
+binding, except the fix RunLore is designed to print assumes direct binding and would not resolve
+it. Leave `serviceAccount.annotations` empty.
 
 Bind the roles:
 
@@ -62,9 +75,11 @@ done
 
 **Use the project NUMBER, not the id, in the `principal://` string** — the `gcloud projects
 describe --format='value(projectNumber)'` call above resolves it. This is a classic footgun (every
-*other* field in that command takes the project id) and the reason RunLore generates this exact
-command from a denied preflight read rather than only documenting it: get the number wrong and the
-binding silently matches nothing, so the next attempt fails exactly the same way.
+*other* field in that command takes the project id). By design, RunLore will generate this exact
+command from a denied preflight read rather than only documenting it — **that preflight does not
+exist yet**: `New()` in `internal/providers/cloud/gcp/gcp.go` makes no calls at construction time
+today. Get the number wrong before wiring lands and you won't hear about it until the lenses ship
+and you hit a bare 403 with nothing naming the principal that was presented.
 
 **Roles required, in full — all read-only:**
 
@@ -73,28 +88,38 @@ binding silently matches nothing, so the next attempt fails exactly the same way
 - `roles/compute.viewer` — managed-instance-group errors and instance status, same tool
 
 Notably **not** `roles/logging.privateLogViewer` — that role is for Data Access audit logs, which
-this provider deliberately does not read (see Limitations below).
+this provider deliberately does not read (see Limitations below). This role list is a design
+decision, not something any code currently checks or enforces.
 
 ## Verify it locally
+
+**Not yet possible.** There is nothing to grep for today. `cloud.provider: gcp` registers no
+tools and `investigate.go` never reaches a branch that would log for it, so the natural instinct —
+tail the pod's logs after setting the config — finds nothing, and there's no error to explain why.
+Don't chase this until the wiring task lands.
+
+Once it does, expect the same shape AWS uses today:
 
 ```bash
 kubectl -n runlore logs deploy/runlore | grep -E 'cloud provider enabled.*gcp'
 ```
 
-The startup line also reports `identity_source` — which of the three tiers (explicit config, the
-GKE metadata server, the node's `providerID`) resolved the project/location/cluster identity. Worth
-checking on a project with more than one GKE cluster in the same region: autodetection landing on
-the wrong cluster is silent, and every subsequent answer would then be confidently about a
-neighbor's cluster.
+Per the design, that startup line will also carry an `identity_source` field naming which of the
+three identity-resolution tiers (explicit config, the GKE metadata server, the node's
+`providerID`) won — but neither the log field nor the resolver that would produce it
+(`internal/providers/cloud/gcp/identity.go`) exists on this branch yet. Treat both commands above
+as a preview of the intended interface, not something to run today.
 
-## Autopilot
+## Autopilot (design)
 
-On an Autopilot cluster, `cloud_resource_health`'s node-layer sub-queries (managed-instance-group
-errors, instance status) are skipped entirely — the node layer is Google-managed and there is no
-MIG to query. The tool says so explicitly, rather than running those sub-queries anyway and
-returning an empty result a model could read as "capacity is fine."
+`ResourceHealth` is currently a two-line stub that unconditionally returns an unimplemented-lens
+error — there are no sub-queries yet, so there's nothing to skip. Per the design, once
+implemented: on an Autopilot cluster, the node-layer sub-queries (managed-instance-group errors,
+instance status) will be skipped entirely, because the node layer is Google-managed and there is
+no MIG to query. The tool is designed to say so explicitly, rather than running those sub-queries
+anyway and returning an empty result a model could read as "capacity is fine."
 
-## Limitations
+## Limitations (by design, once wired)
 
 - **Single project.** No folder-level, org-level or multi-project audit reads.
 - **Data Access audit logs are not read.** Only the `activity` and `system_event` streams — both
