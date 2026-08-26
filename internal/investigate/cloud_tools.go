@@ -138,6 +138,12 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		return msg, nil
 	}
 	if note != "" {
+		// TODO: the engine should come from the wired provider, not be hardcoded — a
+		// GCP provider's truncation note is currently tagged as an AWS change. Not
+		// model-facing today (renderRows never prints Engine), so this is latent; the
+		// real fix belongs with the tool-to-datasource attribution in eval/coverage.go,
+		// which hardcodes the same assumption and is the place that decides what a
+		// cloud investigation is scored as having covered.
 		events = append(events, providers.ChangeNote(providers.EngineAWS, note))
 	}
 	changes = events
@@ -150,7 +156,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		if in.FailedOnly {
 			fmt.Fprintf(&b, widenedFailedBanner, in.Resource)
 		} else {
-			b.WriteString(vocabularyFor(t.Cloud).WidenedBanner(in.Resource))
+			b.WriteString(vocabularyFor(t.Cloud).RenderWidenedBanner(in.Resource))
 		}
 	}
 	renderRows(&b, len(changes), "more", func(i int) {
@@ -193,7 +199,7 @@ func splitNote(changes []providers.Change) (events []providers.Change, note stri
 }
 
 // CloudResourceHealthTool exposes cloud-side resource health to the model — EC2/ASG/
-// EKS state on AWS, the analogous GKE/MIG/Compute state on GCP — worded by the wired
+// EKS state on AWS, the equivalent state on another cloud — worded by the wired
 // provider's vocabulary.
 type CloudResourceHealthTool struct {
 	Cloud providers.CloudProvider
@@ -208,8 +214,8 @@ func (t CloudResourceHealthTool) Description() string {
 }
 
 // Schema returns the JSON schema for the arguments. instance_id's description is
-// cloud-specific — "i-…" is an EC2 identifier and means nothing on GCP, where the
-// equivalent argument is an instance NAME — so it comes from the vocabulary.
+// cloud-specific — "i-…" is an EC2 identifier, and a cloud that names instances
+// differently has to say so here — so it comes from the vocabulary.
 func (t CloudResourceHealthTool) Schema() string {
 	return `{"type":"object","properties":{"instance_id":{"type":"string","description":` +
 		jsonString(vocabularyFor(t.Cloud).InstanceArg) +

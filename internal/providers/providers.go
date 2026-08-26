@@ -1135,7 +1135,8 @@ type CloudVocabulary struct {
 	// "ASG/EC2/EKS/RDS/SG changes, manual actions"). Two fields, not one, because
 	// those are not the same text today: collapsing them would reword one of the two
 	// shipped tool descriptions, and the promise this whole type exists to keep is
-	// that AWS's model-facing text survives the refactor byte for byte.
+	// that AWS's model-facing text survives the introduction of a second cloud byte
+	// for byte.
 	TimelineExamples string
 
 	// FailureFilterNote explains cloud_what_changed's failed_only argument, or is ""
@@ -1169,13 +1170,12 @@ type CloudVocabulary struct {
 	// fmt.Fprintf, where a GCP author's typo (%s, or two verbs) would ship
 	// %!q(MISSING) to the model with no compiler or vet warning.
 	//
-	// widenedFailedBanner (cloud_tools.go) has no equivalent slot here: its text —
-	// "no FAILED calls against resource %q…" — carries no cloud noun at all, so
-	// there is nothing for a GCP vocabulary to say differently. It stays a plain
-	// constant in the tool layer, and is deliberately the only banner literal left
-	// there. A slot for it would be a slot every future cloud must fill with the
-	// same words, which is how vocabularies acquire fields that only ever hold one
-	// value and then drift apart for no reason.
+	// Being a func is also the one way a fragment can be MISSING rather than merely
+	// empty, so nothing reads it directly: RenderWidenedBanner does, and substitutes
+	// neutral wording when it is nil. Validate reports a nil one as incomplete.
+	//
+	// widenedFailedBanner (cloud_tools.go) deliberately has no slot here; the
+	// reasoning lives with that constant.
 	WidenedBanner func(resource string) string
 
 	LagNote       string // ingestion lag, e.g. "CloudTrail lags ~15m"; bare phrase, no punctuation
@@ -1210,6 +1210,75 @@ func (v CloudVocabulary) HealthDescription() string {
 			"to the incident window (default: recent activities).",
 		v.Cloud, v.HealthSurface,
 	)
+}
+
+// RenderWidenedBanner renders the dropped-scope banner for resource, falling back to
+// cloud-neutral wording when a vocabulary leaves WidenedBanner nil.
+//
+// Read this instead of the field. A nil func is the one way a fragment can be absent
+// rather than merely empty, and calling it would panic on the widen path — a branch
+// that only runs when a scoped lookup missed and the unscoped retry found something,
+// which no smoke test reaches. The panic is recovered a long way up (thread/dispatch),
+// so the process survives and the INVESTIGATION is what dies, leaving a log line where
+// a root cause should have been. Degraded wording on a rare path beats that trade
+// every time.
+//
+// The fallback drops only the cloud's explanation of WHY the scope missed, which is
+// the part that cannot be guessed. What the model must not lose — that its filter was
+// dropped and it is now looking at everything — is cloud-independent, so it is stated
+// either way.
+func (v CloudVocabulary) RenderWidenedBanner(resource string) string {
+	if v.WidenedBanner != nil {
+		return v.WidenedBanner(resource)
+	}
+	return fmt.Sprintf("resource %q matched nothing in the window, so the resource filter was "+
+		"DROPPED. Showing ALL mutating events in the window instead:\n", resource)
+}
+
+// Validate reports every fragment a vocabulary left unset, as a joined error naming
+// each field. It returns nil for a complete one.
+//
+// A cloud provider's constructor test should call this on the vocabulary it returns.
+// Nothing calls it at render time on purpose: a half-filled vocabulary is a coding
+// mistake, and failing an investigation over one would be a worse outcome than the
+// degraded sentence the renderers already produce.
+//
+// It exists because an empty fragment does not fail — it renders. A vocabulary with
+// only Cloud and AuditLog set yields "events (Cloud Audit Logs) — , and other infra
+// changes invisible to GitOps", a failed_only argument described as "", and
+// "since_minutes default 90 ()". Every one of those reaches a model as confident
+// prose. The AWS golden cannot catch it, because AWS is precisely the vocabulary that
+// is already complete; the exposure is entirely on clouds added later.
+//
+// FailureFilterNote is the one omission that is not an error — see its own comment
+// for why a cloud may have nothing to say there.
+func (v CloudVocabulary) Validate() error {
+	required := []struct {
+		field  string
+		value  string
+		render string // what goes wrong when it is empty, in the text a model reads
+	}{
+		{"Cloud", v.Cloud, "names the cloud in both tool descriptions and all three empty-result messages"},
+		{"AuditLog", v.AuditLog, "names the log in cloud_what_changed's description and incident_timeline's cloud clause"},
+		{"ChangeExamples", v.ChangeExamples, "lists the kinds of change cloud_what_changed can show"},
+		{"TimelineExamples", v.TimelineExamples, "lists the same for incident_timeline's cloud clause"},
+		{"ScopeGuidance", v.ScopeGuidance, "tells the model how the resource argument matches — the belief a wrong lookup turns on"},
+		{"FailureFilterArg", v.FailureFilterArg, "is cloud_what_changed's failed_only schema description"},
+		{"LagNote", v.LagNote, "tells the model how far behind the log runs, inside since_minutes' default"},
+		{"HealthSurface", v.HealthSurface, "is the entire subject of cloud_resource_health's description"},
+		{"InstanceArg", v.InstanceArg, "is cloud_resource_health's instance_id schema description"},
+	}
+	var errs []error
+	for _, r := range required {
+		if strings.TrimSpace(r.value) == "" {
+			errs = append(errs, fmt.Errorf("CloudVocabulary.%s is empty; it %s", r.field, r.render))
+		}
+	}
+	if v.WidenedBanner == nil {
+		errs = append(errs, errors.New("CloudVocabulary.WidenedBanner is nil; it explains a dropped "+
+			"resource scope, and RenderWidenedBanner has to substitute cloud-neutral wording for it"))
+	}
+	return errors.Join(errs...)
 }
 
 // EmptyChangesMessage is what cloud_what_changed returns for a window it found no

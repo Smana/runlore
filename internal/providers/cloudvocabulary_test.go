@@ -80,8 +80,10 @@ const (
 	goldenNoHealth = "no AWS resource health returned"
 )
 
-// widenedBannerSentinel is the resource name the frozen goldenWidenedBanner was
-// rendered with. Any value works — it only has to match what the golden captured.
+// widenedBannerSentinel is the resource name goldenWidenedBanner was rendered with.
+// It is not a free choice: the golden froze the banner AFTER %q interpolated this
+// value, so "guessed" appears inside those bytes and changing it here fails the
+// golden. Re-render the golden if you ever need a different one.
 const widenedBannerSentinel = "guessed"
 
 // diffAt reports the first byte at which a and b diverge, with a ±40-char window of
@@ -271,5 +273,93 @@ func TestEngineConstantsAreAllPairwiseDistinct(t *testing.T) {
 	}
 	if providers.EngineGCP != "gcp" {
 		t.Errorf("EngineGCP = %q, want %q", providers.EngineGCP, "gcp")
+	}
+}
+
+// TestAWSCloudVocabularyIsComplete pins the exemplar every later cloud is written by
+// copying. Validate's whole value is as a checklist for a vocabulary nobody has
+// reviewed yet, and a checklist the reference implementation itself fails is one
+// people learn to skip.
+func TestAWSCloudVocabularyIsComplete(t *testing.T) {
+	if err := providers.AWSCloudVocabulary().Validate(); err != nil {
+		t.Errorf("AWSCloudVocabulary() is incomplete: %v", err)
+	}
+}
+
+// TestValidateNamesEveryMissingFragment is the ergonomics test, and it is the point
+// of Validate rather than a detail of it: a provider author gets one error message
+// and has to be able to act on it. "vocabulary incomplete" sends them field-hunting
+// through a struct of eleven near-identical strings; naming the field does not.
+//
+// Blanking each field in turn, rather than asserting against one hand-written list,
+// means a fragment added later without a Validate entry fails HERE — which is the
+// only way a completeness contract stays complete.
+func TestValidateNamesEveryMissingFragment(t *testing.T) {
+	tests := []struct {
+		name string
+		omit func(*providers.CloudVocabulary)
+		want string
+	}{
+		{"the cloud's own name", func(v *providers.CloudVocabulary) { v.Cloud = "" }, "CloudVocabulary.Cloud"},
+		{"the audit log's name", func(v *providers.CloudVocabulary) { v.AuditLog = "" }, "CloudVocabulary.AuditLog"},
+		{"cloud_what_changed's example list", func(v *providers.CloudVocabulary) { v.ChangeExamples = "" }, "CloudVocabulary.ChangeExamples"},
+		{"incident_timeline's example list", func(v *providers.CloudVocabulary) { v.TimelineExamples = "" }, "CloudVocabulary.TimelineExamples"},
+		{"how the resource argument matches", func(v *providers.CloudVocabulary) { v.ScopeGuidance = "" }, "CloudVocabulary.ScopeGuidance"},
+		{"failed_only's schema description", func(v *providers.CloudVocabulary) { v.FailureFilterArg = "" }, "CloudVocabulary.FailureFilterArg"},
+		{"the log's ingestion lag", func(v *providers.CloudVocabulary) { v.LagNote = "" }, "CloudVocabulary.LagNote"},
+		{"what cloud_resource_health describes", func(v *providers.CloudVocabulary) { v.HealthSurface = "" }, "CloudVocabulary.HealthSurface"},
+		{"instance_id's schema description", func(v *providers.CloudVocabulary) { v.InstanceArg = "" }, "CloudVocabulary.InstanceArg"},
+		{"the dropped-scope banner", func(v *providers.CloudVocabulary) { v.WidenedBanner = nil }, "CloudVocabulary.WidenedBanner"},
+		{"a fragment that is only whitespace", func(v *providers.CloudVocabulary) { v.Cloud = "   " }, "CloudVocabulary.Cloud"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := providers.AWSCloudVocabulary()
+			tt.omit(&v)
+			err := v.Validate()
+			if err == nil {
+				t.Fatalf("Validate() accepted a vocabulary missing %s", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Validate() did not name the missing field %q:\n%v", tt.want, err)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsAnAbsentFailureFilterNote guards the one omission that is a
+// choice rather than a mistake. ChangeDescription already renders cleanly without it
+// (see TestChangeDescriptionToleratesAnEmptyFailureFilterNote); a Validate that
+// rejected it would push a cloud with no failed-call filter into inventing a sentence
+// about one, which is worse than saying nothing.
+func TestValidateAcceptsAnAbsentFailureFilterNote(t *testing.T) {
+	v := providers.AWSCloudVocabulary()
+	v.FailureFilterNote = ""
+	if err := v.Validate(); err != nil {
+		t.Errorf("Validate() rejected a deliberately absent FailureFilterNote: %v", err)
+	}
+}
+
+// TestRenderWidenedBannerSurvivesANilFunc covers the one fragment whose absence is a
+// panic rather than a bad sentence. The widen path runs only when a scoped lookup
+// missed AND the unscoped retry found something, so a nil banner ships green and
+// fails in production; the recover is far enough up that the investigation is lost
+// with it.
+func TestRenderWidenedBannerSurvivesANilFunc(t *testing.T) {
+	v := providers.AWSCloudVocabulary()
+	v.WidenedBanner = nil
+	got := v.RenderWidenedBanner("apps/team/thing")
+	if got == "" {
+		t.Fatal("RenderWidenedBanner returned nothing for a nil banner; the model would see no banner at all")
+	}
+	// What the model must not lose is that its filter was dropped and the rows below
+	// are unscoped. The cloud's explanation of WHY is what degrades.
+	for _, want := range []string{`"apps/team/thing"`, "DROPPED", "Showing ALL"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the neutral banner does not say %q, so the model cannot tell its scope was dropped:\n%q", want, got)
+		}
+	}
+	if !strings.HasSuffix(got, ":\n") {
+		t.Errorf("the banner must end with a newline; rows are appended straight after it:\n%q", got)
 	}
 }

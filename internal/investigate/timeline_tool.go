@@ -73,8 +73,9 @@ func (t IncidentTimelineTool) Name() string { return "incident_timeline" }
 func (t IncidentTimelineTool) Description() string {
 	v := vocabularyFor(t.Cloud)
 	return "Build ONE time-sorted incident timeline for a namespace by fusing GitOps changes " +
-		fmt.Sprintf("(deploys/reconciles + what the diff touched), cloud control-plane changes (%s: "+
-			"%s), and Kubernetes Warning Events — merged and ordered by ", v.AuditLog, v.TimelineExamples) +
+		"(deploys/reconciles + what the diff touched), cloud control-plane changes " +
+		fmt.Sprintf("(%s: %s)", v.AuditLog, v.TimelineExamples) +
+		", and Kubernetes Warning Events — merged and ordered by " +
 		"timestamp so you see the incident chronology at a glance instead of stitching timestamps " +
 		"across separate tools. USE THIS EARLY to establish the sequence (\"deploy at 14:02 → first " +
 		"crash at 14:33\"), then drill into a specific row with what_changed / kube_events / " +

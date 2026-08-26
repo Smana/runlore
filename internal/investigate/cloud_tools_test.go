@@ -5,6 +5,7 @@ package investigate
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -274,11 +275,19 @@ func gcpish() providers.CloudVocabulary {
 	}
 }
 
-// awsNouns are the words that must never reach a model on a non-AWS deployment.
-// "EC2"/"EKS" are listed separately from "AWS" because the two Description() methods
-// name AWS services without ever writing "AWS": a check for the brand alone passes
-// while the health lens still advertises EKS nodegroups on a GKE cluster.
-var awsNouns = []string{"AWS", "CloudTrail", "EC2", "EKS", "ASG", "ARN"}
+// awsNouns matches the words that must never reach a model on a non-AWS deployment.
+// The service names are listed separately from the brand because the two
+// Description() methods name AWS services without ever writing "AWS": a check for the
+// brand alone passes while the health lens still advertises EKS nodegroups on a GKE
+// cluster.
+//
+// Word-boundary matching, not strings.Contains, and the reason is not hypothetical:
+// "ARN" is a substring of "WARNING", and this text uses capitals for emphasis
+// throughout (MUTATING, REJECTED, OMIT, NEWEST). A GCP vocabulary that wrote
+// "WARNING:" anywhere would fail with `still names "ARN"`, sending the reader after a
+// resource identifier that is not there. Boundaries also make the short, collision-
+// prone names — RDS, SG — safe to include at all.
+var awsNouns = regexp.MustCompile(`\b(AWS|CloudTrail|EC2|EKS|ASG|ARN|RDS|SG)\b`)
 
 // TestCloudToolsDescribeTheCloudTheyActuallyQuery is the point of the whole
 // CloudDescriber exercise: a GCP-backed tool must never tell the model it is reading
@@ -370,10 +379,8 @@ func TestCloudToolsDescribeTheCloudTheyActuallyQuery(t *testing.T) {
 			if !strings.Contains(tt.got, tt.want) {
 				t.Errorf("GCP wording %q missing:\n%s", tt.want, tt.got)
 			}
-			for _, noun := range awsNouns {
-				if strings.Contains(tt.got, noun) {
-					t.Errorf("still names %q on a GCP provider:\n%s", noun, tt.got)
-				}
+			if leaked := awsNouns.FindAllString(tt.got, -1); leaked != nil {
+				t.Errorf("still names %v on a GCP provider:\n%s", leaked, tt.got)
 			}
 		})
 	}
@@ -393,27 +400,37 @@ func TestCloudToolsFallBackToAWSWordingWithoutADescriber(t *testing.T) {
 		name string
 		got  string
 		want string
+		// contains is asserted as well as want, because two of these cases compare one
+		// fallback path against another: equality alone is satisfied by both sides
+		// returning "", which is exactly what a broken vocabulary lookup would produce.
+		contains string
 	}{
 		{
-			name: "a CloudProvider with no vocabulary gets cloud_what_changed's AWS description",
-			got:  CloudWhatChangedTool{Cloud: fakeCloud{}}.Description(),
-			want: v.ChangeDescription(),
+			name:     "a CloudProvider with no vocabulary gets cloud_what_changed's AWS description",
+			got:      CloudWhatChangedTool{Cloud: fakeCloud{}}.Description(),
+			want:     v.ChangeDescription(),
+			contains: "CloudTrail",
 		},
 		{
-			name: "a CloudProvider with no vocabulary gets cloud_resource_health's AWS description",
-			got:  CloudResourceHealthTool{Cloud: fakeCloud{}}.Description(),
-			want: v.HealthDescription(),
+			name:     "a CloudProvider with no vocabulary gets cloud_resource_health's AWS description",
+			got:      CloudResourceHealthTool{Cloud: fakeCloud{}}.Description(),
+			want:     v.HealthDescription(),
+			contains: "EKS nodegroup status",
 		},
 		{
-			name: "a nil Cloud does not panic and still renders incident_timeline",
-			got:  IncidentTimelineTool{}.Description(),
-			want: IncidentTimelineTool{Cloud: fakeCloud{}}.Description(),
+			name:     "a nil Cloud does not panic and still renders incident_timeline",
+			got:      IncidentTimelineTool{}.Description(),
+			want:     IncidentTimelineTool{Cloud: fakeCloud{}}.Description(),
+			contains: "CloudTrail",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.got != tt.want {
 				t.Errorf("fallback text drifted:\n got:  %q\nwant: %q", tt.got, tt.want)
+			}
+			if !strings.Contains(tt.got, tt.contains) {
+				t.Errorf("fallback rendered no AWS wording at all (missing %q):\n%q", tt.contains, tt.got)
 			}
 		})
 	}
