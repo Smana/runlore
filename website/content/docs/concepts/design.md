@@ -307,7 +307,7 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
 | Network | `NetworkProvider` | **Cilium Hubble**, **AWS VPC Flow Logs**, **GCP Firewall Logs** (pluggable, CNI-agnostic; none default-on) | Azure NSG Flow Logs; CNI-agnostic eBPF (Retina) |
-| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health) | GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
+| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health), **GCP** (Cloud Audit Logs what-changed + GKE/MIG/Compute health, Workload Identity direct principal binding) | Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **Gemini**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
@@ -317,8 +317,11 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 > cloud joins the same "what changed" timeline as Git diffs); `ResourceHealth` = EC2/ASG/EKS `Describe`.
 > Auth is **in-cluster identity** (EKS Pod Identity / IRSA via the default credential chain) — *not*
 > static keys, *not* Steampipe, *not* shelling out to cloud CLIs (both add heavy deps and break the
-> single-binary property). GCP/Azure follow the same shape. Steampipe and cloud MCP servers remain
-> available as optional MCP extensions.
+> single-binary property). GCP (`internal/providers/cloud/gcp`) now follows the same shape —
+> `CloudChanges` = Cloud Audit Logs `entries.list` over the `activity`/`system_event` streams,
+> `ResourceHealth` = GKE/MIG/Compute Engine describes, auth is a Workload Identity **direct
+> principal binding** (no GSA, no ServiceAccount annotation). Azure would follow the same shape too.
+> Steampipe and cloud MCP servers remain available as optional MCP extensions.
 >
 > On Cilium clusters the Pod Identity credential endpoint is a host-network target (`169.254.170.23:80`),
 > which a Kubernetes NetworkPolicy can't match — the chart's `networkPolicy.awsPodIdentity` renders a

@@ -1,6 +1,6 @@
 ---
 title: Source repos
-weight: 311
+weight: 312
 integration: {kind: source_repos, id: source_repos}
 ---
 

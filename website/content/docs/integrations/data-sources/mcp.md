@@ -1,6 +1,6 @@
 ---
 title: MCP
-weight: 312
+weight: 313
 integration: {kind: mcp, id: mcp}
 ---
 
