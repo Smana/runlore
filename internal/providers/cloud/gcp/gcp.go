@@ -207,34 +207,27 @@ func (Client) CloudVocabulary() providers.CloudVocabulary {
 	}
 }
 
-// errNotImplemented is returned by the two CloudProvider lenses this package has not
+// errNotImplemented is returned by the one CloudProvider lens this package has not
 // filled in yet.
 //
-// The lenses belong in auditlog.go and resourcehealth.go, split the same way
-// cloudtrail.go and resourcehealth.go are on the AWS side: they share only the Client,
-// and have disjoint APIs, failure modes and tests. Neither file exists yet, so the two
-// placeholders below stand in until they do, and MUST be deleted by whoever writes
-// them — Go will insist, since a real method redeclares one of these.
+// The lenses are split the same way cloudtrail.go and resourcehealth.go are on the AWS
+// side: they share only the Client, and have disjoint APIs, failure modes and tests.
+// CloudChanges now lives in auditlog.go; resourcehealth.go does not exist yet, so the
+// placeholder below stands in until it does and MUST be deleted by whoever writes it —
+// Go will insist, since a real method redeclares this one.
 //
-// They exist rather than being left out because var _ providers.CloudProvider =
+// It exists rather than being left out because var _ providers.CloudProvider =
 // (*Client)(nil) above is the assertion that this package is on track to be a cloud
-// provider at all, and it cannot compile without them. Dropping the assertion instead
+// provider at all, and it cannot compile without it. Dropping the assertion instead
 // would trade a loud, self-clearing placeholder for a silent gap in exactly the check
 // that catches an interface drifting out from under its implementation.
 //
 // Returning an error rather than an empty result is the load-bearing part. Empty is a
-// POSITIVE claim on these two lenses: the tools render no changes as "no mutating GCP
-// events in the window" and no lines as "no GCP resource health returned", and a model
-// repeats either into a finding as though the cloud had been queried and found quiet.
-// An error is surfaced as a tool failure, which establishes nothing — the only honest
-// answer available before the lenses are written.
+// POSITIVE claim: the tool renders no lines as "no GCP resource health returned", and a
+// model repeats that into a finding as though the cloud had been queried and found
+// quiet. An error is surfaced as a tool failure, which establishes nothing — the only
+// honest answer available before the lens is written.
 var errNotImplemented = errors.New("gcp: lens not implemented")
-
-// CloudChanges is not implemented yet; see errNotImplemented. Cloud Audit Log
-// entries.list over the activity and system_event streams lands in auditlog.go.
-func (*Client) CloudChanges(_ context.Context, _ providers.Selector, _ providers.TimeWindow, _ providers.CloudChangeFilter) ([]providers.Change, error) {
-	return nil, fmt.Errorf("cloud changes: %w", errNotImplemented)
-}
 
 // ResourceHealth is not implemented yet; see errNotImplemented. The GKE cluster,
 // node-pool, managed-instance-group and instance describes land in resourcehealth.go.

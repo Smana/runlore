@@ -272,24 +272,19 @@ func TestNewPointsEveryServiceAtTheInjectedEndpoint(t *testing.T) {
 	}
 }
 
-// TestTheUnimplementedLensesFailLoudlyRatherThanReportingCalm asserts that the two
-// CloudProvider methods this package has not filled in yet return an error instead of
-// an empty result.
+// TestTheUnimplementedLensFailsLoudlyRatherThanReportingCalm asserts that the one
+// CloudProvider method this package has not filled in yet returns an error instead of
+// an empty result. CloudChanges has since been implemented in auditlog.go and is
+// covered there; ResourceHealth is all that is left.
 //
-// Empty is the dangerous answer. cloud_what_changed renders no changes as "no mutating
-// GCP events in the window" and cloud_resource_health renders no lines as "no GCP
-// resource health returned" — both are positive claims that the cloud was queried and
-// found quiet, and a model repeats them into a finding as evidence. An error, by
-// contrast, is reported as a tool failure and the model is told nothing was
-// established. Until the lenses exist, that is the only honest answer.
-func TestTheUnimplementedLensesFailLoudlyRatherThanReportingCalm(t *testing.T) {
+// Empty is the dangerous answer. cloud_resource_health renders no lines as "no GCP
+// resource health returned" — a positive claim that the cloud was queried and found
+// quiet, which a model repeats into a finding as evidence. An error, by contrast, is
+// reported as a tool failure and the model is told nothing was established. Until the
+// lens exists, that is the only honest answer.
+func TestTheUnimplementedLensFailsLoudlyRatherThanReportingCalm(t *testing.T) {
 	c := &Client{}
-	ctx := context.Background()
-
-	if _, err := c.CloudChanges(ctx, providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{}); !errors.Is(err, errNotImplemented) {
-		t.Errorf("CloudChanges returned %v, want errNotImplemented", err)
-	}
-	if _, err := c.ResourceHealth(ctx, providers.Selector{}, providers.TimeWindow{}); !errors.Is(err, errNotImplemented) {
+	if _, err := c.ResourceHealth(context.Background(), providers.Selector{}, providers.TimeWindow{}); !errors.Is(err, errNotImplemented) {
 		t.Errorf("ResourceHealth returned %v, want errNotImplemented", err)
 	}
 }
