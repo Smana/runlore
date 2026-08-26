@@ -273,13 +273,39 @@ func (f LogFields) withDefaults(d LogFields) LogFields {
 	return f
 }
 
-// Cloud configures the cloud context provider. Auth is in-cluster identity (EKS
-// Pod Identity / IRSA) via the AWS SDK's default credential chain — no static keys.
-// Empty Provider disables the cloud tools (default — cloud is opt-in).
+// Cloud provider identifiers for config.cloud.provider. Cloud context is opt-in;
+// an empty provider disables the cloud tools entirely.
+const (
+	CloudAWS = "aws" // CloudTrail what-changed + EC2/ASG/EKS health; auth is EKS Pod Identity / IRSA
+	CloudGCP = "gcp" // Cloud Audit Logs what-changed + GKE/MIG/Compute health; auth is GKE Workload Identity
+)
+
+// Cloud configures the cloud context provider. Auth is always in-cluster identity —
+// EKS Pod Identity / IRSA on AWS, a GKE Workload Identity direct principal binding on
+// GCP — never a static key. Empty Provider disables the cloud tools (default).
+//
+// The AWS fields are flat for back-compatibility with every deployment that predates
+// a second cloud; GCP is nested, matching the per-provider blocks Network already
+// uses in this file. New clouds nest.
 type Cloud struct {
-	Provider    string `yaml:"provider"`     // "" (disabled) | "aws"
-	Region      string `yaml:"region"`       // e.g. eu-west-3 (default: AWS_REGION / IMDS)
-	ClusterName string `yaml:"cluster_name"` // EKS cluster name, scopes nodegroup/ASG queries
+	Provider    string `yaml:"provider"`     // "" (disabled) | "aws" | "gcp"
+	Region      string `yaml:"region"`       // AWS only: e.g. eu-west-3 (default: AWS_REGION / IMDS)
+	ClusterName string `yaml:"cluster_name"` // AWS only: EKS cluster name, scopes nodegroup/ASG queries
+
+	GCP GCPCloudCfg `yaml:"gcp"` // when provider=gcp
+}
+
+// GCPCloudCfg configures the GCP cloud context provider. EVERY field is optional: on
+// GKE all three are resolved from the metadata server, falling back to the cluster's
+// own node objects, so `cloud: {provider: gcp}` is a complete configuration.
+//
+// Set them only to override that resolution — a cluster whose metadata server does
+// not expose the cluster attributes, or a deployment reading a project other than the
+// one it runs in.
+type GCPCloudCfg struct {
+	Project     string `yaml:"project"`      // GCP project id (default: metadata server)
+	Location    string `yaml:"location"`     // cluster region OR zone (default: metadata server)
+	ClusterName string `yaml:"cluster_name"` // GKE cluster name (default: metadata server)
 }
 
 // MCP configures outbound connections to external MCP servers whose tools the
