@@ -1,0 +1,243 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Package gcp implements providers.CloudProvider against GCP using the Google API Go
+// clients and in-cluster identity. All calls are read-only: Cloud Logging entries.list
+// over the audit streams (the GCP "what changed" lens), and container/compute describes
+// (resource health).
+//
+// Auth is Application Default Credentials, which on GKE resolves to Workload Identity.
+// The intended binding is a DIRECT PRINCIPAL binding — the Kubernetes ServiceAccount is
+// granted the IAM roles itself, with no intermediate Google service account and no
+// iam.gke.io/gcp-service-account annotation on the KSA. That shape needs no code here;
+// ADC finds the credential either way. What it does need is diagnosis, because a
+// missing or misspelled binding surfaces only as a bare 403 from whichever call runs
+// first, in the middle of an investigation, with nothing naming the principal that was
+// actually presented.
+//
+// The Google generated clients are structs rather than interfaces, so unlike the AWS
+// provider — whose SDK clients are swapped wholesale for fakes — the seam here is the
+// ClientOption list threaded through New. Tests inject option.WithHTTPClient +
+// option.WithEndpoint + option.WithoutAuthentication and serve canned JSON from
+// httptest, the pattern internal/network/gcpfirewall already uses against the same
+// Cloud Logging API.
+package gcp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	compute "google.golang.org/api/compute/v1"
+	container "google.golang.org/api/container/v1"
+	logging "google.golang.org/api/logging/v2"
+	"google.golang.org/api/option"
+
+	"github.com/Smana/runlore/internal/providers"
+)
+
+// defaultMaxEvents bounds how many entries a single lens returns. Deliberately the same
+// budget as the AWS client, so neither cloud floods a model's context where the other
+// would not — an investigation's conclusions should not depend on which cloud it ran
+// against.
+const defaultMaxEvents = 25
+
+// Identity is the resolved GCP scope every call in this package is addressed to.
+//
+// It is a plain value rather than something the Client resolves for itself because the
+// resolution has several tiers (explicit config, the GKE metadata server, the
+// Kubernetes node providerID) with quite different failure modes and testing needs,
+// and folding them into the constructor would make every Client test also a test of
+// metadata-server behaviour. The resolver that produces one of these lives in
+// identity.go; New only validates what it is handed.
+type Identity struct {
+	Project     string // project id, e.g. "acme-prod" — the "projects/<id>" every request is scoped to
+	Location    string // the cluster's region or zone; GKE treats both as a "location"
+	ClusterName string // GKE cluster name
+
+	// ProjectNumber is the numeric form of Project. Both identify the same project, but
+	// IAM principal:// strings are written with the NUMBER and nothing accepts the id
+	// there, so a diagnostic that suggests a binding has to have resolved it. Optional:
+	// its absence degrades a hint, not a query.
+	ProjectNumber string
+
+	// Source names which tier resolved this triple, for the line logged at startup.
+	// Worth carrying because the tiers disagree silently: autodetection can land on a
+	// neighbouring cluster in the same project and every subsequent answer is then
+	// confidently about the wrong cluster, which is indistinguishable from a quiet one
+	// unless the operator can see where the scope came from.
+	Source string
+}
+
+// entriesAPI is the narrow slice of Cloud Logging this provider uses.
+//
+// One method, because that is genuinely all the audit lens needs, and because a
+// narrower interface is what lets a test assert on the request that was built rather
+// than on the response that came back — the filter string is the part of an audit
+// query that is easy to get wrong and impossible to see from the outside.
+type entriesAPI interface {
+	List(ctx context.Context, req *logging.ListLogEntriesRequest) (*logging.ListLogEntriesResponse, error)
+}
+
+// loggingEntries adapts the generated Logging service to entriesAPI. The generated
+// call is a builder chain (Entries.List(req).Context(ctx).Do()), which cannot be
+// satisfied by a fake; this collapses it to one ordinary method that can.
+type loggingEntries struct{ svc *logging.Service }
+
+func (l loggingEntries) List(ctx context.Context, req *logging.ListLogEntriesRequest) (*logging.ListLogEntriesResponse, error) {
+	return l.svc.Entries.List(req).Context(ctx).Do()
+}
+
+// Client is the GCP cloud provider.
+type Client struct {
+	entries   entriesAPI
+	container *container.Service
+	compute   *compute.Service
+
+	project     string
+	location    string
+	clusterName string
+	projectNum  string
+	identitySrc string
+
+	maxEvents int64
+}
+
+// New builds a Client from Application Default Credentials.
+//
+// opts are passed to every service constructor, which is the whole testing seam for
+// this package: production passes none and gets ADC, tests pass
+// option.WithHTTPClient + option.WithEndpoint + option.WithoutAuthentication. Passing
+// them to all three services matters more than it looks — a constructor that misses the
+// list silently keeps its generated googleapis.com BasePath, so two thirds of a test
+// suite can pass while one lens quietly tries to reach the internet.
+func New(ctx context.Context, id Identity, opts ...option.ClientOption) (*Client, error) {
+	// Checked here rather than left to the API: every request this provider makes is
+	// addressed to "projects/<id>/…", so an empty project yields a client that builds
+	// fine and then 400s on first use, several layers away from the actual cause. The
+	// message names the config key because the fallback for failed autodetection is for
+	// an operator to set it explicitly.
+	if id.Project == "" {
+		return nil, errors.New("gcp: project is required (autodetection found none; set cloud.gcp.project)")
+	}
+	lsvc, err := logging.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new logging service: %w", err)
+	}
+	csvc, err := container.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new container service: %w", err)
+	}
+	msvc, err := compute.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("new compute service: %w", err)
+	}
+	return &Client{
+		entries:     loggingEntries{svc: lsvc},
+		container:   csvc,
+		compute:     msvc,
+		project:     id.Project,
+		location:    id.Location,
+		clusterName: id.ClusterName,
+		projectNum:  id.ProjectNumber,
+		identitySrc: id.Source,
+		maxEvents:   defaultMaxEvents,
+	}, nil
+}
+
+var (
+	_ providers.CloudProvider  = (*Client)(nil)
+	_ providers.CloudDescriber = (*Client)(nil)
+)
+
+// CloudVocabulary describes Cloud Audit Logs and GKE, so the cloud tools never tell a
+// GCP deployment's model that it is reading CloudTrail.
+//
+// Two fragments differ from AWS in substance rather than just nouns, and both change
+// what a model should DO:
+//
+// ScopeGuidance says SUBSTRING, because a Cloud Logging filter written with the ':'
+// operator matches any part of protoPayload.resourceName, where CloudTrail's
+// ResourceName is an exact match. On AWS a half-remembered identifier is worthless and
+// the right move is to omit it; on GCP it is often enough on its own. Getting this
+// backwards is the exact class of wrong belief that dead-ended the investigation
+// recorded in internal/investigate/cloud_tools.go.
+//
+// LagNote says well under a minute, against CloudTrail's ~15m. A GCP investigation
+// therefore does not need to over-widen its window to see a change that just happened,
+// and a genuinely empty recent window is real evidence rather than an artifact of
+// ingestion delay.
+//
+// FailureFilterArg rests on a third difference. On both clouds this tool filters reads
+// out, but on GCP the reads are usually not in the log at all: Admin Activity audit
+// logs are always on and cannot be disabled, while Data Access audit logs are off by
+// default for every service except BigQuery. A model handed the AWS sentence would be
+// hunting for "Describe" and "Get" — AWS's read verbs — in a log whose entries name
+// google.container.v1.ClusterManager.UpdateCluster and the like.
+func (Client) CloudVocabulary() providers.CloudVocabulary {
+	return providers.CloudVocabulary{
+		Cloud:    "GCP",
+		AuditLog: "Cloud Audit Logs",
+		ChangeExamples: "GKE/Compute/IAM/network changes, manual actions, Google-initiated host events " +
+			"(host error, live migration, preemption)",
+		TimelineExamples: "GKE/Compute/IAM/manual actions",
+		ScopeGuidance: "Optional resource is a SUBSTRING match on protoPayload.resourceName — a bare " +
+			"name like \"my-nodepool\" matches, and so does a full " +
+			"\"projects/p/zones/z/instances/my-vm\" path;",
+		FailureFilterNote: "Set failed_only=true when the incident IS a rejected GCP call and you do not " +
+			"know which resource it happened to (a node pool that would not scale out, a disk attach " +
+			"that was denied): results are capped at the NEWEST entries, which on a busy project are " +
+			"routine instance and metadata churn, so the rejected call you are looking for is usually " +
+			"just past the cap. failed_only spends the cap on rejected calls instead and reports each " +
+			"one's status.",
+		FailureFilterArg: "keep only MUTATING control-plane calls that were REJECTED, reporting each " +
+			"status; use when the incident is itself a rejected GCP write. Read-only calls are never " +
+			"listed by this tool, and Data Access audit logs are off by default outside BigQuery, so a " +
+			"denied get/list will NOT appear here",
+		WidenedBanner: func(resource string) string {
+			return fmt.Sprintf("resource %q matched no Cloud Audit Log entries in the window. The "+
+				"filter is a SUBSTRING match on protoPayload.resourceName, so a partial identifier "+
+				"would have been enough — nothing in the window carried that string at all. Showing "+
+				"ALL mutating entries in the window instead:\n", resource)
+		},
+		LagNote: "Cloud Audit Logs lag well under a minute",
+		HealthSurface: "GKE cluster and node-pool status + conditions, managed-instance-group errors " +
+			"(stockouts, quota and IP exhaustion), and — when given a Compute Engine instance name — " +
+			"its instance status.",
+		InstanceArg: "optional Compute Engine instance name",
+	}
+}
+
+// errNotImplemented is returned by the two CloudProvider lenses this package has not
+// filled in yet.
+//
+// The lenses belong in auditlog.go and resourcehealth.go, split the same way
+// cloudtrail.go and resourcehealth.go are on the AWS side: they share only the Client,
+// and have disjoint APIs, failure modes and tests. Neither file exists yet, so the two
+// placeholders below stand in until they do, and MUST be deleted by whoever writes
+// them — Go will insist, since a real method redeclares one of these.
+//
+// They exist rather than being left out because var _ providers.CloudProvider =
+// (*Client)(nil) above is the assertion that this package is on track to be a cloud
+// provider at all, and it cannot compile without them. Dropping the assertion instead
+// would trade a loud, self-clearing placeholder for a silent gap in exactly the check
+// that catches an interface drifting out from under its implementation.
+//
+// Returning an error rather than an empty result is the load-bearing part. Empty is a
+// POSITIVE claim on these two lenses: the tools render no changes as "no mutating GCP
+// events in the window" and no lines as "no GCP resource health returned", and a model
+// repeats either into a finding as though the cloud had been queried and found quiet.
+// An error is surfaced as a tool failure, which establishes nothing — the only honest
+// answer available before the lenses are written.
+var errNotImplemented = errors.New("gcp: lens not implemented")
+
+// CloudChanges is not implemented yet; see errNotImplemented. Cloud Audit Log
+// entries.list over the activity and system_event streams lands in auditlog.go.
+func (*Client) CloudChanges(_ context.Context, _ providers.Selector, _ providers.TimeWindow, _ providers.CloudChangeFilter) ([]providers.Change, error) {
+	return nil, fmt.Errorf("cloud changes: %w", errNotImplemented)
+}
+
+// ResourceHealth is not implemented yet; see errNotImplemented. The GKE cluster,
+// node-pool, managed-instance-group and instance describes land in resourcehealth.go.
+func (*Client) ResourceHealth(_ context.Context, _ providers.Selector, _ providers.TimeWindow) (providers.LogResult, error) {
+	return nil, fmt.Errorf("resource health: %w", errNotImplemented)
+}
