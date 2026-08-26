@@ -341,6 +341,14 @@ config:
     provider: aws
     region: eu-west-3
     cluster_name: your-eks-cluster
+  # On GKE this whole block becomes, with nothing else in this profile changing:
+  #   cloud:
+  #     provider: gcp   # nothing else needed — project/location/cluster_name
+  #                     # autodetect from the GKE metadata server.
+  # Auth is a Workload Identity DIRECT PRINCIPAL BINDING: leave serviceAccount.annotations
+  # above EMPTY on GKE. See values.yaml's cloud: comment for the full IAM binding loop
+  # (three read-only roles) and why annotating the ServiceAccount is the wrong move —
+  # it silently redirects auth to a GSA holding none of those roles.
 
   # Network-flow evidence for network_drops. PLUGGABLE and CNI-agnostic — hubble is
   # one of three providers (aws-vpc-flow-logs and gcp-firewall-logs need no Cilium).

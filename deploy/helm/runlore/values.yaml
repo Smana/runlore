@@ -390,6 +390,38 @@ config:
   #   # aws: { region: eu-west-3, log_group: /aws/vpc/flowlogs }
   #   # provider: gcp-firewall-logs          # any GCP VPC (incl. GKE)
   #   # gcp: { project: my-gcp-project }
+  # Cloud control-plane context (cloud_what_changed / cloud_resource_health). OPT-IN —
+  # empty/unset provider disables both tools. Always in-cluster identity, never a
+  # static key:
+  #
+  # cloud:
+  #   provider: aws                        # CloudTrail + EC2/ASG/EKS; auth is EKS Pod Identity / IRSA
+  #   region: eu-west-3
+  #   cluster_name: my-eks-cluster
+  #
+  # cloud:
+  #   provider: gcp                        # Cloud Audit Logs + GKE/MIG/Compute; auth is GKE Workload Identity
+  #   # Every cloud.gcp field is OPTIONAL. On GKE, project, location and cluster name
+  #   # are all read from the metadata server, so `cloud: {provider: gcp}` alone is a
+  #   # complete config. Set cloud.gcp.{project,location,cluster_name} only to override
+  #   # autodetection — off-cluster, or scoping to a project other than the one GKE
+  #   # runs in:
+  #   # gcp: { project: my-gcp-project, location: europe-west1, cluster_name: my-gke-cluster }
+  #
+  # GCP auth is a Workload Identity DIRECT PRINCIPAL BINDING — there is no Google
+  # service account anywhere in this setup. Do NOT set serviceAccount.annotations
+  # below to "iam.gke.io/gcp-service-account": that annotation is for the OTHER
+  # (GSA-impersonation) flavor of Workload Identity, and setting it here silently
+  # redirects every GCP call to that GSA instead of the roles bound to the KSA below.
+  # A GSA that holds none of those roles fails with the exact same bare 403 as a
+  # missing binding — except the fix RunLore prints assumes direct binding and does
+  # NOT resolve it. Leave serviceAccount.annotations empty and bind the KSA itself:
+  #
+  #   PN=$(gcloud projects describe MY_PROJECT --format='value(projectNumber)')  # NUMBER, not id — principal:// rejects the id
+  #   for ROLE in roles/logging.viewer roles/container.clusterViewer roles/compute.viewer; do
+  #     gcloud projects add-iam-policy-binding MY_PROJECT --role="$ROLE" \
+  #       --member="principal://iam.googleapis.com/projects/$PN/locations/global/workloadIdentityPools/MY_PROJECT.svc.id.goog/subject/ns/runlore/sa/runlore"
+  #   done
   # Source-repo allowlist (source_diff). OPT-IN — unset ⇒ the tool is not registered.
   # Lets the agent diff app/module source between two versions a bump names (e.g.
   # image v1.2.2→v1.2.3), reading the offending commit. Patterns are host/org/repo
