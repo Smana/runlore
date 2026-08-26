@@ -33,8 +33,9 @@ type IncidentTimelineTool struct {
 	// kube_events; the timeline prefers its EventWindower when available so a busy
 	// namespace still surfaces the newest in-window events. Optional (nil ⇒ skipped).
 	Kube providers.KubeReader
-	// Cloud supplies mutating cloud control-plane changes (CloudTrail). Optional
-	// (nil ⇒ skipped) — it is only wired on an AWS-enabled deployment.
+	// Cloud supplies mutating cloud control-plane changes from the provider's audit
+	// log (CloudTrail on AWS, Cloud Audit Logs on GCP). Optional (nil ⇒ skipped) — it
+	// is only wired on a cloud-enabled deployment.
 	Cloud providers.CloudProvider
 }
 
@@ -62,10 +63,18 @@ const (
 func (t IncidentTimelineTool) Name() string { return "incident_timeline" }
 
 // Description returns the human-readable tool description advertised to the model.
+//
+// Only the cloud clause is rendered; the rest is a literal. This tool is registered
+// whenever ANY of its three datasources is wired, so on a GCP deployment it ships to
+// the model alongside cloud_what_changed — and naming CloudTrail here while
+// cloud_what_changed correctly names Cloud Audit Logs would leave the model holding
+// two different beliefs about the same data, which is worse than either one being
+// wrong. Nothing else in the sentence is cloud-specific, so nothing else moves.
 func (t IncidentTimelineTool) Description() string {
+	v := vocabularyFor(t.Cloud)
 	return "Build ONE time-sorted incident timeline for a namespace by fusing GitOps changes " +
-		"(deploys/reconciles + what the diff touched), cloud control-plane changes (CloudTrail: " +
-		"ASG/EC2/EKS/manual actions), and Kubernetes Warning Events — merged and ordered by " +
+		fmt.Sprintf("(deploys/reconciles + what the diff touched), cloud control-plane changes (%s: "+
+			"%s), and Kubernetes Warning Events — merged and ordered by ", v.AuditLog, v.TimelineExamples) +
 		"timestamp so you see the incident chronology at a glance instead of stitching timestamps " +
 		"across separate tools. USE THIS EARLY to establish the sequence (\"deploy at 14:02 → first " +
 		"crash at 14:33\"), then drill into a specific row with what_changed / kube_events / " +
@@ -156,9 +165,10 @@ func (t IncidentTimelineTool) Call(ctx context.Context, args string) (string, er
 		}
 	}
 
-	// Cloud control-plane changes (CloudTrail). Selector is namespace-agnostic
-	// (cloud events are cluster/account-scoped), so we pass an empty selector and let
-	// the provider return the window's mutating events.
+	// Cloud control-plane changes, from whichever audit log the provider reads.
+	// Selector is namespace-agnostic (cloud events are cluster/account/project-scoped),
+	// so we pass an empty selector and let the provider return the window's mutating
+	// events.
 	if t.Cloud != nil {
 		changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{}, window, providers.CloudChangeFilter{})
 		if err != nil {

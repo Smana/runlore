@@ -4,6 +4,7 @@ package investigate
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -232,5 +233,188 @@ func TestCloudWhatChangedBoundedScanIsNotAnEvent(t *testing.T) {
 	// And it must not spend a second 20-page budget on the widen.
 	if cloud.calls != 1 {
 		t.Errorf("a bounded scoped scan must not widen (40 pages against a ~2 TPS API): %d calls", cloud.calls)
+	}
+}
+
+// describing wraps any CloudProvider with a vocabulary, turning it into a
+// providers.CloudDescriber. It wraps rather than reimplements so the fakes above —
+// which model provider BEHAVIOUR (exact-match scoping, bounded scans) — can be reused
+// to test WORDING, instead of growing a parallel set of describing fakes whose
+// behaviour would then have to be kept in step with theirs.
+type describing struct {
+	providers.CloudProvider
+	vocab providers.CloudVocabulary
+}
+
+func (d describing) CloudVocabulary() providers.CloudVocabulary { return d.vocab }
+
+// gcpish is a plausible GCP vocabulary. It is not the real one — that arrives with
+// the GCP provider — but it names a different audit log, a different scope-match rule
+// and a different instance identifier, which is everything a wording test needs.
+func gcpish() providers.CloudVocabulary {
+	return providers.CloudVocabulary{
+		Cloud:            "GCP",
+		AuditLog:         "Cloud Audit Logs",
+		ChangeExamples:   "GKE/Compute/IAM changes, manual actions",
+		TimelineExamples: "GKE/Compute/IAM actions",
+		ScopeGuidance: "Optional resource is a SUBSTRING match on protoPayload.resourceName — a full " +
+			"resource path or any part of one;",
+		FailureFilterNote: "Set failed_only=true when the incident IS a rejected GCP API call and you do " +
+			"not know which resource it happened to.",
+		FailureFilterArg: "keep only MUTATING control-plane calls that were REJECTED, reporting each " +
+			"error code; use when the incident is itself a rejected GCP write. Data Access audit logs " +
+			"are off by default, so a denied read will NOT appear here",
+		WidenedBanner: func(resource string) string {
+			return fmt.Sprintf("resource %q matched no Cloud Audit Log entries in the window. Showing "+
+				"ALL mutating entries instead:\n", resource)
+		},
+		LagNote:       "Cloud Audit Logs lag well under a minute",
+		HealthSurface: "GKE cluster and node-pool conditions, and MIG scaling activity.",
+		InstanceArg:   "optional Compute Engine instance name",
+	}
+}
+
+// awsNouns are the words that must never reach a model on a non-AWS deployment.
+// "EC2"/"EKS" are listed separately from "AWS" because the two Description() methods
+// name AWS services without ever writing "AWS": a check for the brand alone passes
+// while the health lens still advertises EKS nodegroups on a GKE cluster.
+var awsNouns = []string{"AWS", "CloudTrail", "EC2", "EKS", "ASG", "ARN"}
+
+// TestCloudToolsDescribeTheCloudTheyActuallyQuery is the point of the whole
+// CloudDescriber exercise: a GCP-backed tool must never tell the model it is reading
+// CloudTrail.
+//
+// It sweeps every model-facing surface rather than the two Description() methods,
+// because those were only ever the most visible third of the problem. The JSON
+// schemas each carry an argument description with AWS nouns in it, and the
+// empty-result strings — the sentences a model is most likely to quote verbatim into
+// a finding — carried them too. A test that checked Description() alone would have
+// passed with most of the defect still shipping.
+func TestCloudToolsDescribeTheCloudTheyActuallyQuery(t *testing.T) {
+	ctx := context.Background()
+	quiet := describing{CloudProvider: fakeCloud{}, vocab: gcpish()}
+	// A scope that never matches, so the lookup widens and emits the banner.
+	widening := describing{
+		CloudProvider: &exactMatchCloud{resourceName: "//container.googleapis.com/projects/p/clusters/c",
+			changes: []providers.Change{{
+				When: time.Unix(1700000000, 0).UTC(), ManagedBy: "container.googleapis.com",
+				Workload: providers.Workload{Kind: "gke_cluster", Name: "c"},
+			}}},
+		vocab: gcpish(),
+	}
+
+	call := func(tool interface {
+		Call(context.Context, string) (string, error)
+	}, args string) string {
+		t.Helper()
+		out, err := tool.Call(ctx, args)
+		if err != nil {
+			t.Fatalf("Call(%s): %v", args, err)
+		}
+		return out
+	}
+
+	tests := []struct {
+		name string
+		got  string
+		want string // a GCP noun that proves the vocabulary was actually consulted
+	}{
+		{
+			name: "cloud_what_changed's description names Cloud Audit Logs",
+			got:  CloudWhatChangedTool{Cloud: quiet}.Description(),
+			want: "Cloud Audit Logs",
+		},
+		{
+			name: "cloud_what_changed's schema describes failed_only in GCP's terms",
+			got:  CloudWhatChangedTool{Cloud: quiet}.Schema(),
+			want: "Data Access audit logs are off by default",
+		},
+		{
+			name: "cloud_resource_health's description names GKE, not EKS",
+			got:  CloudResourceHealthTool{Cloud: quiet}.Description(),
+			want: "GKE cluster and node-pool conditions",
+		},
+		{
+			name: "cloud_resource_health's schema asks for a Compute Engine instance name",
+			got:  CloudResourceHealthTool{Cloud: quiet}.Schema(),
+			want: "Compute Engine instance name",
+		},
+		{
+			name: "incident_timeline's description names the log its cloud rows come from",
+			got:  IncidentTimelineTool{Cloud: quiet}.Description(),
+			want: "Cloud Audit Logs: GKE/Compute/IAM actions",
+		},
+		{
+			name: "a quiet window does not claim AWS was quiet",
+			got:  call(CloudWhatChangedTool{Cloud: quiet}, `{}`),
+			want: "no mutating GCP events in the window",
+		},
+		{
+			name: "an empty failed_only lookup does not claim AWS had no failures",
+			got:  call(CloudWhatChangedTool{Cloud: quiet}, `{"failed_only":true}`),
+			want: "no FAILED GCP control-plane calls in the window",
+		},
+		{
+			name: "the dropped-scope banner explains GCP's match rule, not CloudTrail's",
+			got:  call(CloudWhatChangedTool{Cloud: widening}, `{"resource":"guessed"}`),
+			want: "matched no Cloud Audit Log entries",
+		},
+		{
+			name: "an empty health lookup does not claim AWS returned nothing",
+			got:  call(CloudResourceHealthTool{Cloud: quiet}, `{}`),
+			want: "no GCP resource health returned",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(tt.got, tt.want) {
+				t.Errorf("GCP wording %q missing:\n%s", tt.want, tt.got)
+			}
+			for _, noun := range awsNouns {
+				if strings.Contains(tt.got, noun) {
+					t.Errorf("still names %q on a GCP provider:\n%s", noun, tt.got)
+				}
+			}
+		})
+	}
+}
+
+// TestCloudToolsFallBackToAWSWordingWithoutADescriber pins the compatibility half of
+// the promise from the tools' side: a provider that does not implement CloudDescriber
+// — which is every provider that existed before it, plus the nil Cloud
+// IncidentTimelineTool is routinely registered with — renders exactly the AWS text.
+//
+// internal/providers/cloudvocabulary_test.go holds the frozen bytes; this only checks
+// that the tools route to that vocabulary at all, which is the part a rewiring
+// mistake would break.
+func TestCloudToolsFallBackToAWSWordingWithoutADescriber(t *testing.T) {
+	v := providers.AWSCloudVocabulary()
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "a CloudProvider with no vocabulary gets cloud_what_changed's AWS description",
+			got:  CloudWhatChangedTool{Cloud: fakeCloud{}}.Description(),
+			want: v.ChangeDescription(),
+		},
+		{
+			name: "a CloudProvider with no vocabulary gets cloud_resource_health's AWS description",
+			got:  CloudResourceHealthTool{Cloud: fakeCloud{}}.Description(),
+			want: v.HealthDescription(),
+		},
+		{
+			name: "a nil Cloud does not panic and still renders incident_timeline",
+			got:  IncidentTimelineTool{}.Description(),
+			want: IncidentTimelineTool{Cloud: fakeCloud{}}.Description(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("fallback text drifted:\n got:  %q\nwant: %q", tt.got, tt.want)
+			}
+		})
 	}
 }

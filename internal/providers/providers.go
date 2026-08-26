@@ -1104,26 +1104,39 @@ type CloudProvider interface {
 //
 // Punctuation is part of each fragment's contract, because the skeleton splices
 // fragments into sentences rather than terminating each one uniformly: ChangeExamples,
-// LagNote and InstanceArg are bare phrases with NO trailing punctuation; ScopeGuidance
-// ends with ";" (the skeleton appends the OMIT clause and its own period);
-// FailureFilterNote and HealthSurface are complete sentences ending in "." — or, for
-// FailureFilterNote ONLY, the empty string for a cloud with nothing to say, which the
-// renderer omits outright rather than leaving a blank sentence.
+// TimelineExamples, LagNote, InstanceArg and FailureFilterArg are bare phrases with NO
+// trailing punctuation; ScopeGuidance ends with ";" (the skeleton appends the OMIT
+// clause and its own period); FailureFilterNote and HealthSurface are complete
+// sentences ending in "." — or, for FailureFilterNote ONLY, the empty string for a
+// cloud with nothing to say, which the renderer omits outright rather than leaving a
+// blank sentence.
 //
-// Not every field feeds ChangeDescription/HealthDescription: InstanceArg is schema
-// text — CloudResourceHealthTool's `instance_id` argument description — consumed
-// where the tool builds its JSON Schema, not by either renderer here. HealthSurface
-// and InstanceArg separately name the same optional-argument noun (today, "EC2
-// instance-id (i-…)" vs "EC2 instance id (i-…)" — already spelled two different
-// ways) rather than sharing a constant: they are not actually identical text today, so
-// deduplicating would mean either changing one — altering rendered output — or
-// defining two near-duplicate constants that dedupe nothing. Worth a future cloud's
-// author knowing they are naming the same argument twice.
+// Not every field feeds ChangeDescription/HealthDescription. InstanceArg and
+// FailureFilterArg are JSON-Schema text — CloudResourceHealthTool's `instance_id` and
+// CloudWhatChangedTool's `failed_only` argument descriptions — consumed where those
+// tools build their schemas, and TimelineExamples belongs to a third tool entirely
+// (IncidentTimelineTool), whose sentence fuses three datasources and so is not this
+// type's to render. HealthSurface and InstanceArg separately name the same
+// optional-argument noun (today, "EC2 instance-id (i-…)" vs "EC2 instance id (i-…)" —
+// already spelled two different ways) rather than sharing a constant: they are not
+// actually identical text today, so deduplicating would mean either changing one —
+// altering rendered output — or defining two near-duplicate constants that dedupe
+// nothing. Worth a future cloud's author knowing they are naming the same argument
+// twice; the same goes for ChangeExamples and TimelineExamples.
 type CloudVocabulary struct {
 	Cloud          string // "AWS" | "GCP"
 	AuditLog       string // "CloudTrail" | "Cloud Audit Logs"
 	ChangeExamples string // bare, comma-joined list of the kinds of change this log carries; no trailing punctuation
 	ScopeGuidance  string // how the `resource` argument matches; ends with ";", no period
+
+	// TimelineExamples is ChangeExamples' shorter sibling, for incident_timeline —
+	// whose cloud clause is one item in a three-datasource sentence and so names
+	// fewer services ("ASG/EC2/EKS/manual actions" against ChangeExamples'
+	// "ASG/EC2/EKS/RDS/SG changes, manual actions"). Two fields, not one, because
+	// those are not the same text today: collapsing them would reword one of the two
+	// shipped tool descriptions, and the promise this whole type exists to keep is
+	// that AWS's model-facing text survives the refactor byte for byte.
+	TimelineExamples string
 
 	// FailureFilterNote explains cloud_what_changed's failed_only argument, or is ""
 	// for a cloud with nothing equivalent to filter for. It is its own field, rather
@@ -1133,6 +1146,20 @@ type CloudVocabulary struct {
 	// one vanishing silently the day a tool starts rendering from this struct instead
 	// of carrying its own literal.
 	FailureFilterNote string
+
+	// FailureFilterArg is the JSON-Schema description of that same failed_only
+	// argument — schema text, like InstanceArg, rather than prose ChangeDescription
+	// renders. Its AWS nouns are easy to miss because not one of them is a
+	// capitalised service name: it calls the incident "a failed AWS write operation",
+	// and it promises that "a denied Describe/Get will NOT appear here", Describe and
+	// Get being the AWS read verbs. The GCP sentence has to name different verbs
+	// (get/list) and rests on a different fact: this tool filters reads out on either
+	// cloud, but on GCP the reads are usually not in the log to begin with, because
+	// Data Access audit logs are off by default outside BigQuery while Admin Activity
+	// logs are always on. A model handed the AWS version would be hunting for the
+	// wrong verb names — the same class of wrong belief about how a lookup matches
+	// that cloud_tools.go records an investigation dead-ending on.
+	FailureFilterArg string
 
 	// WidenedBanner renders the banner shown when a scoped cloud_what_changed lookup
 	// matched nothing and the tool retried unscoped. It is a func, not a template
@@ -1145,7 +1172,10 @@ type CloudVocabulary struct {
 	// widenedFailedBanner (cloud_tools.go) has no equivalent slot here: its text —
 	// "no FAILED calls against resource %q…" — carries no cloud noun at all, so
 	// there is nothing for a GCP vocabulary to say differently. It stays a plain
-	// constant in the tool layer.
+	// constant in the tool layer, and is deliberately the only banner literal left
+	// there. A slot for it would be a slot every future cloud must fill with the
+	// same words, which is how vocabularies acquire fields that only ever hold one
+	// value and then drift apart for no reason.
 	WidenedBanner func(resource string) string
 
 	LagNote       string // ingestion lag, e.g. "CloudTrail lags ~15m"; bare phrase, no punctuation
@@ -1182,6 +1212,36 @@ func (v CloudVocabulary) HealthDescription() string {
 	)
 }
 
+// EmptyChangesMessage is what cloud_what_changed returns for a window it found no
+// mutating events in.
+//
+// An empty result is rendered from the vocabulary, not written as a literal in the
+// tool, because it is a CLAIM about a named cloud: "no mutating AWS events in the
+// window" on a GCP deployment asserts something the tool never looked at. It is also
+// the single sentence a model is most likely to copy verbatim into a finding — an
+// investigation that closes with "no mutating AWS events in the window" reads as
+// evidence to the human on call, and on GCP it would be evidence of nothing.
+func (v CloudVocabulary) EmptyChangesMessage() string {
+	return fmt.Sprintf("no mutating %s events in the window", v.Cloud)
+}
+
+// EmptyFailedChangesMessage is what cloud_what_changed returns when failed_only was
+// set and no rejected calls matched. It names the filter that produced the emptiness,
+// because "no failures" and "the control plane was quiet" are different claims and
+// only one of them was established. See cloud_tools.go's Call for the rest of that
+// argument, including why a bounded scan appends its own note instead.
+func (v CloudVocabulary) EmptyFailedChangesMessage() string {
+	return fmt.Sprintf("no FAILED %s control-plane calls in the window (successful events were not "+
+		"listed — re-run without failed_only to see them)", v.Cloud)
+}
+
+// EmptyHealthMessage is what cloud_resource_health returns when the provider produced
+// no lines. Same reasoning as EmptyChangesMessage: the sentence names a cloud, so the
+// cloud has to be the one that was actually queried.
+func (v CloudVocabulary) EmptyHealthMessage() string {
+	return fmt.Sprintf("no %s resource health returned", v.Cloud)
+}
+
 // CloudDescriber is an OPTIONAL CloudProvider extension naming the cloud's own
 // vocabulary. Same shape as every other optional capability here (OwnerWalker,
 // EventWindower, GitOpsEngineReporter, ProgressNotifier): the tools type-assert for
@@ -1195,19 +1255,20 @@ type CloudDescriber interface {
 }
 
 // AWSCloudVocabulary is the AWS wording, and the fallback for any CloudProvider that
-// does not implement CloudDescriber. Every fragment is pinned by a test:
-// ChangeDescription/HealthDescription's fragments by
-// TestAWSCloudVocabularyReproducesTheLiveToolText, which compares this function's
-// rendered output against CloudWhatChangedTool/CloudResourceHealthTool's actual
-// Description() methods rather than a pasted copy; WidenedBanner by
-// TestWidenedBannerMatchesCloudToolsConstant, which reads cloud_tools.go's unexported
-// widenedBanner constant off disk; and InstanceArg by its presence in
-// CloudResourceHealthTool.Schema().
+// does not implement CloudDescriber.
+//
+// Every fragment reaches a model through some rendered surface, and every one of
+// those surfaces is pinned byte for byte by
+// TestAWSCloudVocabularyStillRendersTheShippedAWSText — a frozen golden captured from
+// the tool text as it shipped, compared against the LIVE tool methods rather than
+// against this function, so the golden stays an independent witness now that the
+// tools render from here.
 func AWSCloudVocabulary() CloudVocabulary {
 	return CloudVocabulary{
-		Cloud:          "AWS",
-		AuditLog:       "CloudTrail",
-		ChangeExamples: "ASG/EC2/EKS/RDS/SG changes, manual actions",
+		Cloud:            "AWS",
+		AuditLog:         "CloudTrail",
+		ChangeExamples:   "ASG/EC2/EKS/RDS/SG changes, manual actions",
+		TimelineExamples: "ASG/EC2/EKS/manual actions",
 		ScopeGuidance: "Optional resource is an EXACT CloudTrail ResourceName — a full ARN, instance-id, " +
 			"ASG name, or a resource's full path (e.g. a Secrets Manager secret's \"apps/team/name\") — never a " +
 			"service name or substring;",
@@ -1216,6 +1277,9 @@ func AWSCloudVocabulary() CloudVocabulary {
 			"are capped at the NEWEST events, which on a busy cluster are routine instance and tag churn, so " +
 			"the rejected call you are looking for is usually just past the cap. failed_only spends the cap " +
 			"on rejected calls instead and reports each one's error code.",
+		FailureFilterArg: "keep only MUTATING control-plane calls that were REJECTED, reporting each " +
+			"error code; use when the incident is itself a failed AWS write operation. Read-only calls " +
+			"are never listed by this tool, so a denied Describe/Get will NOT appear here",
 		WidenedBanner: func(resource string) string {
 			return fmt.Sprintf("resource %q matched no CloudTrail events — ResourceName is an exact match "+
 				"on the full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a "+
