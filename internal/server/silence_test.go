@@ -13,6 +13,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Smana/runlore/internal/slackcard"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 type recordedSilence struct {
@@ -40,8 +43,19 @@ func (r *recordSilence) Silence(key string, window time.Duration, user string, _
 func sendSilence(t *testing.T, srv *Server, secret, blockID, value string) *httptest.ResponseRecorder {
 	t.Helper()
 	return postSignedInteraction(t, srv, secret,
-		`{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"runlore_silence",`+
-			`"block_id":"`+blockID+`","selected_option":{"value":"`+value+`"}}]}`)
+		`{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"`+slackcard.SilenceActionID+`",`+
+			`"block_id":`+quoteJSON(t, blockID)+`,"selected_option":{"value":`+quoteJSON(t, value)+`}}]}`)
+}
+
+// quoteJSON renders v as a JSON string literal, quotes and all, so fixtures stay
+// correct by construction rather than by every caller avoiding quotes.
+func quoteJSON(t *testing.T, v string) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("quote %q: %v", v, err)
+	}
+	return string(b)
 }
 
 // postSignedInteraction form-encodes payload, signs it the way Slack does, and
@@ -157,66 +171,10 @@ func TestSilenceReadsAStaticSelectPayload(t *testing.T) {
 	}
 }
 
-// TestSilencedCardDropsTheControlAndKeepsTheFinding pins the rebuild: the 🔕 menu
-// goes (it has served its purpose, and a second click on a card that already says
-// it is silenced is pure confusion), 👍/👎 stay (a 👎 is the documented way to
-// lift a silence early, so removing it would strand the escape hatch the ack
-// promises), and the marker is appended.
-func TestSilencedCardDropsTheControlAndKeepsTheFinding(t *testing.T) {
-	blocks := []map[string]any{
-		{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "*Why:* something broke"}},
-		{"type": "actions", "block_id": "sil:k", "elements": []any{
-			map[string]any{"type": "button", "action_id": "runlore_feedback_up"},
-			map[string]any{"type": "button", "action_id": "runlore_feedback_down"},
-			map[string]any{"type": "static_select", "action_id": "runlore_silence"},
-		}},
-	}
-	got, ok := silencedCard(blocks, "runlore_silence", "🔕 Silenced by @x until y · 48h")
-	if !ok {
-		t.Fatal("rebuild refused a well-formed card")
-	}
-	dump, _ := json.Marshal(got)
-	if strings.Contains(string(dump), "runlore_silence") {
-		t.Error("the silence control survived the rebuild")
-	}
-	for _, keep := range []string{"runlore_feedback_up", "runlore_feedback_down", "something broke"} {
-		if !strings.Contains(string(dump), keep) {
-			t.Errorf("the rebuild dropped %q — it must only remove the silence control", keep)
-		}
-	}
-	if !strings.Contains(string(dump), "Silenced by @x") {
-		t.Error("the marker was not appended")
-	}
-}
-
-// TestSilencedCardRefusesRatherThanBlanksTheCard is the regression test for the
-// one hard invariant of this feature. The rebuilt card is posted with
-// replace_original: true, which OVERWRITES the Slack message — so a rebuild that
-// cannot be done from what the payload actually carries must report failure and
-// let the caller fall back to an ephemeral note. Blanking the card loses the
-// investigation the silence is about, which is strictly worse than having no
-// marker: refusing costs a marker, guessing costs the finding.
-func TestSilencedCardRefusesRatherThanBlanksTheCard(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		blocks []map[string]any
-	}{
-		{"no blocks in the payload at all", nil},
-		{"an empty block list", []map[string]any{}},
-		{
-			"a lone actions block, so removing the control leaves nothing to post",
-			[]map[string]any{{"type": "actions", "elements": []any{
-				map[string]any{"type": "static_select", "action_id": "runlore_silence"},
-			}}},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got, ok := silencedCard(tc.blocks, "runlore_silence", "marker"); ok {
-				t.Errorf("rebuild claimed success on %s: %v", tc.name, got)
-			}
-		})
-	}
-}
+// The pure-function tests for the rewrite itself now live beside it in
+// internal/slackcard, which is where the walk moved so that the card BUILDER and
+// the card REWRITER stop keeping two copies of the card's shape. What stays here
+// is what only this package can prove: that the wiring honours the refusal.
 
 // testSlackResponseURL is shaped like a real interaction response_url so the SSRF
 // guard in postSlackResponse ACCEPTS it. That is the point: the guard takes no
@@ -230,6 +188,11 @@ const testSlackResponseURL = "https://hooks.slack.com/actions/T024BE7LD/12345678
 type captureSlackResponse struct {
 	t     *testing.T
 	posts *[]map[string]any
+	// failCard answers the card rewrite with 500 while still accepting the
+	// acknowledgement, which is how Slack fails in the case worth testing: the
+	// silence is recorded, and the announcement of it is the part that did not
+	// land.
+	failCard bool
 }
 
 func (c captureSlackResponse) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -243,6 +206,14 @@ func (c captureSlackResponse) RoundTrip(req *http.Request) (*http.Response, erro
 		c.t.Errorf("response_url body is not JSON: %v — %s", err, body)
 	}
 	*c.posts = append(*c.posts, decoded)
+	if c.failCard && decoded["replace_original"] == true {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(strings.NewReader("")),
@@ -261,8 +232,13 @@ const testSlackSecret = "shh"
 // err to drive the ordering invariant: record first, then decorate.
 func capturedSilenceServer(t *testing.T, posts *[]map[string]any, rec *recordSilence) *Server {
 	t.Helper()
+	return silenceServerWithTransport(t, posts, rec, false)
+}
+
+func silenceServerWithTransport(t *testing.T, posts *[]map[string]any, rec *recordSilence, failCard bool) *Server {
+	t.Helper()
 	srv := New(nil, Actions{Silence: rec, SlackSecret: testSlackSecret}, nil, nil, nil, nil, discardLog)
-	srv.slackHTTP = &http.Client{Transport: captureSlackResponse{t: t, posts: posts}}
+	srv.slackHTTP = &http.Client{Transport: captureSlackResponse{t: t, posts: posts, failCard: failCard}}
 	return srv
 }
 
@@ -317,14 +293,18 @@ func markerText(t *testing.T, card map[string]any) string {
 // notification/accessibility fallback a rewrite must carry over.
 func sendSilenceCard(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks, text string) *httptest.ResponseRecorder {
 	t.Helper()
+	// text and responseURL are quoted through encoding/json rather than spliced in:
+	// a realistic fallback like `harbor-db "crash-looping"` would otherwise produce
+	// invalid JSON, and the handler's 400 would read as "the silence path rejected
+	// my card" instead of "my fixture was malformed".
 	msg := ""
 	if blocks != "" {
-		msg = `,"message":{"blocks":` + blocks + `,"text":"` + text + `"}`
+		msg = `,"message":{"blocks":` + blocks + `,"text":` + quoteJSON(t, text) + `}`
 	}
 	return postSignedInteraction(t, srv, secret,
-		`{"user":{"id":"U9","username":"bob"},"response_url":"`+responseURL+`",`+
-			`"actions":[{"action_id":"runlore_silence","block_id":"`+blockID+
-			`","selected_option":{"value":"`+value+`"}}]`+msg+`}`)
+		`{"user":{"id":"U9","username":"bob"},"response_url":`+quoteJSON(t, responseURL)+`,`+
+			`"actions":[{"action_id":"`+slackcard.SilenceActionID+`","block_id":`+quoteJSON(t, blockID)+
+			`,"selected_option":{"value":`+quoteJSON(t, value)+`}}]`+msg+`}`)
 }
 
 const testSilenceCardBlocks = `[
@@ -489,5 +469,97 @@ func TestSilenceMarkerMentionsTheUserByID(t *testing.T) {
 	}
 	if strings.Contains(marker, "@bob") {
 		t.Errorf("the marker carries a bare @username, which Slack renders as literal text: %q", marker)
+	}
+}
+
+// TestSilenceTellsTheClickerWhenTheCardWentUnmarked covers both ways the marker
+// can fail to land. The silence itself succeeded in each — it is in the ledger and
+// RunLore is suppressing — so the failure is invisible to the clicker unless they
+// are told: they walk away believing the channel knows the finding is handled,
+// which is the exact "a colleague starts investigating it anyway" defect the
+// marker exists to prevent, restored silently.
+func TestSilenceTellsTheClickerWhenTheCardWentUnmarked(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		blocks   string
+		failCard bool
+	}{
+		{"Slack sent no blocks to rebuild from", "", false},
+		{"Slack refused the rewrite", testSilenceCardBlocks, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts []map[string]any
+			rec := &recordSilence{}
+			srv := silenceServerWithTransport(t, &posts, rec, tc.failCard)
+
+			rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "48h", testSlackResponseURL, tc.blocks, "")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("silence = %d, want 200", rr.Code)
+			}
+			if len(rec.got) != 1 {
+				t.Fatalf("the silence was not recorded: %+v — this test is about the ANNOUNCEMENT failing, not the suppression", rec.got)
+			}
+			ack := ackPost(posts)
+			if ack == nil {
+				t.Fatal("no acknowledgement reached the clicker at all")
+			}
+			text, _ := ack["text"].(string)
+			if !strings.Contains(text, thread.SilenceCardUnmarked) {
+				t.Errorf("the clicker was not told the card went unmarked: %q", text)
+			}
+			if !strings.Contains(text, "will NOT investigate") {
+				t.Errorf("the disclosure replaced the ack instead of being appended to it: %q", text)
+			}
+		})
+	}
+}
+
+// TestSilenceSaysNothingAboutTheCardWhenItWasMarked is the other half: the notice
+// above is a real warning, so it must not appear on the happy path where it would
+// train people to ignore it.
+func TestSilenceSaysNothingAboutTheCardWhenItWasMarked(t *testing.T) {
+	var posts []map[string]any
+	srv := capturedSilenceServer(t, &posts, &recordSilence{})
+
+	rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "48h", testSlackResponseURL, testSilenceCardBlocks, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	ack := ackPost(posts)
+	if ack == nil {
+		t.Fatal("no acknowledgement reached the clicker")
+	}
+	if text, _ := ack["text"].(string); strings.Contains(text, thread.SilenceCardUnmarked) {
+		t.Errorf("cried wolf about an unmarked card that was in fact marked: %q", text)
+	}
+}
+
+// TestSilenceOnAnAlreadyRewrittenCardDoesNotStackAMarker is the end-to-end half of
+// slackcard's double-marker refusal: a second engineer clicking a stale card must
+// not have their marker appended under the first one, reporting two different
+// windows for one finding.
+func TestSilenceOnAnAlreadyRewrittenCardDoesNotStackAMarker(t *testing.T) {
+	var posts []map[string]any
+	srv := capturedSilenceServer(t, &posts, &recordSilence{})
+
+	// A card that has already been through the rewrite: no silence control left.
+	const rewritten = `[
+	  {"type":"section","text":{"type":"mrkdwn","text":"*Why:* something broke"}},
+	  {"type":"actions","elements":[{"type":"button","action_id":"runlore_feedback_up"}]},
+	  {"type":"context","elements":[{"type":"mrkdwn","text":"🔕 Silenced by <@U1> until later · 4h"}]}]`
+
+	rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "24h", testSlackResponseURL, rewritten, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	if card := cardPost(posts); card != nil {
+		t.Errorf("rewrote a card that had already been rewritten: %v", card)
+	}
+	ack := ackPost(posts)
+	if ack == nil {
+		t.Fatal("no acknowledgement reached the clicker")
+	}
+	if text, _ := ack["text"].(string); !strings.Contains(text, thread.SilenceCardUnmarked) {
+		t.Errorf("the clicker was not told their marker did not land: %q", text)
 	}
 }

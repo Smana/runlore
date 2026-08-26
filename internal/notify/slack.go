@@ -20,6 +20,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/slackcard"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -311,13 +312,17 @@ func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error)
 	return result.TS, nil
 }
 
-// Slack interaction action_ids — must match the server's /slack/interactions handler.
+// Slack interaction action_ids. Defined in internal/slackcard so the renderer
+// that stamps them and the /slack/interactions handler that dispatches on them
+// read ONE definition — a rename that reached only one side used to leave every
+// real click landing in an "unknown action" branch with both packages' tests
+// still green, each asserting its own half against its own copy.
 const (
-	approveActionID      = "runlore_approve"
-	rejectActionID       = "runlore_reject"
-	feedbackUpActionID   = "runlore_feedback_up"
-	feedbackDownActionID = "runlore_feedback_down"
-	silenceActionID      = "runlore_silence"
+	approveActionID      = slackcard.ApproveActionID
+	rejectActionID       = slackcard.RejectActionID
+	feedbackUpActionID   = slackcard.FeedbackUpActionID
+	feedbackDownActionID = slackcard.FeedbackDownActionID
+	silenceActionID      = slackcard.SilenceActionID
 )
 
 // silenceBlockIDPrefix namespaces the actions block whose block_id carries the
@@ -337,8 +342,8 @@ const (
 // lands in "could not identify the incident to silence" — enforced, not merely
 // documented, by TestSilenceBlockIDPrefixMatchesTheServerHandler.
 const (
-	silenceBlockIDPrefix = "sil:"
-	slackBlockIDMax      = 255
+	silenceBlockIDPrefix = slackcard.SilenceBlockIDPrefix
+	slackBlockIDMax      = slackcard.BlockIDMax
 	// slackSilenceMinOptions is a DELIBERATE UX floor, and no longer a Slack one.
 	// It was named for the overflow element, which rejects a 1-option menu by
 	// rejecting the WHOLE message with invalid_blocks — but the control is a
@@ -514,12 +519,11 @@ func displayTitle(title string) string {
 // slackDate renders t as a Slack date token that displays in the reader's local
 // timezone, with the RFC3339 UTC form as the no-JS fallback. Slack-blocks-only:
 // the token uses raw <>, so it must never enter the escaped fallback text.
-func slackDate(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return fmt.Sprintf("<!date^%d^{date_short_pretty} {time}|%s>", t.Unix(), t.UTC().Format(time.RFC3339))
-}
+//
+// A local name for slackcard.Date, shared with the card rewriter for the same
+// reason as escapeMrkdwn: every other time on the card localises per reader, and
+// a marker that quietly did not was invisible to everyone in the author's zone.
+func slackDate(t time.Time) string { return slackcard.Date(t) }
 
 // slackProgressMessage builds the Slack payload for an interim progress ping: a
 // compact header + context line + the model's interim text. The fallback text is
@@ -563,18 +567,16 @@ func slackProgressBlocks(up providers.ProgressUpdate) []map[string]any {
 	return blocks
 }
 
-// mrkdwnEscaper implements Slack's documented mrkdwn escaping: exactly three
-// characters act as control characters and must be replaced with HTML entities
-// (& first). strings.Replacer substitutes in a single left-to-right pass, so
-// the ampersands introduced by &lt;/&gt; are never re-escaped.
-var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-
 // escapeMrkdwn neutralises untrusted text (model output, evidence quoting
 // cluster logs or alert annotations) before it is interpolated into Slack
 // mrkdwn, so a hostile log line like <https://evil.example|innocent text>
 // renders as literal text instead of a clickable phishing link. Mirrors the
 // escape-first approach of the Matrix notifier's mrkdwnToHTML.
-func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
+//
+// A local name for slackcard.EscapeMrkdwn: the card REWRITER in internal/server
+// needs the same escaping, and a second implementation of "which three characters
+// are control characters" is exactly the kind of thing that drifts silently.
+func escapeMrkdwn(s string) string { return slackcard.EscapeMrkdwn(s) }
 
 // summaryBlocks renders the triage summary as Block Kit, optimized for a
 // woken-up on-call reading on a phone: everything actionable sits above the

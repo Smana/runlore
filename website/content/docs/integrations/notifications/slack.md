@@ -94,9 +94,14 @@ Scrollback therefore distinguishes a handled finding from an unhandled one.
 That public line is **in addition to** the private acknowledgement described below, not instead of
 it. The two answer different readers: the marker tells a colleague scanning the channel a day later
 that the finding is already handled, while the acknowledgement tells whoever clicked what they just
-switched off — and which escapes this deployment actually has. If Slack sends no blocks back with the
-interaction, the card is left untouched and the private acknowledgement is the whole answer: the
-silence is recorded either way, and a marker is never worth risking the finding it marks.
+switched off — and which escapes this deployment actually has.
+
+The card is left untouched if Slack sends no blocks back with the interaction, if Slack refuses the
+rewrite, or if the card had already been rewritten (a second click on a stale card — the marker is
+never stacked twice). **The silence is recorded in every one of those cases**; a marker is never
+worth risking the finding it marks. When the card does go unmarked the acknowledgement says so,
+because otherwise the person who clicked would reasonably assume the channel had been told — and
+they are the only one who can now say it.
 
 The silence stands until one of **four** things happens:
 

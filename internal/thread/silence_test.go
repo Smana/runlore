@@ -109,11 +109,11 @@ func TestShortDuration(t *testing.T) {
 // the person who just clicked, while the marker is scannable evidence for someone
 // scrolling the channel a day later.
 func TestSilenceMarkerNamesWhoAndUntilWhen(t *testing.T) {
-	until := time.Date(2026, 8, 26, 14, 40, 0, 0, time.UTC)
-	// The ref is passed through verbatim — the caller owns the mention syntax, so
-	// this pins that the marker does not decorate or re-prefix what it is handed.
-	got := SilenceMarker("<@U9>", 48*time.Hour, until)
-	for _, want := range []string{"🔕", "<@U9>", "48h"} {
+	// Both the ref and the time are passed through verbatim — the caller owns the
+	// mention syntax and the date rendering — so this pins that the marker neither
+	// decorates, re-prefixes, nor reformats what it is handed.
+	got := SilenceMarker("<@U9>", "<!date^1756219200^{date_short_pretty} {time}|2026-08-26T14:40:00Z>", 48*time.Hour)
+	for _, want := range []string{"🔕", "<@U9>", "<!date^1756219200^", "48h"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("marker %q is missing %q", got, want)
 		}

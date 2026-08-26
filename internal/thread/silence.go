@@ -93,6 +93,18 @@ func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnab
 		user, until.Format(silenceExpiryLayout), ShortDuration(window), escapes)
 }
 
+// SilenceCardUnmarked is appended to the acknowledgement when the silence was
+// recorded but the card could NOT be stamped — Slack sent no blocks to rebuild
+// from, or refused the rewrite.
+//
+// It is disclosure, not an error: the suppression is in the ledger and is real.
+// What failed is the announcement, and the person who clicked is the only one who
+// can now make it. Left unsaid, they would reasonably assume the channel had been
+// told — which is precisely the "a colleague starts investigating something
+// already handled" failure the marker exists to prevent, restored silently.
+const SilenceCardUnmarked = "⚠️ The silence is recorded, but the card itself could not be marked, " +
+	"so the channel cannot tell this finding is handled. Say so in the thread if someone else might pick it up."
+
 // SilenceMarker is the one-line stamp left ON THE CARD after a silence, as
 // distinct from SilenceAck's full explanation to the person who clicked.
 //
@@ -106,14 +118,17 @@ func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnab
 // It is a single line because it renders in a Slack context block, which is set
 // in small grey type and wraps badly.
 //
-// userRef is inserted VERBATIM, so the caller supplies its transport's own
-// mention syntax rather than a bare name. On Slack that is "<@U9>", which is the
-// only form linkified inside a Block Kit mrkdwn element: a leading "@bob" renders
-// there as literal text, because link_names is a chat.postMessage option and has
-// no effect on blocks. Naming the silencer without notifying them or linking
-// their profile is most of the marker's value gone, and the failure is invisible
-// to anyone reading the string — which is why the shape is the caller's to state.
-func SilenceMarker(userRef string, window time.Duration, until time.Time) string {
+// userRef and untilText are both inserted VERBATIM: this function owns the word
+// order, the 🔕 and the window, and the TRANSPORT owns how a person and a time
+// are drawn. That split is the same one RenderReply makes by taking an escaper,
+// and it is here because both halves were got wrong while thread rendered them
+// itself. A bare "@bob" is not a mention — only "<@U9>" is linkified inside a
+// Block Kit mrkdwn element, since link_names is a chat.postMessage option with no
+// effect on blocks. And a time formatted here is formatted in the RunLore
+// process's timezone, while every other time on the card is a Slack date token
+// that localises per reader. Neither failure is visible to anyone reading the
+// string in the zone that wrote it, which is why the caller must state the shape.
+func SilenceMarker(userRef, untilText string, window time.Duration) string {
 	return fmt.Sprintf("🔕 Silenced by %s until %s · %s",
-		userRef, until.Format(silenceExpiryLayout), ShortDuration(window))
+		userRef, untilText, ShortDuration(window))
 }
