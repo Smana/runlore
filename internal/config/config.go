@@ -2269,11 +2269,7 @@ func (c *Config) Validate() error {
 		// own terms reports the more specific reason.
 		if c.Notify.Slack.SilenceButton {
 			if n := len(c.Notify.Silence.Windows); n < 2 || n > 5 {
-				entries := "entries"
-				if n == 1 {
-					entries = "entry"
-				}
-				return fmt.Errorf("notify.silence.windows lists %d %s, but the 🔕 menu offers 2 to 5: a one-option dropdown is a button wearing a menu and a six-item one is a form, on a card someone is reading at 3am — adjust the list, or turn off notify.slack.silence_button", n, entries)
+				return fmt.Errorf("notify.silence.windows lists %d, but the 🔕 menu offers 2 to 5 entries: a one-option dropdown is a button wearing a menu and a six-item one is a form, on a card someone is reading at 3am — adjust the list, or turn off notify.slack.silence_button", n)
 			}
 		}
 	}

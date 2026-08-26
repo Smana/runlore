@@ -1944,6 +1944,19 @@ func TestMaxNoteBytesTooSmallToKeepAnyNoteIsRejected(t *testing.T) {
 // silenceTestConfig is the minimal config that passes Validate with Slack
 // silencing on: a ledger to record into, a signing secret to verify the click
 // with, a delivery target for the control to live on, and the presets under test.
+// matrixOnly turns a silenceTestConfig into a coherent Matrix-only deployment:
+// the Slack control off, the reaction path on, and the listener fields Validate
+// requires alongside it. Extracted because the preset-count bounds are scoped to
+// the Slack control, so every case that pins "this bound does not apply to
+// Matrix" needs exactly this setup.
+func matrixOnly(c *Config) {
+	c.Notify.Slack.SilenceButton = false
+	c.Notify.Matrix.SilenceReactions = true
+	c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+	c.Notify.Matrix.RoomID = "!room:example.org"
+	c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+}
+
 func silenceTestConfig(windows []Duration) *Config {
 	c := &Config{}
 	c.Outcome.LedgerPath = "/tmp/outcome.jsonl"
@@ -2026,7 +2039,7 @@ func TestSilenceConfigValidation(t *testing.T) {
 				}
 				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
 			},
-			wantErr: "notify.silence.windows",
+			wantErr: "2 to 5",
 		},
 		{
 			name: "exactly 5 presets is the accepted boundary",
@@ -2046,11 +2059,7 @@ func TestSilenceConfigValidation(t *testing.T) {
 		{
 			name: "a single preset is fine for Matrix alone — it renders no menu",
 			mutate: func(c *Config) {
-				c.Notify.Slack.SilenceButton = false
-				c.Notify.Matrix.SilenceReactions = true
-				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
-				c.Notify.Matrix.RoomID = "!room:example.org"
-				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				matrixOnly(c)
 				c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)}
 			},
 		},
@@ -2062,26 +2071,17 @@ func TestSilenceConfigValidation(t *testing.T) {
 			// there — rejecting six of them was inventing a constraint.
 			name: "six presets are fine for Matrix alone — it renders no menu",
 			mutate: func(c *Config) {
-				c.Notify.Slack.SilenceButton = false
-				c.Notify.Matrix.SilenceReactions = true
-				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
-				c.Notify.Matrix.RoomID = "!room:example.org"
-				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				matrixOnly(c)
 				c.Notify.Silence.Windows = []Duration{
 					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
 					Duration(8 * time.Hour), Duration(12 * time.Hour), Duration(24 * time.Hour),
 				}
-				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
 			},
 		},
 		{
 			name: "the Matrix path needs a ledger too",
 			mutate: func(c *Config) {
-				c.Notify.Slack.SilenceButton = false
-				c.Notify.Matrix.SilenceReactions = true
-				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
-				c.Notify.Matrix.RoomID = "!room:example.org"
-				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				matrixOnly(c)
 				c.Outcome.LedgerPath = ""
 			},
 			wantErr: "outcome.ledger_path",

@@ -529,8 +529,14 @@ func TestSilenceSaysNothingAboutTheCardWhenItWasMarked(t *testing.T) {
 	if ack == nil {
 		t.Fatal("no acknowledgement reached the clicker")
 	}
-	if text, _ := ack["text"].(string); strings.Contains(text, thread.SilenceCardUnmarked) {
+	text, _ := ack["text"].(string)
+	// BOTH notices are cry-wolf on the happy path: the card was marked, and it was
+	// marked with THIS click's window, so neither disclosure applies.
+	if strings.Contains(text, thread.SilenceCardUnmarked) {
 		t.Errorf("cried wolf about an unmarked card that was in fact marked: %q", text)
+	}
+	if strings.Contains(text, thread.SilenceCardStale) {
+		t.Errorf("cried wolf about a stale marker on a card carrying this very click's: %q", text)
 	}
 }
 

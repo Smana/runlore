@@ -94,8 +94,16 @@ func ContextBlock(text string) map[string]any {
 type SilenceOutcome int
 
 const (
+	// SilenceNoUsableCard means there was nothing to rebuild from, or removing the
+	// control left nothing that could be posted. The card carries no marker.
+	//
+	// Deliberately FIRST, so it is the zero value. An outcome nobody set should be
+	// the one that discloses conservatively, not the one that suppresses every
+	// disclosure — a `var o SilenceOutcome` that read as "rewritten" would silently
+	// tell the person who clicked that their card is fine.
+	SilenceNoUsableCard SilenceOutcome = iota
 	// SilenceRewritten means the control was removed and the marker appended.
-	SilenceRewritten SilenceOutcome = iota
+	SilenceRewritten
 	// SilenceAlreadyRewritten means the control was not on the card, so this click is
 	// answering a view that had already been rewritten — an earlier click, or one
 	// that raced this one. The card is marked; it just does not say what THIS
@@ -105,10 +113,23 @@ const (
 	// cannot arise from a real click on a silence control, so the reading "already
 	// rewritten" is the one worth optimising the message for.
 	SilenceAlreadyRewritten
-	// SilenceNoUsableCard means there was nothing to rebuild from, or removing the
-	// control left nothing that could be posted. The card carries no marker.
-	SilenceNoUsableCard
 )
+
+// String renders the outcome for logs and test failures. Without it a failed
+// assertion reads "outcome = 1, want 2" on a type whose entire purpose is that
+// its two refusals are NOT interchangeable.
+func (o SilenceOutcome) String() string {
+	switch o {
+	case SilenceRewritten:
+		return "rewritten"
+	case SilenceAlreadyRewritten:
+		return "already-rewritten"
+	case SilenceNoUsableCard:
+		return "no-usable-card"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(o))
+	}
+}
 
 // Silenced rewrites a card after a silence: the control carrying actionID is
 // removed and marker is appended as a context block. Other controls are KEPT — a
@@ -116,14 +137,16 @@ const (
 // as the escape hatch, so stripping it would leave the card promising a way out
 // it no longer offers.
 //
-// It reports false when it cannot produce a card it is sure of, and that matters
-// more than the signature suggests: the caller posts the result with
-// replace_original: true, which OVERWRITES the Slack message. A rebuild that
-// guessed would replace the investigation with a lone marker line — the finding,
-// its evidence and its next steps all gone, unrecoverably, in exchange for a note
-// about them. Refusing costs a marker; guessing costs the finding.
+// It returns an outcome other than SilenceRewritten when it cannot produce a card
+// it is sure of, and that matters more than the signature suggests: the caller
+// posts the result with replace_original: true, which OVERWRITES the Slack
+// message. A rebuild that guessed would replace the investigation with a lone
+// marker line — the finding, its evidence and its next steps all gone,
+// unrecoverably, in exchange for a note about them. Refusing costs a marker;
+// guessing costs the finding.
 //
-// Three things make it refuse:
+// Two things make it refuse, and which one is reported decides what the person
+// who clicked is told — see SilenceOutcome:
 //
 //   - Nothing survived. Every block was dropped, or there were none to begin with,
 //     so there is no card left to post — SilenceNoUsableCard.
@@ -173,7 +196,8 @@ func Silenced(blocks []map[string]any, actionID, marker string) ([]map[string]an
 		out = append(out, nb)
 	}
 	// Order matters: an empty result is "no card", even when the control was among
-	// what got dropped. Only a card that SURVIVED and kept its control is stale.
+	// what got dropped. Stale is the other shape — a card that SURVIVED but had no
+	// silence control to remove, because an earlier rewrite already took it.
 	if len(out) == 0 {
 		return nil, SilenceNoUsableCard
 	}

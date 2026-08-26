@@ -650,13 +650,19 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	// suppression. Ignoring the second return would post replace_original with no
 	// blocks and wipe the investigation.
 	//
-	// Either way of failing to mark the card — a payload we refuse to rebuild
-	// from, or a POST Slack did not accept — is TOLD to the clicker rather than
-	// only logged. An unmarked card is the exact defect this feature exists to
-	// close: the channel cannot tell the finding is handled, and the one person
-	// who could say so is the one who just clicked. Silently succeeding at the
-	// suppression while silently failing at the announcement leaves them believing
-	// the channel knows.
+	// Whatever happens to the card is TOLD to the clicker rather than only logged,
+	// because succeeding at the suppression while silently failing at the
+	// announcement leaves them believing the channel knows something it does not.
+	//
+	// Three outcomes, two disclosures, and the split is the point. A payload we
+	// refuse to rebuild from and a POST Slack did not accept both leave the card
+	// carrying NO marker, which is the exact defect this feature exists to close:
+	// the channel cannot tell the finding is handled, and the one person who could
+	// say so is the one who just clicked. An already-rewritten card is the opposite
+	// — it IS marked, just with an earlier window, while the ledger's latest-wins
+	// fold now holds this one. Telling that clicker "nobody can tell" would be
+	// false and would send them to write a redundant note, so it gets its own
+	// line; see thread.SilenceCardStale.
 	if marker != "" && p.ResponseURL != "" {
 		rebuilt, outcome := slackcard.Silenced(p.Message.Blocks, act.ActionID, marker)
 		switch outcome {
@@ -673,6 +679,14 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg += "\n\n" + thread.SilenceCardStale
 		case slackcard.SilenceNoUsableCard:
 			s.log.Warn("slack silence: no usable blocks in the payload; leaving the card intact")
+			msg += "\n\n" + thread.SilenceCardUnmarked
+		default:
+			// Unreachable today, and deliberately not silent. A fourth outcome added
+			// later would otherwise fall through telling the clicker NOTHING about
+			// their card — the exact failure this switch exists to prevent, restored
+			// by omission. Disclose conservatively and log loudly instead.
+			// (.golangci.yml does not enable exhaustive, so nothing else catches it.)
+			s.log.Error("slack silence: unhandled rewrite outcome", "outcome", outcome)
 			msg += "\n\n" + thread.SilenceCardUnmarked
 		}
 	}
@@ -879,8 +893,8 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string, repl
 //
 // Callers must have satisfied themselves that blocks is a card worth posting.
 // replace_original overwrites the message, so posting a rebuild one is unsure of
-// destroys the investigation — slackcard.Silenced's false return exists for exactly
-// that reason and must not be ignored.
+// destroys the investigation — slackcard.Silenced returns SilenceRewritten for
+// exactly that reason, and any other outcome must not be posted.
 func (s *Server) updateSlackBlocks(ctx context.Context, responseURL, fallbackText string, blocks []map[string]any) error {
 	payload := map[string]any{"replace_original": true, "blocks": blocks}
 	if fallbackText != "" {
