@@ -69,7 +69,7 @@ path, the `silence: <duration>` thread command, needs `thread_capture` too. Both
 outcome ledger as Slack's `silence_button`:
 
 - **A 🔕 reaction** on a RunLore investigation message — the zero-ingress equivalent of Slack's
-  overflow menu. A bare reaction carries no duration, so it always silences for
+  🔕 menu. A bare reaction carries no duration, so it always silences for
   `notify.silence.windows[0]` (the FIRST configured preset) — there is no way to pick a longer
   window from a reaction alone. `silence_reactions` alone is enough: the `/sync` filter already
   carries `m.reaction` for feedback voting, so no other flag is required.
