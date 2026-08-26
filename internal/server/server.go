@@ -425,6 +425,19 @@ type slackInteraction struct {
 			Value string `json:"value"`
 		} `json:"selected_option"`
 	} `json:"actions"`
+	// Message carries the card the click came from, echoed back by Slack. It is
+	// what makes rewriting that card possible without a chat:write scope and a
+	// chat.update call: the blocks arrive with the interaction, so the rebuild is a
+	// pure function of the payload and answers on the response_url that is already
+	// wired and already SSRF-guarded.
+	//
+	// Left as raw maps rather than typed blocks on purpose. Block Kit has dozens of
+	// element types and Slack adds more; a typed decode would silently drop every
+	// field it did not know about, and those dropped fields would then be missing
+	// from a card posted back with replace_original: true.
+	Message struct {
+		Blocks []map[string]any `json:"blocks"`
+	} `json:"message"`
 }
 
 // handleSlackInteraction processes Block Kit button clicks: it verifies the Slack
@@ -577,6 +590,69 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	// or the silence is about.
 	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
 	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
+}
+
+// silencedCard rewrites a card after a silence: the 🔕 control is removed and a
+// marker context block is appended. 👍/👎 are deliberately KEPT — a 👎 re-arms a
+// silenced trigger immediately, and SilenceAck names that as the escape hatch, so
+// stripping it would leave the card promising a way out it no longer offers.
+//
+// It reports false when it cannot produce a card it is sure of, and that matters
+// more than the signature suggests: the caller posts the result with
+// replace_original: true, which OVERWRITES the Slack message. A rebuild that
+// guessed would replace the investigation with a lone "🔕 Silenced by …" line —
+// the finding, its evidence and its next steps all gone, unrecoverably, in
+// exchange for a marker about them. Refusing costs a marker; guessing costs the
+// finding, so every path that cannot account for what it is about to post
+// refuses.
+//
+// actionID is passed in rather than spelled here even though this is only ever
+// called from the "runlore_silence" branch: the caller already holds the id Slack
+// sent, so threading it through removes a second copy of a constant that
+// internal/server cannot import from internal/notify (the same layering split as
+// the "sil:" block_id prefix, which needs a source-parsing guard test precisely
+// because it has no such single source).
+//
+// Only blocks whose type is literally "actions" are rewritten. A context block
+// also carries an "elements" array, so keying off the field alone would walk the
+// footer as though it held controls — harmless today, but only by accident.
+func silencedCard(blocks []map[string]any, actionID, marker string) ([]map[string]any, bool) {
+	if len(blocks) == 0 {
+		return nil, false
+	}
+	out := make([]map[string]any, 0, len(blocks)+1)
+	for _, b := range blocks {
+		elems, ok := b["elements"].([]any)
+		if b["type"] != "actions" || !ok {
+			out = append(out, b)
+			continue
+		}
+		kept := make([]any, 0, len(elems))
+		for _, e := range elems {
+			if m, isMap := e.(map[string]any); isMap && m["action_id"] == actionID {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		// Slack rejects an actions block with an empty elements array, so a block
+		// that held the silence control ALONE is dropped rather than emptied.
+		if len(kept) == 0 {
+			continue
+		}
+		nb := make(map[string]any, len(b))
+		for k, v := range b {
+			nb[k] = v
+		}
+		nb["elements"] = kept
+		out = append(out, nb)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return append(out, map[string]any{
+		"type":     "context",
+		"elements": []any{map[string]any{"type": "mrkdwn", "text": marker}},
+	}), true
 }
 
 // slackEvent is the subset of Slack's Events API envelope this server reads.

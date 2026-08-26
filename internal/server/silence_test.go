@@ -3,6 +3,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -144,5 +145,66 @@ func TestSilenceReadsAStaticSelectPayload(t *testing.T) {
 	want := recordedSilence{key: "k", window: 24 * time.Hour, user: "U9"}
 	if len(rec.got) != 1 || rec.got[0] != want {
 		t.Fatalf("recorded = %+v, want exactly one %+v", rec.got, want)
+	}
+}
+
+// TestSilencedCardDropsTheControlAndKeepsTheFinding pins the rebuild: the 🔕 menu
+// goes (it has served its purpose, and a second click on a card that already says
+// it is silenced is pure confusion), 👍/👎 stay (a 👎 is the documented way to
+// lift a silence early, so removing it would strand the escape hatch the ack
+// promises), and the marker is appended.
+func TestSilencedCardDropsTheControlAndKeepsTheFinding(t *testing.T) {
+	blocks := []map[string]any{
+		{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "*Why:* something broke"}},
+		{"type": "actions", "block_id": "sil:k", "elements": []any{
+			map[string]any{"type": "button", "action_id": "runlore_feedback_up"},
+			map[string]any{"type": "button", "action_id": "runlore_feedback_down"},
+			map[string]any{"type": "static_select", "action_id": "runlore_silence"},
+		}},
+	}
+	got, ok := silencedCard(blocks, "runlore_silence", "🔕 Silenced by @x until y · 48h")
+	if !ok {
+		t.Fatal("rebuild refused a well-formed card")
+	}
+	dump, _ := json.Marshal(got)
+	if strings.Contains(string(dump), "runlore_silence") {
+		t.Error("the silence control survived the rebuild")
+	}
+	for _, keep := range []string{"runlore_feedback_up", "runlore_feedback_down", "something broke"} {
+		if !strings.Contains(string(dump), keep) {
+			t.Errorf("the rebuild dropped %q — it must only remove the silence control", keep)
+		}
+	}
+	if !strings.Contains(string(dump), "Silenced by @x") {
+		t.Error("the marker was not appended")
+	}
+}
+
+// TestSilencedCardRefusesRatherThanBlanksTheCard is the regression test for the
+// one hard invariant of this feature. The rebuilt card is posted with
+// replace_original: true, which OVERWRITES the Slack message — so a rebuild that
+// cannot be done from what the payload actually carries must report failure and
+// let the caller fall back to an ephemeral note. Blanking the card loses the
+// investigation the silence is about, which is strictly worse than having no
+// marker: refusing costs a marker, guessing costs the finding.
+func TestSilencedCardRefusesRatherThanBlanksTheCard(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		blocks []map[string]any
+	}{
+		{"no blocks in the payload at all", nil},
+		{"an empty block list", []map[string]any{}},
+		{
+			"a lone actions block, so removing the control leaves nothing to post",
+			[]map[string]any{{"type": "actions", "elements": []any{
+				map[string]any{"type": "static_select", "action_id": "runlore_silence"},
+			}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := silencedCard(tc.blocks, "runlore_silence", "marker"); ok {
+				t.Errorf("rebuild claimed success on %s: %v", tc.name, got)
+			}
+		})
 	}
 }
