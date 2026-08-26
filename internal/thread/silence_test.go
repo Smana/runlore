@@ -103,3 +103,20 @@ func TestShortDuration(t *testing.T) {
 		}
 	}
 }
+
+// TestSilenceMarkerNamesWhoAndUntilWhen pins the one-line stamp left on the card
+// itself. It is deliberately not SilenceAck: the ack explains the consequences to
+// the person who just clicked, while the marker is scannable evidence for someone
+// scrolling the channel a day later.
+func TestSilenceMarkerNamesWhoAndUntilWhen(t *testing.T) {
+	until := time.Date(2026, 8, 26, 14, 40, 0, 0, time.UTC)
+	got := SilenceMarker("smaine.kahlouch", 48*time.Hour, until)
+	for _, want := range []string{"🔕", "smaine.kahlouch", "48h"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("marker %q is missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("the marker is a single context line, got %q", got)
+	}
+}

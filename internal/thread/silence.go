@@ -92,3 +92,21 @@ func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnab
 		"no model call, no notification, no record. %s",
 		user, until.Format(silenceExpiryLayout), ShortDuration(window), escapes)
 }
+
+// SilenceMarker is the one-line stamp left ON THE CARD after a silence, as
+// distinct from SilenceAck's full explanation to the person who clicked.
+//
+// Two different readers, which is why it is a second function and not a shorter
+// SilenceAck: the ack answers "what did I just do?" for the clicker and is
+// allowed to spend three sentences on the consequences, while the marker answers
+// "has anyone already dealt with this?" for a colleague scrolling the channel a
+// day later. That reader is scanning, not reading, so the marker states only who
+// and until when.
+//
+// It is a single line because it renders in a Slack context block, which is set
+// in small grey type and wraps badly; and it names the user with a leading @ so
+// Slack renders the mention rather than a bare string.
+func SilenceMarker(user string, window time.Duration, until time.Time) string {
+	return fmt.Sprintf("🔕 Silenced by @%s until %s · %s",
+		user, until.Format(silenceExpiryLayout), ShortDuration(window))
+}
