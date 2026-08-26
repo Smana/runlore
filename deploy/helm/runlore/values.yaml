@@ -351,9 +351,10 @@ config:
   #   # OPT-IN: shared presets for the 🔕 control above, on either transport. Requires
   #   # outcome.ledger_path and at least one of slack.silence_button / matrix.silence_reactions.
   #   # silence:
-  #   #   windows: [1h, 4h, 24h]   # presets offered (2-5 entries when slack.silence_button is on:
-  #   #                             #   a UX bound, not a Slack one — one option is a button wearing
-  #   #                             #   a dropdown, six is a form); windows[0] is the Matrix default
+  #   #   windows: [1h, 4h, 24h]   # presets offered (2-5 entries ONLY when slack.silence_button is
+  #   #                             #   on: a UX bound, not a Slack one — one option is a button
+  #   #                             #   wearing a dropdown, six is a form. Matrix renders no menu and
+  #   #                             #   is unbounded); windows[0] is the Matrix default
   #   #   max_window: 24h         # hard cap every window (and every silence: command) must respect
   #   webhook:
   #     url_env: RUNLORE_WEBHOOK_NOTIFY_URL   # POST findings JSON to this URL

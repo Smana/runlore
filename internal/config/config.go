@@ -2227,19 +2227,6 @@ func (c *Config) Validate() error {
 		if len(c.Notify.Silence.Windows) == 0 {
 			return fmt.Errorf("notify.silence.windows must list at least one duration when a silence transport is enabled: with no presets there is nothing to render, and no duration for a click to record")
 		}
-		// A UX ceiling, no longer a Slack one. It was Slack's while the control was
-		// an overflow element (which accepts at most 5 options, and answers a 6th by
-		// rejecting the WHOLE message with invalid_blocks); the 2026-08-26 swap to a
-		// static_select lifted that limit. The bound stays because the 🔕 menu is a
-		// quick choice on a card someone is reading at 3am, and a list that needs
-		// scrolling is a form.
-		//
-		// Unconditional, unlike the floor below: it costs a Matrix-only deployment
-		// two presets no bare reaction could reach anyway, and it keeps the config
-		// from breaking the day Slack is turned on.
-		if n := len(c.Notify.Silence.Windows); n > 5 {
-			return fmt.Errorf("notify.silence.windows lists %d entries; at most 5 are offered: the 🔕 menu is a quick choice on a card someone is reading at 3am, and a six-item dropdown is a form — trim the list to 5 or fewer presets", n)
-		}
 		if c.Notify.Silence.MaxWindow.Std() <= 0 {
 			return fmt.Errorf("notify.silence.max_window must be positive when a silence transport is enabled: an uncapped silence is indistinguishable from a permanent one")
 		}
@@ -2251,23 +2238,43 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("notify.silence.windows entry %v exceeds notify.silence.max_window (%v)", w.Std(), c.Notify.Silence.MaxWindow.Std())
 			}
 		}
-		// The other end of the same bound, and the one that was missed originally.
-		// It too began as Slack's — an overflow element requires a MINIMUM of 2
-		// options, so `windows: [4h]` passed startup and then made chat.postMessage
-		// return invalid_blocks for EVERY message. Since the 2026-08-26 swap to a
-		// static_select Slack would accept a single option, so what remains is a
-		// judgement: a one-entry dropdown is a button wearing a menu, and it reads
-		// as broken to the person who opens it.
+		// Both ends of the preset count, together and under the SAME condition,
+		// because they are one rule: how many options make a usable dropdown.
 		//
-		// Scoped to silence_button because it is a property of the RENDERED CONTROL
+		// Both began as Slack's. An overflow element required 2 to 5 options and
+		// answered either breach by rejecting the WHOLE message with
+		// invalid_blocks — `windows: [4h]` passed startup and then made
+		// chat.postMessage fail for EVERY message. The 2026-08-26 swap to a
+		// static_select lifted both limits: Slack now accepts one option and six.
+		// What survives is a judgement about the 🔕 menu, which is a quick choice
+		// on a card someone is reading at 3am — a one-entry dropdown is a button
+		// wearing a menu, and a six-item one is a form.
+		//
+		// Scoped to silence_button because the rule describes the RENDERED CONTROL,
 		// and Matrix renders none: a bare 🔕 reaction silences for windows[0] and
-		// nothing else, so a single-preset Matrix deployment is perfectly coherent
-		// and rejecting it would be inventing a constraint.
+		// nothing else, so every preset after the first is equally unreachable
+		// there. The ceiling was briefly unconditional on the argument that it cost
+		// a Matrix-only deployment nothing it could reach anyway — but that is just
+		// as true of the floor, and a rule enforced at two different scopes is one
+		// rule pretending to be two. A Matrix-only config is now judged only on
+		// what Matrix actually renders.
 		//
-		// Checked after the per-entry loop so a single entry that is ALSO invalid
-		// on its own terms reports the more specific reason.
-		if n := len(c.Notify.Silence.Windows); n < 2 && c.Notify.Slack.SilenceButton {
-			return fmt.Errorf("notify.silence.windows lists %d entry; at least 2 are needed: a one-option dropdown is a button wearing a menu and reads as broken — add a second preset, or turn off notify.slack.silence_button", n)
+		// The cost of scoping, stated plainly: a Matrix-only deployment may now
+		// hold a preset list that Slack would refuse, and turning silence_button on
+		// later fails at startup rather than silently drawing a bad menu. That is
+		// the right failure — loud, at boot, naming the key — and it is why the
+		// error says which flag to turn off.
+		//
+		// Checked after the per-entry loop so an entry that is ALSO invalid on its
+		// own terms reports the more specific reason.
+		if c.Notify.Slack.SilenceButton {
+			if n := len(c.Notify.Silence.Windows); n < 2 || n > 5 {
+				entries := "entries"
+				if n == 1 {
+					entries = "entry"
+				}
+				return fmt.Errorf("notify.silence.windows lists %d %s, but the 🔕 menu offers 2 to 5: a one-option dropdown is a button wearing a menu and a six-item one is a form, on a card someone is reading at 3am — adjust the list, or turn off notify.slack.silence_button", n, entries)
+			}
 		}
 	}
 	// Thread capture cannot work without the same signature verification as

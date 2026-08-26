@@ -2041,7 +2041,7 @@ func TestSilenceConfigValidation(t *testing.T) {
 		{
 			name:    "a single preset is rejected while Slack renders the control",
 			mutate:  func(c *Config) { c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)} },
-			wantErr: "at least 2",
+			wantErr: "2 to 5",
 		},
 		{
 			name: "a single preset is fine for Matrix alone — it renders no menu",
@@ -2052,6 +2052,26 @@ func TestSilenceConfigValidation(t *testing.T) {
 				c.Notify.Matrix.RoomID = "!room:example.org"
 				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
 				c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)}
+			},
+		},
+		{
+			// The mirror of "a single preset is fine for Matrix alone", and the
+			// same reasoning at the other end: both bounds describe the RENDERED
+			// dropdown, and Matrix renders none. A bare 🔕 reaction reads only
+			// windows[0], so the 2nd through 6th presets are equally unreachable
+			// there — rejecting six of them was inventing a constraint.
+			name: "six presets are fine for Matrix alone — it renders no menu",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+				c.Notify.Matrix.RoomID = "!room:example.org"
+				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				c.Notify.Silence.Windows = []Duration{
+					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
+					Duration(8 * time.Hour), Duration(12 * time.Hour), Duration(24 * time.Hour),
+				}
+				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
 			},
 		},
 		{

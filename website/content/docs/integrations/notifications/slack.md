@@ -76,9 +76,10 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
 **`notify.slack.silence_button` (opt-in, default `false`)** adds a third control to investigation
 messages, beside 👍/👎: a labelled **🔕 Silence…** dropdown offering the durations listed in
 `notify.silence.windows` (e.g. `1h`, `4h`, `24h`). List **between 2 and 5** of them — startup rejects
-anything outside that range. Both bounds are a UX judgement rather than a Slack limit: the menu is a
-quick choice on a card someone is reading at 3am, so a single option is a button wearing a dropdown
-and six is a form. Where a 👍/👎 records an *opinion* about the diagnosis, picking a window
+anything outside that range while this flag is on. Both bounds are a UX judgement rather than a Slack
+limit: the menu is a quick choice on a card someone is reading at 3am, so a single option is a button
+wearing a dropdown and six is a form. Both are checked only when this flag is on, so a Matrix-only
+deployment — which renders no menu — is free of them. Where a 👍/👎 records an *opinion* about the diagnosis, picking a window
 from the 🔕 menu changes what RunLore **does**: it suppresses re-investigating this exact
 `TriggerKey` for the chosen window — **no model call, no notification, no ledger open** — enforced in
 `RecurrenceGate.decide` before the paid investigation loop even starts. It works even with
