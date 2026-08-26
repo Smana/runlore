@@ -5,6 +5,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -206,5 +207,170 @@ func TestSilencedCardRefusesRatherThanBlanksTheCard(t *testing.T) {
 				t.Errorf("rebuild claimed success on %s: %v", tc.name, got)
 			}
 		})
+	}
+}
+
+// testSlackResponseURL is shaped like a real interaction response_url so the SSRF
+// guard in postSlackResponse ACCEPTS it. That is the point: the guard takes no
+// host but *.slack.com, so pointing the tests at an httptest server would have
+// them pass through a refusal path and prove nothing about what gets posted.
+const testSlackResponseURL = "https://hooks.slack.com/actions/T024BE7LD/1234567890/aBcDeFgHiJkLmNoPqRsTuVwX"
+
+// captureSlackResponse stands in for Slack's response_url endpoint at the
+// transport layer, which is the only seam that leaves the guard above running for
+// real while still keeping the request off the network.
+type captureSlackResponse struct {
+	t   *testing.T
+	got *map[string]any
+}
+
+func (c captureSlackResponse) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.t.Helper()
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		c.t.Errorf("response_url body is not JSON: %v — %s", err, body)
+	}
+	*c.got = decoded
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// slackCapture carries what a test needs to drive a captured server: the signing
+// secret to sign the interaction with, and a response_url the guard accepts.
+type slackCapture struct {
+	secret string
+	url    string
+}
+
+// serverWithCapturedSlackResponse builds a silence-enabled server whose
+// response_url posts are decoded into got instead of being sent.
+func serverWithCapturedSlackResponse(t *testing.T, got *map[string]any) (*Server, slackCapture) {
+	t.Helper()
+	return capturedSilenceServer(t, got, &recordSilence{})
+}
+
+// serverWithCapturedSlackResponseFailing is the same server with a ledger that
+// refuses every write, for the ordering invariant: record first, then decorate.
+func serverWithCapturedSlackResponseFailing(t *testing.T, got *map[string]any) (*Server, slackCapture) {
+	t.Helper()
+	return capturedSilenceServer(t, got, &recordSilence{err: errTestSilence})
+}
+
+func capturedSilenceServer(t *testing.T, got *map[string]any, rec *recordSilence) (*Server, slackCapture) {
+	t.Helper()
+	const secret = "shh"
+	srv := New(nil, Actions{Silence: rec, SlackSecret: secret}, nil, nil, nil, nil, discardLog)
+	srv.slackHTTP = &http.Client{Transport: captureSlackResponse{t: t, got: got}}
+	return srv, slackCapture{secret: secret, url: testSlackResponseURL}
+}
+
+// sendSilenceCard is sendSilence plus the two payload fields the card rewrite
+// needs: where to post the rebuilt card, and the card it is rebuilding. Passing
+// blocks == "" omits message.blocks entirely, which is the shape that must fall
+// back rather than blank the card.
+func sendSilenceCard(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks string) *httptest.ResponseRecorder {
+	t.Helper()
+	msg := ""
+	if blocks != "" {
+		msg = `,"message":{"blocks":` + blocks + `}`
+	}
+	payload := `{"user":{"id":"U9","username":"bob"},"response_url":"` + responseURL + `",` +
+		`"actions":[{"action_id":"runlore_silence","block_id":"` + blockID +
+		`","selected_option":{"value":"` + value + `"}}]` + msg + `}`
+	body := "payload=" + url.QueryEscape(payload)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+	req.Header.Set("X-Slack-Request-Timestamp", ts)
+	req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+const testSilenceCardBlocks = `[
+  {"type":"section","text":{"type":"mrkdwn","text":"*Why:* something broke"}},
+  {"type":"actions","block_id":"sil:k","elements":[
+    {"type":"button","action_id":"runlore_feedback_up"},
+    {"type":"static_select","action_id":"runlore_silence"}]}]`
+
+// TestSilenceRewritesTheCardPublicly pins both halves of what the first live
+// silence exposed on 2026-08-26: the acknowledgement must not be ephemeral
+// (nobody but the clicker learned the alert had been handled, which invites a
+// second person to investigate it) and the card must carry the marker afterwards
+// (scrollback could not tell a handled finding from an unhandled one).
+func TestSilenceRewritesTheCardPublicly(t *testing.T) {
+	var got map[string]any
+	srv, capture := serverWithCapturedSlackResponse(t, &got)
+
+	rr := sendSilenceCard(t, srv, capture.secret, "sil:k", "48h", capture.url, testSilenceCardBlocks)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	if got["replace_original"] != true {
+		t.Errorf("replace_original = %v, want true — the card must be rewritten in place", got["replace_original"])
+	}
+	if got["response_type"] == "ephemeral" {
+		t.Error("the acknowledgement is still ephemeral: nobody but the clicker sees it")
+	}
+	if got["blocks"] == nil {
+		t.Fatal("no blocks posted — the rebuild did not reach the response_url")
+	}
+	dump, _ := json.Marshal(got["blocks"])
+	if !strings.Contains(string(dump), "Silenced by @bob") {
+		t.Errorf("the posted card carries no marker: %s", dump)
+	}
+	if strings.Contains(string(dump), "runlore_silence") {
+		t.Error("the silence control survived onto the rewritten card")
+	}
+	if !strings.Contains(string(dump), "something broke") {
+		t.Error("the rewrite dropped the finding it was marking")
+	}
+}
+
+// TestSilenceWithoutBlocksLeavesTheCardIntact is the end-to-end half of the hard
+// invariant: a payload with no blocks must degrade to the old ephemeral note, not
+// post an empty card. TestSilencedCardRefusesRatherThanBlanksTheCard pins the pure
+// function; this pins that the wiring actually honours its refusal, which is the
+// half a caller can silently get wrong by ignoring the second return value.
+func TestSilenceWithoutBlocksLeavesTheCardIntact(t *testing.T) {
+	var got map[string]any
+	srv, capture := serverWithCapturedSlackResponse(t, &got)
+
+	if rr := sendSilenceCard(t, srv, capture.secret, "sil:k", "48h", capture.url, ""); rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	if got["blocks"] != nil {
+		t.Errorf("posted blocks with nothing to rebuild from: %v", got["blocks"])
+	}
+	if got["replace_original"] != false {
+		t.Errorf("replace_original = %v, want false — the card must be left alone", got["replace_original"])
+	}
+	if got["response_type"] != "ephemeral" {
+		t.Errorf("response_type = %v, want ephemeral fallback", got["response_type"])
+	}
+}
+
+// TestSilenceLedgerFailureLeavesTheCardUnmarked pins the ordering the design
+// requires: record first, then decorate. A marker on a card whose silence was
+// never stored is a lie the reader has no way to detect — the suppression simply
+// does not happen, and the channel is told it did.
+func TestSilenceLedgerFailureLeavesTheCardUnmarked(t *testing.T) {
+	var got map[string]any
+	srv, capture := serverWithCapturedSlackResponseFailing(t, &got)
+
+	if rr := sendSilenceCard(t, srv, capture.secret, "sil:k", "48h", capture.url, testSilenceCardBlocks); rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	dump, _ := json.Marshal(got)
+	if strings.Contains(string(dump), "Silenced by") {
+		t.Errorf("the card was marked despite the ledger write failing: %s", dump)
 	}
 }
