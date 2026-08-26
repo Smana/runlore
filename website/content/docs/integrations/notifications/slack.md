@@ -74,16 +74,36 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
 ### Silence a recurring incident
 
 **`notify.slack.silence_button` (opt-in, default `false`)** adds a third control to investigation
-messages, beside 👍/👎: a 🔕 overflow menu offering the durations listed in `notify.silence.windows`
-(e.g. `1h`, `4h`, `24h`). List **between 2 and 5** of them — both are Slack's own limits on an
-overflow element, and startup rejects anything outside that range, because Slack answers a
-non-conforming block by rejecting the *whole message*: with `windows: [4h]` no finding reaches the
-channel at all. Where a 👍/👎 records an *opinion* about the diagnosis, picking a window
-from the 🔕 menu changes what RunLore **does**: it suppresses re-investigating this exact
+messages, beside 👍/👎: a labelled **🔕 Silence…** dropdown offering the durations listed in
+`notify.silence.windows` (e.g. `1h`, `4h`, `24h`). List **between 2 and 5** of them — startup rejects
+anything outside that range while this flag is on. Both bounds are a UX judgement rather than a Slack
+limit: the menu is a quick choice on a card someone is reading at 3am, so a single option is a button
+wearing a dropdown and six is a form. A Matrix-only deployment renders no menu and is free of them.
+
+Where a 👍/👎 records an *opinion* about the diagnosis, picking a window from the 🔕 menu changes what
+RunLore **does**: it suppresses re-investigating this exact
 `TriggerKey` for the chosen window — **no model call, no notification, no ledger open** — enforced in
 `RecurrenceGate.decide` before the paid investigation loop even starts. It works even with
 `investigation.recurrence_cooldown` left at its default of `0` (off): the human silence check and the
 machine cooldown are independent, and the silence is checked first.
+
+**A click rewrites the card in place.** The 🔕 control is removed — it has done its job, and a second
+click on a card that already says it is silenced is only confusing — and a line naming who silenced
+the finding and until when is appended, visible to the whole channel. The name renders as a real
+Slack mention. 👍/👎 stay on the card, because a 👎 is how a colleague lifts the silence early.
+Scrollback therefore distinguishes a handled finding from an unhandled one.
+
+That public line is **in addition to** the private acknowledgement described below, not instead of
+it. The two answer different readers: the marker tells a colleague scanning the channel a day later
+that the finding is already handled, while the acknowledgement tells whoever clicked what they just
+switched off — and which escapes this deployment actually has.
+
+The card is left untouched if Slack sends no blocks back with the interaction, if Slack refuses the
+rewrite, or if the card had already been rewritten (a second click on a stale card — the marker is
+never stacked twice). **The silence is recorded in every one of those cases**; a marker is never
+worth risking the finding it marks. When the card does go unmarked the acknowledgement says so,
+because otherwise the person who clicked would reasonably assume the channel had been told — and
+they are the only one who can now say it.
 
 The silence stands until one of **four** things happens:
 

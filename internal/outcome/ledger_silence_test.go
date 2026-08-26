@@ -352,7 +352,7 @@ func TestNewestHumanWinsBetweenFeedbackAndSilence(t *testing.T) {
 // the reason TestSilenceSurvivesCompaction states.
 func TestVoteAndSilenceTimesSurviveCompaction(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outcome.jsonl")
-	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	now := time.Now() // still-live at replay time — see TestSilenceSurvivesReload
 
 	l, err := NewWithMaxEvents(path, 8)
 	if err != nil {
@@ -462,7 +462,7 @@ func TestResolveWithNoLiveOpenKeepsAnUnrelatedSilence(t *testing.T) {
 // and the escape works right up until the first compaction, then silently stops.
 func TestResolveWithNoLiveOpenSurvivesCompaction(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outcome.jsonl")
-	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	now := time.Now() // still-live at replay time — see TestSilenceSurvivesReload
 
 	l, err := NewWithMaxEvents(path, 8)
 	if err != nil {

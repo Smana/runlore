@@ -26,6 +26,7 @@ import (
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/slackcard"
 	"github.com/Smana/runlore/internal/source"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/thread"
@@ -65,6 +66,23 @@ const (
 	// headroom while still guaranteeing the whole pool drains through a forge
 	// outage in bounded time instead of being held hostage indefinitely.
 	mentionHandlerTimeout = 2 * time.Minute
+
+	// slackResponseTimeout bounds ONE post to an interaction's response_url.
+	//
+	// Slack expects an interaction acknowledged within 3 SECONDS, and these posts
+	// sit INSIDE that budget: http.ResponseWriter.WriteHeader only records the
+	// status — the bytes leave when the handler returns — so a slow response_url
+	// delays the acknowledgement itself. Slack answers a missed deadline with an
+	// operation_timeout warning shown to the person who clicked, plus a retry of
+	// the whole interaction.
+	//
+	// A silence now sends TWO posts (the card rewrite, then the acknowledgement),
+	// so the per-post bound must leave room for both inside 3s. 1.2s is several
+	// times a healthy response_url round trip and still lands the pair under the
+	// deadline with margin. The previous 10s could not: one slow post blew the
+	// budget on its own. A post that does time out is no longer silent — the
+	// clicker is told the card went unmarked.
+	slackResponseTimeout = 1200 * time.Millisecond
 )
 
 // Server handles incoming incident webhooks and applies the trigger policy.
@@ -94,6 +112,18 @@ type Server struct {
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
 	handler http.Handler
+
+	// slackHTTP answers interactions on their response_url. It is a field, and
+	// built once, so a test can substitute a transport for it — which is the only
+	// way to see what was posted, since the SSRF guard below accepts no host but
+	// *.slack.com and so refuses an httptest server before any request is made.
+	//
+	// Connection pooling is deliberately NOT a reason, though it reads like one:
+	// httpx.SecureClient leaves Transport nil, so every client it ever returned
+	// already shared http.DefaultTransport's process-wide idle pool. Hoisting the
+	// client here saves one struct allocation per interaction and nothing else.
+	// Always non-nil: New sets it.
+	slackHTTP *http.Client
 }
 
 // Pauser is the rung-3 auto-execution kill-switch.
@@ -233,6 +263,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		telemetryMetrics: acts.Metrics,
 		eventDispatcher:  thread.NewDispatcher(maxConcurrentMentions, mentionHandlerTimeout, log),
 		busyDispatcher:   thread.NewDispatcher(maxConcurrentBusyNotices, mentionHandlerTimeout, log),
+		slackHTTP:        httpx.SecureClient(slackResponseTimeout),
 	}
 	mux := http.NewServeMux()
 	// work marks a route as work-bearing: on a follower the request is proxied
@@ -412,16 +443,39 @@ type slackInteraction struct {
 		ActionID string `json:"action_id"`
 		Value    string `json:"value"`
 		// BlockID is the actions block's block_id, echoed back on every action.
-		// The silence overflow carries no room for the TriggerKey in its option
-		// values (Slack caps those at 75 chars), so notify.slack.go stashes it
-		// here instead — see notify.silenceBlockIDPrefix.
+		// The silence menu carries no room for the TriggerKey in its option
+		// values (Slack caps those at 75 chars), so the renderer stashes it here
+		// instead — see slackcard.SilenceBlockIDPrefix.
 		BlockID string `json:"block_id"`
-		// SelectedOption carries an overflow's chosen value — NOT the top-level
-		// Value field above, which button clicks (approve/reject/feedback) use.
+		// SelectedOption carries a menu's chosen value — NOT the top-level Value
+		// field above, which button clicks (approve/reject/feedback) use. Slack
+		// fills it identically for a static_select and for the overflow the 🔕
+		// control used to be, which is why swapping the element on 2026-08-26
+		// needed no migration: see TestSilenceReadsAStaticSelectPayload.
 		SelectedOption struct {
 			Value string `json:"value"`
 		} `json:"selected_option"`
 	} `json:"actions"`
+	// Message carries the card the click came from, echoed back by Slack. It is
+	// what makes rewriting that card possible without a chat:write scope and a
+	// chat.update call: the blocks arrive with the interaction, so the rebuild is a
+	// pure function of the payload and answers on the response_url that is already
+	// wired and already SSRF-guarded.
+	//
+	// Left as raw maps rather than typed blocks on purpose. Block Kit has dozens of
+	// element types and Slack adds more; a typed decode would silently drop every
+	// field it did not know about, and those dropped fields would then be missing
+	// from a card posted back with replace_original: true.
+	Message struct {
+		Blocks []map[string]any `json:"blocks"`
+		// Text is the card's one-line notification/accessibility summary (see
+		// notify.fallbackText) — what Slack shows in a push notification and to a
+		// block-less client. It is carried over verbatim on a rewrite because
+		// replace_original clears whatever the new payload omits, and dropping it is
+		// invisible on screen: the card looks right while every later notification
+		// for it, and every screen reader, gets nothing.
+		Text string `json:"text"`
+	} `json:"message"`
 }
 
 // handleSlackInteraction processes Block Kit button clicks: it verifies the Slack
@@ -461,8 +515,16 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	}
 	act := p.Actions[0]
 	var msg string
+	// marker is set ONLY once the ledger write has returned successfully, which is
+	// what keeps the ordering right: record first, then decorate. A marker on a
+	// card whose silence was never stored is a lie the reader has no way to detect
+	// — the channel is told the incident is suppressed while RunLore goes on
+	// investigating it. Its emptiness IS the "not silenced" state; SilenceMarker
+	// never returns "", so a separate bool would only be a way for the two to
+	// disagree.
+	var marker string
 	switch act.ActionID {
-	case "runlore_approve":
+	case slackcard.ApproveActionID:
 		if s.approvals == nil {
 			msg = "❌ approvals not enabled"
 			break
@@ -482,7 +544,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = fmt.Sprintf("✅ approved by @%s — executed: %s %s", p.User.Username, executed.Op, executed.Description)
 			s.log.Info("slack approval executed", "id", act.Value, "user_id", p.User.ID, "user", p.User.Username, "op", executed.Op)
 		}
-	case "runlore_reject":
+	case slackcard.RejectActionID:
 		if s.approvals == nil {
 			msg = "❌ approvals not enabled"
 			break
@@ -501,7 +563,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		} else {
 			msg = fmt.Sprintf("🚫 rejected by @%s", p.User.Username)
 		}
-	case "runlore_feedback_up", "runlore_feedback_down":
+	case slackcard.FeedbackUpActionID, slackcard.FeedbackDownActionID:
 		// Feedback is deliberately unprivileged (no approver allowlist): the
 		// signature proves the workspace, and a rating is an opinion feeding the
 		// learning loop, not a cluster mutation. Anti-gaming lives in the ledger —
@@ -511,7 +573,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 		rating := "up"
-		if act.ActionID == "runlore_feedback_down" {
+		if act.ActionID == slackcard.FeedbackDownActionID {
 			rating = "down"
 		}
 		if ferr := s.feedback.Feedback(act.Value, rating, p.User.ID, time.Now()); ferr != nil {
@@ -521,7 +583,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = fmt.Sprintf("🙏 feedback recorded (%s) — thanks @%s", rating, p.User.Username)
 			s.log.Info("slack feedback recorded", "key", act.Value, "rating", rating, "user_id", p.User.ID, "user", p.User.Username)
 		}
-	case "runlore_silence": // must match notify.silenceActionID (internal/server cannot import internal/notify)
+	case slackcard.SilenceActionID:
 		// Unprivileged, like feedback and unlike approve/reject: the signature
 		// proves the workspace, and for an alert-sourced incident the blast radius
 		// is bounded four independent ways — the window expires, a CRITICAL firing
@@ -538,12 +600,9 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
 			break
 		}
-		// "sil:" must match notify.silenceBlockIDPrefix byte for byte (this package
-		// deliberately does not import internal/notify, exactly like the action id
-		// above). That is not left to this comment: notify's
-		// TestSilenceBlockIDPrefixMatchesTheServerHandler parses this call and fails
-		// when the two diverge.
-		key, ok := strings.CutPrefix(act.BlockID, "sil:")
+		// The prefix the renderer stamped, read from the one definition both sides
+		// import — so the compiler rejects a rename that reaches only one of them.
+		key, ok := strings.CutPrefix(act.BlockID, slackcard.SilenceBlockIDPrefix)
 		if !ok || key == "" {
 			msg = "⚠️ could not identify the incident to silence"
 			s.log.Warn("slack silence: unexpected block_id", "block_id", act.BlockID)
@@ -561,6 +620,9 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			s.log.Warn("slack silence failed", "key", key, "window", window, "err", serr)
 			break
 		}
+		// The transport renders both halves: a mention Slack linkifies, and a date
+		// token that localises per reader like every other time on the card.
+		marker = thread.SilenceMarker(slackcard.UserMention(p.User.ID), slackcard.Date(now.Add(window)), window)
 		msg = thread.SilenceAck(p.User.Username, window, now.Add(window), s.feedbackEnabled)
 		s.log.Info("slack silence recorded", "key", key, "window", window,
 			"until", now.Add(window), "user_id", p.User.ID, "user", p.User.Username)
@@ -570,9 +632,65 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	}
 	w.WriteHeader(http.StatusOK) // ack the click; update the message best-effort
 	// Approve/reject replace the interaction message with the outcome; a feedback
-	// or silence ack must NOT — replacing would wipe the investigation the rating
-	// or the silence is about.
-	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
+	// ack must NOT — replacing would wipe the investigation the rating is about.
+	//
+	// Silence is the third case, and the only one that answers TWICE. It rewrites
+	// the card by REBUILDING it (control removed, marker appended) and then still
+	// falls through to the ephemeral ack below. response_url accepts up to five
+	// answers, and these two are aimed at different readers: the marker tells a
+	// colleague scanning scrollback a day later that the finding is handled, while
+	// SilenceAck tells the person who just clicked what they switched OFF — no
+	// model call, no notification, no record — and which escape hatches this
+	// deployment actually has. Posting only the card would leave the clicker less
+	// informed than before the card was rewritten at all, and would make the
+	// feedback_buttons:false disclosure from #556 unreachable on this path.
+	//
+	// When the rebuild refuses, the ack alone is the whole answer: the ledger
+	// already holds the silence, so what is lost is a marker and not the
+	// suppression. Ignoring the second return would post replace_original with no
+	// blocks and wipe the investigation.
+	//
+	// Whatever happens to the card is TOLD to the clicker rather than only logged,
+	// because succeeding at the suppression while silently failing at the
+	// announcement leaves them believing the channel knows something it does not.
+	//
+	// Three outcomes, two disclosures, and the split is the point. A payload we
+	// refuse to rebuild from and a POST Slack did not accept both leave the card
+	// carrying NO marker, which is the exact defect this feature exists to close:
+	// the channel cannot tell the finding is handled, and the one person who could
+	// say so is the one who just clicked. An already-rewritten card is the opposite
+	// — it IS marked, just with an earlier window, while the ledger's latest-wins
+	// fold now holds this one. Telling that clicker "nobody can tell" would be
+	// false and would send them to write a redundant note, so it gets its own
+	// line; see thread.SilenceCardStale.
+	if marker != "" && p.ResponseURL != "" {
+		rebuilt, outcome := slackcard.Silenced(p.Message.Blocks, act.ActionID, marker)
+		switch outcome {
+		case slackcard.SilenceRewritten:
+			if err := s.updateSlackBlocks(r.Context(), p.ResponseURL, p.Message.Text, rebuilt); err != nil {
+				s.log.Warn("slack silence: card rewrite was not accepted", "err", err)
+				msg += "\n\n" + thread.SilenceCardUnmarked
+			}
+		case slackcard.SilenceAlreadyRewritten:
+			// Not a failure: the ledger took this window, and the card is marked —
+			// with the EARLIER one. Logged at info because nothing is broken, and
+			// disclosed differently because "nobody can tell" would be false here.
+			s.log.Info("slack silence: card already marked by an earlier silence; ledger updated, card left as-is")
+			msg += "\n\n" + thread.SilenceCardStale
+		case slackcard.SilenceNoUsableCard:
+			s.log.Warn("slack silence: no usable blocks in the payload; leaving the card intact")
+			msg += "\n\n" + thread.SilenceCardUnmarked
+		default:
+			// Unreachable today, and deliberately not silent. A fourth outcome added
+			// later would otherwise fall through telling the clicker NOTHING about
+			// their card — the exact failure this switch exists to prevent, restored
+			// by omission. Disclose conservatively and log loudly instead.
+			// (.golangci.yml does not enable exhaustive, so nothing else catches it.)
+			s.log.Error("slack silence: unhandled rewrite outcome", "outcome", outcome)
+			msg += "\n\n" + thread.SilenceCardUnmarked
+		}
+	}
+	replace := act.ActionID == slackcard.ApproveActionID || act.ActionID == slackcard.RejectActionID
 	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
 }
 
@@ -755,37 +873,107 @@ func (s *Server) verifySlack(h http.Header, body []byte) bool {
 	return hmac.Equal([]byte(expected), []byte(h.Get("X-Slack-Signature")))
 }
 
-// updateSlack answers the interaction via its response_url: approve/reject
-// overwrite the interaction message with the outcome (replaceOriginal=true),
-// feedback appends an ephemeral note instead. The URL is attacker-influenceable
-// (it arrives in the interaction payload), so it is restricted to https
-// *.slack.com and posted with a bounded client — no SSRF to arbitrary internal
-// services, no unbounded hang on http.DefaultClient.
+// updateSlack answers the interaction with TEXT via its response_url:
+// approve/reject overwrite the interaction message with the outcome
+// (replaceOriginal=true), feedback appends an ephemeral note instead.
 func (s *Server) updateSlack(ctx context.Context, responseURL, text string, replaceOriginal bool) {
+	// Best-effort by design, and the last thing the handler does: there is nobody
+	// left to tell that telling them failed. postSlackResponse has already logged.
+	_ = s.postSlackResponse(ctx, responseURL, slackResponseBody(text, replaceOriginal))
+}
+
+// updateSlackBlocks answers the interaction with a whole rebuilt CARD, which is
+// how a silence marks the message it was clicked on (see slackcard.Silenced). It always
+// replaces the original: a card is only ever built to stand in place of the one
+// the payload carried, never to be appended beside it.
+//
+// fallbackText is the original card's top-level "text" and is passed straight
+// back. replace_original clears every field the new payload omits, so leaving it
+// out would silently strip the summary Slack reads out in push notifications.
+//
+// Callers must have satisfied themselves that blocks is a card worth posting.
+// replace_original overwrites the message, so posting a rebuild one is unsure of
+// destroys the investigation — slackcard.Silenced returns SilenceRewritten for
+// exactly that reason, and any other outcome must not be posted.
+func (s *Server) updateSlackBlocks(ctx context.Context, responseURL, fallbackText string, blocks []map[string]any) error {
+	payload := map[string]any{"replace_original": true, "blocks": blocks}
+	if fallbackText != "" {
+		payload["text"] = fallbackText
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		// Unreachable in practice — the blocks came out of encoding/json in the
+		// first place.
+		return fmt.Errorf("marshal card rewrite: %w", err)
+	}
+	return s.postSlackResponse(ctx, responseURL, body)
+}
+
+// postSlackResponse POSTs an already-built payload to an interaction's
+// response_url. The URL is attacker-influenceable (it arrives in the interaction
+// payload), so it is restricted to https *.slack.com and posted with a bounded
+// client — no SSRF to arbitrary internal services, no unbounded hang on
+// http.DefaultClient.
+//
+// Both answer shapes funnel through here so that guard has exactly one
+// implementation: a second copy is a second thing to forget when the rule
+// changes, and the rule is the only thing standing between a payload field and an
+// arbitrary internal HTTP call.
+func (s *Server) postSlackResponse(ctx context.Context, responseURL string, body []byte) error {
 	if responseURL == "" {
-		return
+		return errors.New("no response_url on the interaction")
 	}
 	if u, err := url.Parse(responseURL); err != nil || u.Scheme != "https" ||
 		(u.Hostname() != "slack.com" && !strings.HasSuffix(u.Hostname(), ".slack.com")) {
 		s.log.Warn("refusing slack response_url: not an https *.slack.com host", "url", responseURL)
-		return
+		return errors.New("response_url is not an https *.slack.com host")
 	}
-	body := slackResponseBody(text, replaceOriginal)
+	// New may be bypassed by a struct literal (some tests build &Server{} directly),
+	// and a nil client here would panic inside an HTTP handler rather than degrade.
+	// The invariant is cheap enough to enforce instead of document.
+	client := s.slackHTTP
+	if client == nil {
+		client = httpx.SecureClient(slackResponseTimeout)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(body))
 	if err != nil {
-		return
+		return fmt.Errorf("build slack response request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := httpx.SecureClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
-		s.log.Warn("slack response_url: request failed (best-effort)", "err", err)
-		return
+		s.log.Warn("slack response_url: request failed", "err", err)
+		return fmt.Errorf("post to slack response_url: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// Drain before closing, so the connection can go back to the idle pool: net/http
+	// only returns it once the body reaches EOF.
+	//
+	// Honest about the size of the win, because it is easy to overstate and was
+	// overstated here first. Measured against a local server, a bare Close already
+	// reuses the connection for bodies up to ~2 KB — the transport has buffered
+	// them by the time Close runs — and stops reusing it from ~4 KB. Slack answers
+	// a response_url POST with "ok", so on the path this function actually takes,
+	// draining changes nothing at all.
+	//
+	// It stays because it costs nothing on that path (the body is already at EOF,
+	// so the copy returns immediately) and because it is correct for the sizes
+	// where it does matter: a Slack error envelope, or any future caller of this
+	// helper posting somewhere chattier. What it is NOT is a fix for the two-posts-
+	// inside-3s budget — that budget is bounded by slackResponseTimeout, not by a
+	// handshake this avoids.
+	//
+	// Bounded rather than unbounded so a runaway upstream cannot hold the click's
+	// budget open; past the cap the connection is dropped, exactly as a bare Close
+	// would have dropped it.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode/100 != 2 {
-		s.log.Warn("slack response_url: non-2xx status (best-effort)", "status", resp.StatusCode)
+		s.log.Warn("slack response_url: non-2xx status", "status", resp.StatusCode)
+		return fmt.Errorf("slack response_url returned %d", resp.StatusCode)
 	}
+	return nil
 }
 
 // slackResponseBody builds the response_url payload. A feedback ack

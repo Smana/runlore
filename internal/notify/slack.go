@@ -20,6 +20,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/slackcard"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -109,7 +110,7 @@ type Slack struct {
 	// so the on-call can rate the diagnosis; clicks land in the outcome ledger via
 	// the exposed /slack/interactions endpoint.
 	FeedbackButtons bool
-	// SilenceWindows are the presets offered by the 🔕 overflow
+	// SilenceWindows are the presets offered by the 🔕 silence menu
 	// (notify.silence.windows); empty disables the control.
 	SilenceWindows []time.Duration
 }
@@ -176,7 +177,7 @@ type SlackBot struct {
 	// FeedbackButtons — see Slack.FeedbackButtons; on the bot path the buttons sit
 	// on the channel summary message, never on the detail thread reply.
 	FeedbackButtons bool
-	// SilenceWindows are the presets offered by the 🔕 overflow
+	// SilenceWindows are the presets offered by the 🔕 silence menu
 	// (notify.silence.windows); empty disables the control.
 	SilenceWindows []time.Duration
 	// Threads, when set (notify.slack.thread_capture), receives the summary
@@ -311,41 +312,48 @@ func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error)
 	return result.TS, nil
 }
 
-// Slack interaction action_ids — must match the server's /slack/interactions handler.
+// Slack interaction action_ids. Defined in internal/slackcard so the renderer
+// that stamps them and the /slack/interactions handler that dispatches on them
+// read ONE definition — a rename that reached only one side used to leave every
+// real click landing in an "unknown action" branch with both packages' tests
+// still green, each asserting its own half against its own copy.
 const (
-	approveActionID      = "runlore_approve"
-	rejectActionID       = "runlore_reject"
-	feedbackUpActionID   = "runlore_feedback_up"
-	feedbackDownActionID = "runlore_feedback_down"
-	silenceActionID      = "runlore_silence"
+	approveActionID      = slackcard.ApproveActionID
+	rejectActionID       = slackcard.RejectActionID
+	feedbackUpActionID   = slackcard.FeedbackUpActionID
+	feedbackDownActionID = slackcard.FeedbackDownActionID
+	silenceActionID      = slackcard.SilenceActionID
 )
 
 // silenceBlockIDPrefix namespaces the actions block whose block_id carries the
-// TriggerKey for the silence overflow, and slackBlockIDMax is Slack's cap on that
+// TriggerKey for the silence control, and slackBlockIDMax is Slack's cap on that
 // field.
 //
-// The key rides in block_id rather than in the overflow's option values because
+// The key rides in block_id rather than in the control's option values because
 // Slack caps an option value at 75 characters (a button value gets 2000), and a
 // GitOps TriggerKey is `namespace/name:Reason` — routinely 60-70 characters, and
 // unbounded in principle since Kubernetes names run to 253. An over-long option
 // value makes Slack reject the ENTIRE message, so the failure would take out the
 // notification, not just the control.
 //
-// The prefix exists a SECOND time as a literal in internal/server's interactions
-// handler, which strips it back off to recover the key (that package deliberately
-// does not import this one). The two must agree byte for byte or every real click
-// lands in "could not identify the incident to silence" — enforced, not merely
-// documented, by TestSilenceBlockIDPrefixMatchesTheServerHandler.
+// internal/server's interactions handler strips this prefix back off to recover
+// the key. It used to carry its own literal — that package deliberately does not
+// import this one — and the two agreeing byte for byte was enforced by a test that
+// PARSED the other package's source. Both now read slackcard.SilenceBlockIDPrefix,
+// so a rename that reaches only one side does not compile, and the guard test is
+// gone.
 const (
-	silenceBlockIDPrefix = "sil:"
-	slackBlockIDMax      = 255
-	// slackOverflowMinOptions is Slack's floor on an overflow element: fewer than
-	// two options and chat.postMessage returns invalid_blocks for the WHOLE
-	// message, so the finding is not delivered at all. Config validation already
-	// rejects a single window when slack.silence_button is on; this is the render
-	// site refusing to build a payload it knows Slack will reject, which is the
-	// only place that counts the options it is about to emit.
-	slackOverflowMinOptions = 2
+	silenceBlockIDPrefix = slackcard.SilenceBlockIDPrefix
+	slackBlockIDMax      = slackcard.BlockIDMax
+	// slackSilenceMinOptions is a DELIBERATE UX floor, and no longer a Slack one.
+	// It was named for the overflow element, which rejects a 1-option menu by
+	// rejecting the WHOLE message with invalid_blocks — but the control is a
+	// static_select now, and Slack accepts a select carrying a single option. The
+	// floor stays anyway: a one-entry dropdown is a button wearing a menu, and it
+	// reads as broken. Config validation refuses that combination at startup; this
+	// is the render site refusing to build it regardless, because it is the only
+	// place that counts the options it is about to emit.
+	slackSilenceMinOptions = 2
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
@@ -392,7 +400,7 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 }
 
 // feedbackBlocks renders the human end of the learning loop: 👍/👎 when
-// withFeedback is set, a 🔕 overflow offering each configured window when
+// withFeedback is set, a 🔕 menu offering each configured window when
 // silenceWindows is non-empty — INDEPENDENTLY of each other.
 //
 // The three are one row and one verdict vocabulary — 👍 accurate, 👎 off-base,
@@ -409,7 +417,7 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // re-worded re-investigations), falling back to the alert fingerprint; with
 // neither there is nothing for the ledger to attribute, so nothing renders.
 //
-// The 🔕 silence overflow requires the TriggerKey specifically — NOT the
+// The 🔕 silence menu requires the TriggerKey specifically — NOT the
 // fallback above. RecurrenceGate.decide reads l.silences[req.TriggerKey] and
 // bails out to recurrenceOff outright when req.TriggerKey == "", so a silence
 // recorded under a bare fingerprint (e.g. a budget/timeout/refusal result,
@@ -424,9 +432,8 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // even that, the silence element alone is dropped: a pathological resource name
 // must degrade ONE control, never the card.
 //
-// Fewer than slackOverflowMinOptions windows drops it for the same reason and with
-// the same trade: Slack rejects a 1-option overflow by rejecting the entire
-// message, so building one would cost the notification rather than the control.
+// Fewer than slackSilenceMinOptions windows drops it too, though for a weaker
+// reason: a one-entry dropdown reads as broken rather than breaking the message.
 // Config validation already refuses that combination at startup, but only the
 // render site can count what it is actually about to emit.
 //
@@ -446,9 +453,9 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 		)
 	}
 	blockID := silenceBlockIDPrefix + inv.TriggerKey
-	overflowFits := inv.TriggerKey != "" && len(silenceWindows) >= slackOverflowMinOptions &&
+	silenceFits := inv.TriggerKey != "" && len(silenceWindows) >= slackSilenceMinOptions &&
 		len(blockID) <= slackBlockIDMax
-	if overflowFits {
+	if silenceFits {
 		opts := make([]map[string]any, 0, len(silenceWindows))
 		for _, w := range silenceWindows {
 			opts = append(opts, map[string]any{
@@ -461,14 +468,24 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 			})
 		}
 		elements = append(elements, map[string]any{
-			"type": "overflow", "action_id": silenceActionID, "options": opts,
+			"type": "static_select", "action_id": silenceActionID,
+			// An overflow takes no text at all, so it draws as a bare "···" next to
+			// two labelled buttons. Observed live on 2026-08-26: the control was
+			// unrecognisable, because the 🔕 and the word "Silence" appear only once
+			// the menu is open — after you have clicked something you could not
+			// identify. A static_select is the one actions-block element that carries
+			// a visible label AND a menu, and the payload it sends back is identical
+			// (actions[0].selected_option.value), so cards already posted stay
+			// clickable and no migration is needed.
+			"placeholder": map[string]any{"type": "plain_text", "text": "🔕 Silence…", "emoji": true},
+			"options":     opts,
 		})
 	}
 	if len(elements) == 0 {
 		return nil
 	}
 	block := map[string]any{"type": "actions", "elements": elements}
-	if overflowFits {
+	if silenceFits {
 		block["block_id"] = blockID
 	}
 	return []map[string]any{block}
@@ -503,12 +520,11 @@ func displayTitle(title string) string {
 // slackDate renders t as a Slack date token that displays in the reader's local
 // timezone, with the RFC3339 UTC form as the no-JS fallback. Slack-blocks-only:
 // the token uses raw <>, so it must never enter the escaped fallback text.
-func slackDate(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return fmt.Sprintf("<!date^%d^{date_short_pretty} {time}|%s>", t.Unix(), t.UTC().Format(time.RFC3339))
-}
+//
+// A local name for slackcard.Date, shared with the card rewriter for the same
+// reason as escapeMrkdwn: every other time on the card localises per reader, and
+// a marker that quietly did not was invisible to everyone in the author's zone.
+func slackDate(t time.Time) string { return slackcard.Date(t) }
 
 // slackProgressMessage builds the Slack payload for an interim progress ping: a
 // compact header + context line + the model's interim text. The fallback text is
@@ -552,18 +568,16 @@ func slackProgressBlocks(up providers.ProgressUpdate) []map[string]any {
 	return blocks
 }
 
-// mrkdwnEscaper implements Slack's documented mrkdwn escaping: exactly three
-// characters act as control characters and must be replaced with HTML entities
-// (& first). strings.Replacer substitutes in a single left-to-right pass, so
-// the ampersands introduced by &lt;/&gt; are never re-escaped.
-var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-
 // escapeMrkdwn neutralises untrusted text (model output, evidence quoting
 // cluster logs or alert annotations) before it is interpolated into Slack
 // mrkdwn, so a hostile log line like <https://evil.example|innocent text>
 // renders as literal text instead of a clickable phishing link. Mirrors the
 // escape-first approach of the Matrix notifier's mrkdwnToHTML.
-func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
+//
+// A local name for slackcard.EscapeMrkdwn: the card REWRITER in internal/server
+// needs the same escaping, and a second implementation of "which three characters
+// are control characters" is exactly the kind of thing that drifts silently.
+func escapeMrkdwn(s string) string { return slackcard.EscapeMrkdwn(s) }
 
 // summaryBlocks renders the triage summary as Block Kit, optimized for a
 // woken-up on-call reading on a phone: everything actionable sits above the

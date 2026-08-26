@@ -219,7 +219,12 @@
                   "value": "24h0m0s"
                 }
               ],
-              "type": "overflow"
+              "placeholder": {
+                "emoji": true,
+                "text": "🔕 Silence…",
+                "type": "plain_text"
+              },
+              "type": "static_select"
             }
           ],
           "type": "actions"
@@ -351,7 +356,12 @@
                   "value": "24h0m0s"
                 }
               ],
-              "type": "overflow"
+              "placeholder": {
+                "emoji": true,
+                "text": "🔕 Silence…",
+                "type": "plain_text"
+              },
+              "type": "static_select"
             }
           ],
           "type": "actions"
@@ -483,7 +493,12 @@
                   "value": "24h0m0s"
                 }
               ],
-              "type": "overflow"
+              "placeholder": {
+                "emoji": true,
+                "text": "🔕 Silence…",
+                "type": "plain_text"
+              },
+              "type": "static_select"
             }
           ],
           "type": "actions"
@@ -864,7 +879,12 @@
                   "value": "24h0m0s"
                 }
               ],
-              "type": "overflow"
+              "placeholder": {
+                "emoji": true,
+                "text": "🔕 Silence…",
+                "type": "plain_text"
+              },
+              "type": "static_select"
             }
           ],
           "type": "actions"

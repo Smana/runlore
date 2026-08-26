@@ -611,23 +611,25 @@ incident]({{< relref "/docs/integrations/notifications/matrix.md#silence-a-recur
 for the click/reaction/command mechanics and the escapes in full; this section is the key
 reference:
 
-- `notify.silence.windows` — **opt-in**, the durations offered (Slack's overflow-menu options; also
+- `notify.silence.windows` — **opt-in**, the durations offered (the options in Slack's 🔕 menu; also
   the ceiling a Matrix `silence: <duration>` command may not exceed). **Required, non-empty** whenever
   any silence transport is on — with no presets there is nothing to render and no duration for a
-  click to record. With `slack.silence_button` on it must list **2 to 5** entries: both bounds are
-  Slack's own limits on an overflow element, and breaching either makes Slack reject the *entire*
-  message (`invalid_blocks`), so no finding is delivered at all — not just a missing 🔕 control. Only
-  the **lower** bound is conditional: a Matrix-only deployment renders no overflow and may list a
-  single preset, but the **ceiling of 5 stays unconditional** — it costs a Matrix-only deployment
-  two presets no reaction can reach anyway, and it keeps the config from breaking the day Slack is
-  turned on. `windows[0]` doubles as the default used wherever no duration can be carried (a bare
-  Matrix 🔕 reaction).
+  click to record. With `slack.silence_button` on it must list **2 to 5** entries. Both bounds are a
+  UX judgement, not a Slack limit: the 🔕 menu is a quick choice on a card someone is reading at 3am,
+  so one option is a button wearing a dropdown and six is a form. **Both are conditional on
+  `slack.silence_button`** — the rule describes the rendered menu, and a Matrix-only deployment
+  renders none: a bare 🔕 reaction silences for `windows[0]` and nothing else, so every preset after
+  the first is equally unreachable there. The trade-off is that a Matrix-only config may hold a list
+  Slack would refuse, and enabling `silence_button` later fails at startup naming this key — loud, at
+  boot, rather than a bad menu drawn silently. `windows[0]` doubles as the default used wherever no
+  duration can be carried (a bare Matrix 🔕 reaction).
 - `notify.silence.max_window` — **opt-in**, the hard cap every window above — and every Matrix
   `silence:` command — must respect. **Required, positive** whenever any silence transport is on:
   zero is rejected as indistinguishable from a permanent silence, since nothing else in the system
   would ever lift one.
-- `notify.slack.silence_button` — **opt-in**, a 🔕 overflow menu beside 👍/👎 on Slack investigation
-  messages. Gated **independently** of `feedback_buttons`: enabling one does not render the other.
+- `notify.slack.silence_button` — **opt-in**, a labelled 🔕 Silence… menu beside 👍/👎 on Slack
+  investigation messages. A click rewrites the card in place, removing the control and appending a
+  line naming who silenced it and until when. Gated **independently** of `feedback_buttons`: enabling one does not render the other.
   Requires `signing_secret_env` and a Slack delivery target, for the same reason `feedback_buttons`
   does above — clicks arrive on the same `POST /slack/interactions` endpoint, and a control can only
   exist on a message RunLore actually delivered.

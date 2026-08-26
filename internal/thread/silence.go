@@ -92,3 +92,57 @@ func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnab
 		"no model call, no notification, no record. %s",
 		user, until.Format(silenceExpiryLayout), ShortDuration(window), escapes)
 }
+
+// SilenceCardUnmarked is appended to the acknowledgement when the silence was
+// recorded but the card could NOT be stamped — Slack sent no blocks to rebuild
+// from, or refused the rewrite.
+//
+// It is disclosure, not an error: the suppression is in the ledger and is real.
+// What failed is the announcement, and the person who clicked is the only one who
+// can now make it. Left unsaid, they would reasonably assume the channel had been
+// told — which is precisely the "a colleague starts investigating something
+// already handled" failure the marker exists to prevent, restored silently.
+const SilenceCardUnmarked = "⚠️ The silence is recorded, but the card itself could not be marked, " +
+	"so the channel cannot tell this finding is handled. Say so in the thread if someone else might pick it up."
+
+// SilenceCardStale is appended when the click DID change the ledger but the card
+// already carried a marker from an earlier silence, so it could not be re-marked.
+//
+// Distinct from SilenceCardUnmarked, and the distinction is the whole point: there
+// the channel can see nothing, here it can see the WRONG thing. Telling someone
+// "the channel cannot tell this finding is handled" about a card that plainly says
+// it is handled sends them to write a redundant note, while the real problem — the
+// card advertises the earlier window and the ledger now holds theirs — goes unsaid.
+//
+// It does not repeat the new window because the acknowledgement it is appended to
+// has just stated it in full; "the one above" is that line.
+const SilenceCardStale = "⚠️ This card already carried a silence marker, so it could not be re-marked: " +
+	"the window shown on it is the earlier one, not the one above. Say so in the thread if the difference matters."
+
+// SilenceMarker is the one-line stamp left ON THE CARD after a silence, as
+// distinct from SilenceAck's full explanation to the person who clicked.
+//
+// Two different readers, which is why it is a second function and not a shorter
+// SilenceAck: the ack answers "what did I just do?" for the clicker and is
+// allowed to spend three sentences on the consequences, while the marker answers
+// "has anyone already dealt with this?" for a colleague scrolling the channel a
+// day later. That reader is scanning, not reading, so the marker states only who
+// and until when.
+//
+// It is a single line because it renders in a Slack context block, which is set
+// in small grey type and wraps badly.
+//
+// userRef and untilText are both inserted VERBATIM: this function owns the word
+// order, the 🔕 and the window, and the TRANSPORT owns how a person and a time
+// are drawn. That split is the same one RenderReply makes by taking an escaper,
+// and it is here because both halves were got wrong while thread rendered them
+// itself. A bare "@bob" is not a mention — only "<@U9>" is linkified inside a
+// Block Kit mrkdwn element, since link_names is a chat.postMessage option with no
+// effect on blocks. And a time formatted here is formatted in the RunLore
+// process's timezone, while every other time on the card is a Slack date token
+// that localises per reader. Neither failure is visible to anyone reading the
+// string in the zone that wrote it, which is why the caller must state the shape.
+func SilenceMarker(userRef, untilText string, window time.Duration) string {
+	return fmt.Sprintf("🔕 Silenced by %s until %s · %s",
+		userRef, untilText, ShortDuration(window))
+}

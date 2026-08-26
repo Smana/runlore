@@ -1941,19 +1941,39 @@ func TestMaxNoteBytesTooSmallToKeepAnyNoteIsRejected(t *testing.T) {
 	}
 }
 
+// silenceTestConfig is the minimal config that passes Validate with Slack
+// silencing on: a ledger to record into, a signing secret to verify the click
+// with, a delivery target for the control to live on, and the presets under test.
+// matrixOnly turns a silenceTestConfig into a coherent Matrix-only deployment:
+// the Slack control off, the reaction path on, and the listener fields Validate
+// requires alongside it. Extracted because the preset-count bounds are scoped to
+// the Slack control, so every case that pins "this bound does not apply to
+// Matrix" needs exactly this setup.
+func matrixOnly(c *Config) {
+	c.Notify.Slack.SilenceButton = false
+	c.Notify.Matrix.SilenceReactions = true
+	c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+	c.Notify.Matrix.RoomID = "!room:example.org"
+	c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+}
+
+func silenceTestConfig(windows []Duration) *Config {
+	c := &Config{}
+	c.Outcome.LedgerPath = "/tmp/outcome.jsonl"
+	c.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
+	c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+	c.Notify.Slack.SilenceButton = true
+	c.Notify.Silence.Windows = windows
+	c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+	return c
+}
+
 func TestSilenceConfigValidation(t *testing.T) {
 	base := func() *Config {
-		c := &Config{}
-		c.Outcome.LedgerPath = "/tmp/outcome.jsonl"
-		c.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
-		c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
-		c.Notify.Slack.SilenceButton = true
-		// TWO presets, deliberately: Slack's overflow element requires a minimum of
-		// 2 options, so a one-window base config would have every case in this table
-		// validating a config that makes chat.postMessage return invalid_blocks.
-		c.Notify.Silence.Windows = []Duration{Duration(time.Hour), Duration(4 * time.Hour)}
-		c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
-		return c
+		// TWO presets, deliberately: the 🔕 menu has a floor of 2 options, so a
+		// one-window base config would have every case in this table validating a
+		// config the render site refuses to draw the control for.
+		return silenceTestConfig([]Duration{Duration(time.Hour), Duration(4 * time.Hour)})
 	}
 
 	for _, tc := range []struct {
@@ -2011,7 +2031,7 @@ func TestSilenceConfigValidation(t *testing.T) {
 			wantErr: "homeserver",
 		},
 		{
-			name: "more than 5 presets is rejected — Slack's overflow element accepts at most 5 options",
+			name: "more than 5 presets is rejected — a six-item dropdown is a form, not a quick choice",
 			mutate: func(c *Config) {
 				c.Notify.Silence.Windows = []Duration{
 					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
@@ -2019,7 +2039,7 @@ func TestSilenceConfigValidation(t *testing.T) {
 				}
 				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
 			},
-			wantErr: "notify.silence.windows",
+			wantErr: "2 to 5",
 		},
 		{
 			name: "exactly 5 presets is the accepted boundary",
@@ -2032,29 +2052,36 @@ func TestSilenceConfigValidation(t *testing.T) {
 			},
 		},
 		{
-			name:    "a single preset is rejected while Slack renders the overflow",
+			name:    "a single preset is rejected while Slack renders the control",
 			mutate:  func(c *Config) { c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)} },
-			wantErr: "at least 2",
+			wantErr: "2 to 5",
 		},
 		{
-			name: "a single preset is fine for Matrix alone — it renders no overflow",
+			name: "a single preset is fine for Matrix alone — it renders no menu",
 			mutate: func(c *Config) {
-				c.Notify.Slack.SilenceButton = false
-				c.Notify.Matrix.SilenceReactions = true
-				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
-				c.Notify.Matrix.RoomID = "!room:example.org"
-				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				matrixOnly(c)
 				c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)}
+			},
+		},
+		{
+			// The mirror of "a single preset is fine for Matrix alone", and the
+			// same reasoning at the other end: both bounds describe the RENDERED
+			// dropdown, and Matrix renders none. A bare 🔕 reaction reads only
+			// windows[0], so the 2nd through 6th presets are equally unreachable
+			// there — rejecting six of them was inventing a constraint.
+			name: "six presets are fine for Matrix alone — it renders no menu",
+			mutate: func(c *Config) {
+				matrixOnly(c)
+				c.Notify.Silence.Windows = []Duration{
+					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
+					Duration(8 * time.Hour), Duration(12 * time.Hour), Duration(24 * time.Hour),
+				}
 			},
 		},
 		{
 			name: "the Matrix path needs a ledger too",
 			mutate: func(c *Config) {
-				c.Notify.Slack.SilenceButton = false
-				c.Notify.Matrix.SilenceReactions = true
-				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
-				c.Notify.Matrix.RoomID = "!room:example.org"
-				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				matrixOnly(c)
 				c.Outcome.LedgerPath = ""
 			},
 			wantErr: "outcome.ledger_path",
@@ -2145,6 +2172,36 @@ func TestNotifyFeedbackEnabled(t *testing.T) {
 			n.Matrix.FeedbackReactions = tc.matrix
 			if got := n.FeedbackEnabled(); got != tc.want {
 				t.Errorf("FeedbackEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSilenceWindowBoundsDoNotBlameSlack pins that the window-count errors stop
+// citing Slack's overflow element. Both bounds survive the 2026-08-26 move to a
+// static_select, but only as UX judgements: Slack accepts a select with one
+// option and with six. An error that explains itself with a mechanism the code no
+// longer uses sends the reader looking for a Slack limit that will not be there.
+func TestSilenceWindowBoundsDoNotBlameSlack(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		windows []Duration
+	}{
+		{"one preset is below the floor", []Duration{Duration(time.Hour)}},
+		{"six presets are above the ceiling", []Duration{
+			Duration(time.Hour), Duration(2 * time.Hour), Duration(3 * time.Hour),
+			Duration(4 * time.Hour), Duration(5 * time.Hour), Duration(6 * time.Hour)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := silenceTestConfig(tc.windows).Validate()
+			if err == nil {
+				t.Fatal("want a validation error, got nil")
+			}
+			if strings.Contains(err.Error(), "overflow") {
+				t.Errorf("error still cites the overflow element: %v", err)
+			}
+			if !strings.Contains(err.Error(), "notify.silence.windows") {
+				t.Errorf("error should name the field it is about: %v", err)
 			}
 		})
 	}
