@@ -353,24 +353,16 @@ func TestASingleSilenceWindowRendersNoControl(t *testing.T) {
 func TestSilenceControlIsLabelledNotABareOverflow(t *testing.T) {
 	inv := providers.Investigation{Title: "t", TriggerKey: "k"}
 	blocks := feedbackBlocks(inv, true, []time.Duration{4 * time.Hour, 24 * time.Hour})
-	if len(blocks) != 1 {
-		t.Fatalf("want one actions block, got %d", len(blocks))
-	}
-	elements, _ := blocks[0]["elements"].([]map[string]any)
-	var silence map[string]any
-	for _, e := range elements {
-		if e["action_id"] == silenceActionID {
-			silence = e
-		}
-		if e["type"] == "overflow" {
-			t.Errorf("the silence control must not be an overflow: it renders as an unlabelled ···")
-		}
-	}
+	silence, _ := findSilenceControl(t, blocks)
 	if silence == nil {
 		t.Fatal("no silence element rendered")
 	}
+	// The type IS the assertion here: "overflow" is the shape that drew as a bare
+	// ···, and static_select is the only actions-block element carrying both a
+	// visible label and a menu. 👍/👎 are buttons, so the control is the only
+	// element that could regress to an overflow.
 	if silence["type"] != "static_select" {
-		t.Errorf("silence element type = %v, want static_select", silence["type"])
+		t.Errorf("silence element type = %v, want static_select — an overflow renders as an unlabelled ···", silence["type"])
 	}
 	ph, _ := silence["placeholder"].(map[string]any)
 	if ph == nil || ph["text"] == "" {

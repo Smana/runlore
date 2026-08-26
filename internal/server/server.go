@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -96,11 +97,15 @@ type Server struct {
 	handler http.Handler
 
 	// slackHTTP answers interactions on their response_url. It is a field, and
-	// built once, for two reasons: the replies are frequent enough to be worth a
-	// pooled connection, and a test can substitute a transport for it — which is
-	// the only way to see what was posted, since the SSRF guard below accepts no
-	// host but *.slack.com and so refuses an httptest server before any request is
-	// made. Always non-nil: New sets it.
+	// built once, so a test can substitute a transport for it — which is the only
+	// way to see what was posted, since the SSRF guard below accepts no host but
+	// *.slack.com and so refuses an httptest server before any request is made.
+	//
+	// Connection pooling is deliberately NOT a reason, though it reads like one:
+	// httpx.SecureClient leaves Transport nil, so every client it ever returned
+	// already shared http.DefaultTransport's process-wide idle pool. Hoisting the
+	// client here saves one struct allocation per interaction and nothing else.
+	// Always non-nil: New sets it.
 	slackHTTP *http.Client
 }
 
@@ -659,9 +664,6 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 // also carries an "elements" array, so keying off the field alone would walk the
 // footer as though it held controls — harmless today, but only by accident.
 func silencedCard(blocks []map[string]any, actionID, marker string) ([]map[string]any, bool) {
-	if len(blocks) == 0 {
-		return nil, false
-	}
 	out := make([]map[string]any, 0, len(blocks)+1)
 	for _, b := range blocks {
 		elems, ok := b["elements"].([]any)
@@ -681,10 +683,7 @@ func silencedCard(blocks []map[string]any, actionID, marker string) ([]map[strin
 		if len(kept) == 0 {
 			continue
 		}
-		nb := make(map[string]any, len(b))
-		for k, v := range b {
-			nb[k] = v
-		}
+		nb := maps.Clone(b)
 		nb["elements"] = kept
 		out = append(out, nb)
 	}

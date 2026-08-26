@@ -39,8 +39,16 @@ func (r *recordSilence) Silence(key string, window time.Duration, user string, _
 // TriggerKey rides in the action's block_id.
 func sendSilence(t *testing.T, srv *Server, secret, blockID, value string) *httptest.ResponseRecorder {
 	t.Helper()
-	payload := `{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"runlore_silence",` +
-		`"block_id":"` + blockID + `","selected_option":{"value":"` + value + `"}}]}`
+	return postSignedInteraction(t, srv, secret,
+		`{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"runlore_silence",`+
+			`"block_id":"`+blockID+`","selected_option":{"value":"`+value+`"}}]}`)
+}
+
+// postSignedInteraction form-encodes payload, signs it the way Slack does, and
+// serves it. Every sender in this file shares it so the signing boilerplate has
+// one copy: a change to how an interaction is authenticated lands in one place.
+func postSignedInteraction(t *testing.T, srv *Server, secret, payload string) *httptest.ResponseRecorder {
+	t.Helper()
 	body := "payload=" + url.QueryEscape(payload)
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
@@ -243,63 +251,36 @@ func (c captureSlackResponse) RoundTrip(req *http.Request) (*http.Response, erro
 	}, nil
 }
 
-// slackCapture carries what a test needs to drive a captured server: the signing
-// secret to sign the interaction with, and a response_url the guard accepts.
-type slackCapture struct {
-	secret string
-	url    string
-}
+// testSlackSecret signs every interaction in this file. It is a constant rather
+// than a returned value because no test cares what it is, only that the sender
+// and the server agree on it.
+const testSlackSecret = "shh"
 
-// serverWithCapturedSlackResponse builds a silence-enabled server whose
-// response_url posts are decoded into got instead of being sent.
-func serverWithCapturedSlackResponse(t *testing.T, got *map[string]any) (*Server, slackCapture) {
+// capturedSilenceServer builds a silence-enabled server whose response_url posts
+// are decoded into got instead of being sent. Pass a recordSilence carrying an
+// err to drive the ordering invariant: record first, then decorate.
+func capturedSilenceServer(t *testing.T, got *map[string]any, rec *recordSilence) *Server {
 	t.Helper()
-	return capturedSilenceServer(t, got, &recordSilence{})
-}
-
-// serverWithCapturedSlackResponseFailing is the same server with a ledger that
-// refuses every write, for the ordering invariant: record first, then decorate.
-func serverWithCapturedSlackResponseFailing(t *testing.T, got *map[string]any) (*Server, slackCapture) {
-	t.Helper()
-	return capturedSilenceServer(t, got, &recordSilence{err: errTestSilence})
-}
-
-func capturedSilenceServer(t *testing.T, got *map[string]any, rec *recordSilence) (*Server, slackCapture) {
-	t.Helper()
-	const secret = "shh"
-	srv := New(nil, Actions{Silence: rec, SlackSecret: secret}, nil, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Silence: rec, SlackSecret: testSlackSecret}, nil, nil, nil, nil, discardLog)
 	srv.slackHTTP = &http.Client{Transport: captureSlackResponse{t: t, got: got}}
-	return srv, slackCapture{secret: secret, url: testSlackResponseURL}
+	return srv
 }
 
 // sendSilenceCard is sendSilence plus the two payload fields the card rewrite
 // needs: where to post the rebuilt card, and the card it is rebuilding. Passing
 // blocks == "" omits message.blocks entirely, which is the shape that must fall
-// back rather than blank the card.
-func sendSilenceCard(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks string) *httptest.ResponseRecorder {
-	t.Helper()
-	return sendSilenceCardWithText(t, srv, secret, blockID, value, responseURL, blocks, "")
-}
-
-// sendSilenceCardWithText additionally sets the card's top-level "text", the
+// back rather than blank the card. text is the card's top-level "text", the
 // notification/accessibility fallback a rewrite must carry over.
-func sendSilenceCardWithText(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks, text string) *httptest.ResponseRecorder {
+func sendSilenceCard(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks, text string) *httptest.ResponseRecorder {
 	t.Helper()
 	msg := ""
 	if blocks != "" {
 		msg = `,"message":{"blocks":` + blocks + `,"text":"` + text + `"}`
 	}
-	payload := `{"user":{"id":"U9","username":"bob"},"response_url":"` + responseURL + `",` +
-		`"actions":[{"action_id":"runlore_silence","block_id":"` + blockID +
-		`","selected_option":{"value":"` + value + `"}}]` + msg + `}`
-	body := "payload=" + url.QueryEscape(payload)
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
-	req.Header.Set("X-Slack-Request-Timestamp", ts)
-	req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
-	rr := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, req)
-	return rr
+	return postSignedInteraction(t, srv, secret,
+		`{"user":{"id":"U9","username":"bob"},"response_url":"`+responseURL+`",`+
+			`"actions":[{"action_id":"runlore_silence","block_id":"`+blockID+
+			`","selected_option":{"value":"`+value+`"}}]`+msg+`}`)
 }
 
 const testSilenceCardBlocks = `[
@@ -316,11 +297,11 @@ const testSilenceCardBlocks = `[
 // that message, and every screen reader, with nothing to read.
 func TestSilenceKeepsTheNotificationFallbackText(t *testing.T) {
 	var got map[string]any
-	srv, capture := serverWithCapturedSlackResponse(t, &got)
+	srv := capturedSilenceServer(t, &got, &recordSilence{})
 
 	const fallback = "🔍 harbor-db crash-looping — Action required"
 	blocks := testSilenceCardBlocks
-	rr := sendSilenceCardWithText(t, srv, capture.secret, "sil:k", "48h", capture.url, blocks, fallback)
+	rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "48h", testSlackResponseURL, blocks, fallback)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("silence = %d, want 200", rr.Code)
 	}
@@ -336,9 +317,9 @@ func TestSilenceKeepsTheNotificationFallbackText(t *testing.T) {
 // (scrollback could not tell a handled finding from an unhandled one).
 func TestSilenceRewritesTheCardPublicly(t *testing.T) {
 	var got map[string]any
-	srv, capture := serverWithCapturedSlackResponse(t, &got)
+	srv := capturedSilenceServer(t, &got, &recordSilence{})
 
-	rr := sendSilenceCard(t, srv, capture.secret, "sil:k", "48h", capture.url, testSilenceCardBlocks)
+	rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "48h", testSlackResponseURL, testSilenceCardBlocks, "")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("silence = %d, want 200", rr.Code)
 	}
@@ -370,9 +351,9 @@ func TestSilenceRewritesTheCardPublicly(t *testing.T) {
 // half a caller can silently get wrong by ignoring the second return value.
 func TestSilenceWithoutBlocksLeavesTheCardIntact(t *testing.T) {
 	var got map[string]any
-	srv, capture := serverWithCapturedSlackResponse(t, &got)
+	srv := capturedSilenceServer(t, &got, &recordSilence{})
 
-	if rr := sendSilenceCard(t, srv, capture.secret, "sil:k", "48h", capture.url, ""); rr.Code != http.StatusOK {
+	if rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "48h", testSlackResponseURL, "", ""); rr.Code != http.StatusOK {
 		t.Fatalf("silence = %d, want 200", rr.Code)
 	}
 	if got["blocks"] != nil {
@@ -392,9 +373,9 @@ func TestSilenceWithoutBlocksLeavesTheCardIntact(t *testing.T) {
 // does not happen, and the channel is told it did.
 func TestSilenceLedgerFailureLeavesTheCardUnmarked(t *testing.T) {
 	var got map[string]any
-	srv, capture := serverWithCapturedSlackResponseFailing(t, &got)
+	srv := capturedSilenceServer(t, &got, &recordSilence{err: errTestSilence})
 
-	if rr := sendSilenceCard(t, srv, capture.secret, "sil:k", "48h", capture.url, testSilenceCardBlocks); rr.Code != http.StatusOK {
+	if rr := sendSilenceCard(t, srv, testSlackSecret, "sil:k", "48h", testSlackResponseURL, testSilenceCardBlocks, ""); rr.Code != http.StatusOK {
 		t.Fatalf("silence = %d, want 200", rr.Code)
 	}
 	dump, _ := json.Marshal(got)
