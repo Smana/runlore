@@ -444,8 +444,8 @@ type slackInteraction struct {
 		Value    string `json:"value"`
 		// BlockID is the actions block's block_id, echoed back on every action.
 		// The silence menu carries no room for the TriggerKey in its option
-		// values (Slack caps those at 75 chars), so notify.slack.go stashes it
-		// here instead — see notify.silenceBlockIDPrefix.
+		// values (Slack caps those at 75 chars), so the renderer stashes it here
+		// instead — see slackcard.SilenceBlockIDPrefix.
 		BlockID string `json:"block_id"`
 		// SelectedOption carries a menu's chosen value — NOT the top-level Value
 		// field above, which button clicks (approve/reject/feedback) use. Slack

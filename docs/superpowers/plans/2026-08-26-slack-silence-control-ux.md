@@ -21,6 +21,13 @@
 - Test names are full sentences describing the invariant. Table-driven with a prose `name` field.
 - `internal/server` deliberately does NOT import `internal/notify`. Shared string constants are duplicated as literals on both sides and pinned by a guard test in `notify` — see `TestSilenceBlockIDPrefixMatchesTheServerHandler`.
 
+  > **Superseded during implementation.** The rule held, but the duplication it required did not
+  > survive review: the marker shipped a server-timezone timestamp and a non-mention `@name` purely
+  > because `slackDate` and `EscapeMrkdwn` were unreachable across the split. The constants and those
+  > helpers moved to a leaf package, `internal/slackcard`, which both sides import — `internal/server`
+  > still does not import `internal/notify`, and the guard test is deleted because the compiler now
+  > checks what it was parsing source to check.
+
 ## File structure
 
 | File | Responsibility |
