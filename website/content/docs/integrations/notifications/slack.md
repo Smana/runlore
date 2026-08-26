@@ -87,11 +87,16 @@ machine cooldown are independent, and the silence is checked first.
 
 **A click rewrites the card in place.** The 🔕 control is removed — it has done its job, and a second
 click on a card that already says it is silenced is only confusing — and a line naming who silenced
-the finding and until when is appended, visible to the whole channel rather than to the clicker
-alone. 👍/👎 stay on the card, because a 👎 is how a colleague lifts the silence early. Scrollback
-therefore distinguishes a handled finding from an unhandled one. If Slack sends no blocks back with
-the interaction the card is left untouched and the acknowledgement stays private: the silence is
-recorded either way, and a marker is never worth risking the finding it marks.
+the finding and until when is appended, visible to the whole channel. The name renders as a real
+Slack mention. 👍/👎 stay on the card, because a 👎 is how a colleague lifts the silence early.
+Scrollback therefore distinguishes a handled finding from an unhandled one.
+
+That public line is **in addition to** the private acknowledgement described below, not instead of
+it. The two answer different readers: the marker tells a colleague scanning the channel a day later
+that the finding is already handled, while the acknowledgement tells whoever clicked what they just
+switched off — and which escapes this deployment actually has. If Slack sends no blocks back with the
+interaction, the card is left untouched and the private acknowledgement is the whole answer: the
+silence is recorded either way, and a marker is never worth risking the finding it marks.
 
 The silence stands until one of **four** things happens:
 

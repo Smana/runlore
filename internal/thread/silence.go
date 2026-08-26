@@ -104,9 +104,16 @@ func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnab
 // and until when.
 //
 // It is a single line because it renders in a Slack context block, which is set
-// in small grey type and wraps badly; and it names the user with a leading @ so
-// Slack renders the mention rather than a bare string.
-func SilenceMarker(user string, window time.Duration, until time.Time) string {
-	return fmt.Sprintf("🔕 Silenced by @%s until %s · %s",
-		user, until.Format(silenceExpiryLayout), ShortDuration(window))
+// in small grey type and wraps badly.
+//
+// userRef is inserted VERBATIM, so the caller supplies its transport's own
+// mention syntax rather than a bare name. On Slack that is "<@U9>", which is the
+// only form linkified inside a Block Kit mrkdwn element: a leading "@bob" renders
+// there as literal text, because link_names is a chat.postMessage option and has
+// no effect on blocks. Naming the silencer without notifying them or linking
+// their profile is most of the marker's value gone, and the failure is invisible
+// to anyone reading the string — which is why the shape is the caller's to state.
+func SilenceMarker(userRef string, window time.Duration, until time.Time) string {
+	return fmt.Sprintf("🔕 Silenced by %s until %s · %s",
+		userRef, until.Format(silenceExpiryLayout), ShortDuration(window))
 }

@@ -606,7 +606,9 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 		silenced = true
-		marker = thread.SilenceMarker(p.User.Username, window, now.Add(window))
+		// "<@ID>", not the username: it is the only mention form Slack linkifies
+		// inside the context block this marker renders in.
+		marker = thread.SilenceMarker("<@"+p.User.ID+">", window, now.Add(window))
 		msg = thread.SilenceAck(p.User.Username, window, now.Add(window), s.feedbackEnabled)
 		s.log.Info("slack silence recorded", "key", key, "window", window,
 			"until", now.Add(window), "user_id", p.User.ID, "user", p.User.Username)
@@ -618,22 +620,27 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	// Approve/reject replace the interaction message with the outcome; a feedback
 	// ack must NOT — replacing would wipe the investigation the rating is about.
 	//
-	// Silence is the third case, and the only one that rewrites the card by
-	// REBUILDING it (control removed, marker appended) rather than replacing it
-	// with a line of text. It does so because the two other defects the first live
-	// silence exposed are the same defect seen twice: an ephemeral ack tells nobody
-	// but the clicker, and an untouched card tells nobody at all a day later.
+	// Silence is the third case, and the only one that answers TWICE. It rewrites
+	// the card by REBUILDING it (control removed, marker appended) and then still
+	// falls through to the ephemeral ack below. response_url accepts up to five
+	// answers, and these two are aimed at different readers: the marker tells a
+	// colleague scanning scrollback a day later that the finding is handled, while
+	// SilenceAck tells the person who just clicked what they switched OFF — no
+	// model call, no notification, no record — and which escape hatches this
+	// deployment actually has. Posting only the card would leave the clicker less
+	// informed than before the card was rewritten at all, and would make the
+	// feedback_buttons:false disclosure from #556 unreachable on this path.
 	//
-	// When the rebuild refuses it degrades to the feedback behaviour rather than
-	// posting a card it is unsure of; the ledger already holds the silence, so what
-	// is lost is a marker and not the suppression. Ignoring the second return here
-	// would post replace_original with no blocks and wipe the investigation.
+	// When the rebuild refuses, the ack alone is the whole answer: the ledger
+	// already holds the silence, so what is lost is a marker and not the
+	// suppression. Ignoring the second return here would post replace_original
+	// with no blocks and wipe the investigation.
 	if silenced && p.ResponseURL != "" {
 		if rebuilt, ok := silencedCard(p.Message.Blocks, act.ActionID, marker); ok {
 			s.updateSlackBlocks(r.Context(), p.ResponseURL, p.Message.Text, rebuilt)
-			return
+		} else {
+			s.log.Warn("slack silence: no usable blocks in the payload; leaving the card intact")
 		}
-		s.log.Warn("slack silence: no usable blocks in the payload; leaving the card intact")
 	}
 	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
 	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
