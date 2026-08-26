@@ -412,12 +412,15 @@ type slackInteraction struct {
 		ActionID string `json:"action_id"`
 		Value    string `json:"value"`
 		// BlockID is the actions block's block_id, echoed back on every action.
-		// The silence overflow carries no room for the TriggerKey in its option
+		// The silence menu carries no room for the TriggerKey in its option
 		// values (Slack caps those at 75 chars), so notify.slack.go stashes it
 		// here instead — see notify.silenceBlockIDPrefix.
 		BlockID string `json:"block_id"`
-		// SelectedOption carries an overflow's chosen value — NOT the top-level
-		// Value field above, which button clicks (approve/reject/feedback) use.
+		// SelectedOption carries a menu's chosen value — NOT the top-level Value
+		// field above, which button clicks (approve/reject/feedback) use. Slack
+		// fills it identically for a static_select and for the overflow the 🔕
+		// control used to be, which is why swapping the element on 2026-08-26
+		// needed no migration: see TestSilenceReadsAStaticSelectPayload.
 		SelectedOption struct {
 			Value string `json:"value"`
 		} `json:"selected_option"`

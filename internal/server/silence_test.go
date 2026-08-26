@@ -32,9 +32,9 @@ func (r *recordSilence) Silence(key string, window time.Duration, user string, _
 	return nil
 }
 
-// sendSilence posts a signed overflow-selection interaction. Note the payload
-// shape: an overflow carries its choice in selected_option.value, NOT in value,
-// and the TriggerKey rides in the action's block_id.
+// sendSilence posts a signed menu-selection interaction. Note the payload shape:
+// the 🔕 menu carries its choice in selected_option.value, NOT in value, and the
+// TriggerKey rides in the action's block_id.
 func sendSilence(t *testing.T, srv *Server, secret, blockID, value string) *httptest.ResponseRecorder {
 	t.Helper()
 	payload := `{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"runlore_silence",` +
@@ -124,3 +124,25 @@ func TestSlackSilenceRecorderErrorIsAcked(t *testing.T) {
 }
 
 var errTestSilence = errors.New("ledger is full of bees")
+
+// TestSilenceReadsAStaticSelectPayload pins the reason the 2026-08-26 element
+// swap needed no migration: Slack delivers the chosen option at
+// actions[0].selected_option.value for a static_select exactly as it did for an
+// overflow, so cards posted before the swap stay clickable after it. That claim
+// was verified against Slack's payload docs during design and is the whole reason
+// there is no dual-shape parsing here — if Slack ever diverges, it must fail in
+// this test rather than as a silently dead control on every card still in
+// scrollback.
+func TestSilenceReadsAStaticSelectPayload(t *testing.T) {
+	rec := &recordSilence{}
+	const secret = "shh"
+	srv := New(nil, Actions{Silence: rec, SlackSecret: secret}, nil, nil, nil, nil, discardLog)
+
+	if rr := sendSilence(t, srv, secret, "sil:k", "24h"); rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	want := recordedSilence{key: "k", window: 24 * time.Hour, user: "U9"}
+	if len(rec.got) != 1 || rec.got[0] != want {
+		t.Fatalf("recorded = %+v, want exactly one %+v", rec.got, want)
+	}
+}

@@ -109,7 +109,7 @@ type Slack struct {
 	// so the on-call can rate the diagnosis; clicks land in the outcome ledger via
 	// the exposed /slack/interactions endpoint.
 	FeedbackButtons bool
-	// SilenceWindows are the presets offered by the 🔕 overflow
+	// SilenceWindows are the presets offered by the 🔕 silence menu
 	// (notify.silence.windows); empty disables the control.
 	SilenceWindows []time.Duration
 }
@@ -176,7 +176,7 @@ type SlackBot struct {
 	// FeedbackButtons — see Slack.FeedbackButtons; on the bot path the buttons sit
 	// on the channel summary message, never on the detail thread reply.
 	FeedbackButtons bool
-	// SilenceWindows are the presets offered by the 🔕 overflow
+	// SilenceWindows are the presets offered by the 🔕 silence menu
 	// (notify.silence.windows); empty disables the control.
 	SilenceWindows []time.Duration
 	// Threads, when set (notify.slack.thread_capture), receives the summary
@@ -321,10 +321,10 @@ const (
 )
 
 // silenceBlockIDPrefix namespaces the actions block whose block_id carries the
-// TriggerKey for the silence overflow, and slackBlockIDMax is Slack's cap on that
+// TriggerKey for the silence control, and slackBlockIDMax is Slack's cap on that
 // field.
 //
-// The key rides in block_id rather than in the overflow's option values because
+// The key rides in block_id rather than in the control's option values because
 // Slack caps an option value at 75 characters (a button value gets 2000), and a
 // GitOps TriggerKey is `namespace/name:Reason` — routinely 60-70 characters, and
 // unbounded in principle since Kubernetes names run to 253. An over-long option
@@ -339,13 +339,15 @@ const (
 const (
 	silenceBlockIDPrefix = "sil:"
 	slackBlockIDMax      = 255
-	// slackOverflowMinOptions is Slack's floor on an overflow element: fewer than
-	// two options and chat.postMessage returns invalid_blocks for the WHOLE
-	// message, so the finding is not delivered at all. Config validation already
-	// rejects a single window when slack.silence_button is on; this is the render
-	// site refusing to build a payload it knows Slack will reject, which is the
-	// only place that counts the options it is about to emit.
-	slackOverflowMinOptions = 2
+	// slackSilenceMinOptions is a DELIBERATE UX floor, and no longer a Slack one.
+	// It was named for the overflow element, which rejects a 1-option menu by
+	// rejecting the WHOLE message with invalid_blocks — but the control is a
+	// static_select now, and Slack accepts a select carrying a single option. The
+	// floor stays anyway: a one-entry dropdown is a button wearing a menu, and it
+	// reads as broken. Config validation refuses that combination at startup; this
+	// is the render site refusing to build it regardless, because it is the only
+	// place that counts the options it is about to emit.
+	slackSilenceMinOptions = 2
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
@@ -392,7 +394,7 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 }
 
 // feedbackBlocks renders the human end of the learning loop: 👍/👎 when
-// withFeedback is set, a 🔕 overflow offering each configured window when
+// withFeedback is set, a 🔕 menu offering each configured window when
 // silenceWindows is non-empty — INDEPENDENTLY of each other.
 //
 // The three are one row and one verdict vocabulary — 👍 accurate, 👎 off-base,
@@ -409,7 +411,7 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // re-worded re-investigations), falling back to the alert fingerprint; with
 // neither there is nothing for the ledger to attribute, so nothing renders.
 //
-// The 🔕 silence overflow requires the TriggerKey specifically — NOT the
+// The 🔕 silence menu requires the TriggerKey specifically — NOT the
 // fallback above. RecurrenceGate.decide reads l.silences[req.TriggerKey] and
 // bails out to recurrenceOff outright when req.TriggerKey == "", so a silence
 // recorded under a bare fingerprint (e.g. a budget/timeout/refusal result,
@@ -424,9 +426,8 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // even that, the silence element alone is dropped: a pathological resource name
 // must degrade ONE control, never the card.
 //
-// Fewer than slackOverflowMinOptions windows drops it for the same reason and with
-// the same trade: Slack rejects a 1-option overflow by rejecting the entire
-// message, so building one would cost the notification rather than the control.
+// Fewer than slackSilenceMinOptions windows drops it too, though for a weaker
+// reason: a one-entry dropdown reads as broken rather than breaking the message.
 // Config validation already refuses that combination at startup, but only the
 // render site can count what it is actually about to emit.
 //
@@ -446,9 +447,9 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 		)
 	}
 	blockID := silenceBlockIDPrefix + inv.TriggerKey
-	overflowFits := inv.TriggerKey != "" && len(silenceWindows) >= slackOverflowMinOptions &&
+	silenceFits := inv.TriggerKey != "" && len(silenceWindows) >= slackSilenceMinOptions &&
 		len(blockID) <= slackBlockIDMax
-	if overflowFits {
+	if silenceFits {
 		opts := make([]map[string]any, 0, len(silenceWindows))
 		for _, w := range silenceWindows {
 			opts = append(opts, map[string]any{
@@ -461,14 +462,24 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 			})
 		}
 		elements = append(elements, map[string]any{
-			"type": "overflow", "action_id": silenceActionID, "options": opts,
+			"type": "static_select", "action_id": silenceActionID,
+			// An overflow takes no text at all, so it draws as a bare "···" next to
+			// two labelled buttons. Observed live on 2026-08-26: the control was
+			// unrecognisable, because the 🔕 and the word "Silence" appear only once
+			// the menu is open — after you have clicked something you could not
+			// identify. A static_select is the one actions-block element that carries
+			// a visible label AND a menu, and the payload it sends back is identical
+			// (actions[0].selected_option.value), so cards already posted stay
+			// clickable and no migration is needed.
+			"placeholder": map[string]any{"type": "plain_text", "text": "🔕 Silence…", "emoji": true},
+			"options":     opts,
 		})
 	}
 	if len(elements) == 0 {
 		return nil
 	}
 	block := map[string]any{"type": "actions", "elements": elements}
-	if overflowFits {
+	if silenceFits {
 		block["block_id"] = blockID
 	}
 	return []map[string]any{block}

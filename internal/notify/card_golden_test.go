@@ -76,10 +76,10 @@ var updateCardGolden = flag.Bool("update-card-golden", false,
 //	                       account given" arm that keeps an incomplete run from reading
 //	                       as a finding
 //
-// The 🔕 silence overflow is NOT one fixture's arm: renderCardGolden hands the same
+// The 🔕 silence menu is NOT one fixture's arm: renderCardGolden hands the same
 // silenceWindows() preset to every fixture, so it renders on each one that carries a
 // TriggerKey — action_required, instant_recall, seen_before and curate_failed. The
-// five fingerprint-only fixtures pin the other side of that branch: the overflow
+// five fingerprint-only fixtures pin the other side of that branch: the control
 // requires the TriggerKey specifically and is dropped without it (see
 // feedbackBlocks), which is itself an arm worth holding open.
 //
@@ -330,7 +330,7 @@ func cardGoldenFixtures() []struct {
 
 // renderCardGolden renders every fixture through slackMessageWith — the exact
 // entry point the bot path posts (summary + detail + feedback buttons + the 🔕
-// silence overflow, via the fixed silenceWindows() test preset) — and encodes
+// silence menu, via the fixed silenceWindows() test preset) — and encodes
 // the result with sorted map keys, so the bytes are a pure function of the
 // renderer.
 //
@@ -433,7 +433,7 @@ func TestCardGoldenCoversEveryRenderedBranch(t *testing.T) {
 		"Proposed action",                      // an action awaiting approval
 		"Approve",                              //
 		"👍 Accurate",                           // feedbackBlocks
-		"🔕 Silence",                            // feedbackBlocks' silence overflow
+		"🔕 Silence",                            // feedbackBlocks' silence static_select
 		"…1 more",                              // evidence / next-step overflow
 		"<!date^",                              // slackDate, which is why the fixtures fix their times
 	} {

@@ -18,9 +18,12 @@ func silenceWindows() []time.Duration {
 	return []time.Duration{time.Hour, 4 * time.Hour, 24 * time.Hour}
 }
 
-// findOverflow returns the silence overflow element from a rendered block set,
-// plus the block_id of the actions block carrying it.
-func findOverflow(t *testing.T, blocks []map[string]any) (map[string]any, string) {
+// findSilenceControl returns the 🔕 element from a rendered block set, plus the
+// block_id of the actions block carrying it. It matches on action_id rather than
+// on the element type on purpose: the type changed once already (overflow →
+// static_select, 2026-08-26) and every caller here cares about the control, not
+// about how Slack happens to draw it.
+func findSilenceControl(t *testing.T, blocks []map[string]any) (map[string]any, string) {
 	t.Helper()
 	for _, b := range blocks {
 		els, ok := b["elements"].([]map[string]any)
@@ -37,13 +40,13 @@ func findOverflow(t *testing.T, blocks []map[string]any) (map[string]any, string
 	return nil, ""
 }
 
-// TestSilenceOverflowCarriesTheKeyInTheBlockID pins the encoding: Slack caps an
-// overflow option value at 75 chars, so the TriggerKey CANNOT live there.
-func TestSilenceOverflowCarriesTheKeyInTheBlockID(t *testing.T) {
+// TestSilenceControlCarriesTheKeyInTheBlockID pins the encoding: Slack caps a
+// menu option value at 75 chars, so the TriggerKey CANNOT live there.
+func TestSilenceControlCarriesTheKeyInTheBlockID(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: "production/payments-api:ProgressDeadlineExceeded"}
-	el, blockID := findOverflow(t, feedbackBlocks(inv, true, silenceWindows()))
+	el, blockID := findSilenceControl(t, feedbackBlocks(inv, true, silenceWindows()))
 	if el == nil {
-		t.Fatal("no silence overflow element rendered")
+		t.Fatal("no silence control rendered")
 	}
 	if want := silenceBlockIDPrefix + inv.TriggerKey; blockID != want {
 		t.Errorf("block_id = %q, want %q", blockID, want)
@@ -63,21 +66,21 @@ func TestSilenceOverflowCarriesTheKeyInTheBlockID(t *testing.T) {
 	}
 }
 
-// TestSilenceOverflowEveryValueIsUnder75 is the one that would have caught the
-// original design: a realistic long GitOps key must not reach an OVERFLOW
-// OPTION value.
+// TestSilenceControlEveryValueIsUnder75 is the one that would have caught the
+// original design: a realistic long GitOps key must not reach a MENU OPTION
+// value.
 //
-// This deliberately inspects the overflow's own options rather than grepping
+// This deliberately inspects the control's own options rather than grepping
 // the whole marshaled block set for the key: the 👍/👎 buttons legitimately
 // carry the full, untruncated key as their "value" (a button.value is capped at
 // 2000 chars, not 75), so a blob-wide substring search would flag that safe,
 // intentional placement as if it were the bug this test exists to catch.
-func TestSilenceOverflowEveryValueIsUnder75(t *testing.T) {
+func TestSilenceControlEveryValueIsUnder75(t *testing.T) {
 	long := "kube-system/nginx-ingress-controller-cluster-wide-abcdef123456:ProgressDeadlineExceeded"
 	inv := providers.Investigation{Title: "boom", TriggerKey: long}
-	el, _ := findOverflow(t, feedbackBlocks(inv, true, silenceWindows()))
+	el, _ := findSilenceControl(t, feedbackBlocks(inv, true, silenceWindows()))
 	if el == nil {
-		t.Fatal("no silence overflow element rendered")
+		t.Fatal("no silence control rendered")
 	}
 	opts, ok := el["options"].([]map[string]any)
 	if !ok {
@@ -97,7 +100,7 @@ func TestSilenceOverflowEveryValueIsUnder75(t *testing.T) {
 func TestSilenceOmittedWhenTheBlockIDWouldOverflow(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: strings.Repeat("x", 300)}
 	blocks := feedbackBlocks(inv, true, silenceWindows())
-	if el, _ := findOverflow(t, blocks); el != nil {
+	if el, _ := findSilenceControl(t, blocks); el != nil {
 		t.Error("silence element rendered with an over-long block_id")
 	}
 	if len(blocks) == 0 {
@@ -109,7 +112,7 @@ func TestSilenceOmittedWhenTheBlockIDWouldOverflow(t *testing.T) {
 // off, and nothing should render.
 func TestSilenceAbsentWithoutWindows(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: "k"}
-	if el, _ := findOverflow(t, feedbackBlocks(inv, true, nil)); el != nil {
+	if el, _ := findSilenceControl(t, feedbackBlocks(inv, true, nil)); el != nil {
 		t.Error("silence element rendered with no configured windows")
 	}
 }
@@ -139,7 +142,7 @@ func TestSilenceOnlyRendersWithoutFeedbackButtons(t *testing.T) {
 			t.Fatalf("Deliver: %v", err)
 		}
 		if !strings.Contains(got, silenceActionID) {
-			t.Fatalf("silence-only webhook delivery must still render the 🔕 overflow, got: %s", got)
+			t.Fatalf("silence-only webhook delivery must still render the 🔕 control, got: %s", got)
 		}
 		if strings.Contains(got, feedbackUpActionID) || strings.Contains(got, feedbackDownActionID) {
 			t.Fatalf("silence-only webhook delivery must NOT render 👍/👎 — they would dead-end (feedback_buttons is off), got: %s", got)
@@ -163,7 +166,7 @@ func TestSilenceOnlyRendersWithoutFeedbackButtons(t *testing.T) {
 			t.Fatalf("Deliver: %v", err)
 		}
 		if len(bodies) == 0 || !strings.Contains(bodies[0], silenceActionID) {
-			t.Fatalf("silence-only bot summary must still render the 🔕 overflow, got: %v", bodies)
+			t.Fatalf("silence-only bot summary must still render the 🔕 control, got: %v", bodies)
 		}
 		if strings.Contains(bodies[0], feedbackUpActionID) || strings.Contains(bodies[0], feedbackDownActionID) {
 			t.Fatalf("silence-only bot summary must NOT render 👍/👎 — they would dead-end (feedback_buttons is off), got: %v", bodies)
@@ -171,12 +174,12 @@ func TestSilenceOnlyRendersWithoutFeedbackButtons(t *testing.T) {
 	})
 }
 
-// TestFeedbackOnlyRendersWithoutSilenceOverflow is the mirror of
+// TestFeedbackOnlyRendersWithoutTheSilenceControl is the mirror of
 // TestSilenceOnlyRendersWithoutFeedbackButtons: feedback_buttons on its own,
 // silence_button off (no SilenceWindows configured) must render 👍/👎 and NOT
-// the 🔕 overflow — a control with nothing behind it, since s.silence would be
+// the 🔕 menu — a control with nothing behind it, since s.silence would be
 // nil on that deployment.
-func TestFeedbackOnlyRendersWithoutSilenceOverflow(t *testing.T) {
+func TestFeedbackOnlyRendersWithoutTheSilenceControl(t *testing.T) {
 	inv := providers.Investigation{Title: "t", TriggerKey: "k"}
 
 	t.Run("webhook", func(t *testing.T) {
@@ -197,7 +200,7 @@ func TestFeedbackOnlyRendersWithoutSilenceOverflow(t *testing.T) {
 			t.Fatalf("feedback-only webhook delivery must render 👍/👎, got: %s", got)
 		}
 		if strings.Contains(got, silenceActionID) {
-			t.Fatalf("feedback-only webhook delivery must NOT render the 🔕 overflow — silence_button is off, got: %s", got)
+			t.Fatalf("feedback-only webhook delivery must NOT render the 🔕 control — silence_button is off, got: %s", got)
 		}
 	})
 
@@ -221,7 +224,7 @@ func TestFeedbackOnlyRendersWithoutSilenceOverflow(t *testing.T) {
 			t.Fatalf("feedback-only bot summary must render 👍/👎, got: %v", bodies)
 		}
 		if strings.Contains(bodies[0], silenceActionID) {
-			t.Fatalf("feedback-only bot summary must NOT render the 🔕 overflow — silence_button is off, got: %v", bodies)
+			t.Fatalf("feedback-only bot summary must NOT render the 🔕 control — silence_button is off, got: %v", bodies)
 		}
 	})
 }
@@ -229,7 +232,7 @@ func TestFeedbackOnlyRendersWithoutSilenceOverflow(t *testing.T) {
 // TestSilenceOmittedWithoutTriggerKey pins the CRITICAL fix: a card whose
 // Investigation carries only a Fingerprint (TriggerKey == "") must render
 // 👍/👎 (fingerprint is a legitimate attribution for feedback, recorded for
-// analytics regardless) but must NOT render the 🔕 silence overflow. A
+// analytics regardless) but must NOT render the 🔕 silence control. A
 // fingerprint is never a trigger key — alert fingerprints are hex, trigger
 // keys are "alertname/ns/name" or "ns/name:Reason" — so a silence stored
 // under a fingerprint (RecurrenceGate reads l.silences[req.TriggerKey], and
@@ -245,8 +248,8 @@ func TestSilenceOmittedWithoutTriggerKey(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", Fingerprint: "fp-9a1"}
 	blocks := feedbackBlocks(inv, true, silenceWindows())
 
-	if el, _ := findOverflow(t, blocks); el != nil {
-		t.Errorf("silence overflow rendered for a card with no TriggerKey: %v", el)
+	if el, _ := findSilenceControl(t, blocks); el != nil {
+		t.Errorf("silence control rendered for a card with no TriggerKey: %v", el)
 	}
 	var sawUp, sawDown bool
 	for _, b := range blocks {
@@ -268,16 +271,16 @@ func TestSilenceOmittedWithoutTriggerKey(t *testing.T) {
 	}
 }
 
-// TestSilenceOverflowLabelsReadLikeTheDocs pins the human-facing half of the
-// overflow. The label came from time.Duration.String(), so a preset the docs and
+// TestSilenceControlLabelsReadLikeTheDocs pins the human-facing half of the
+// menu. The label came from time.Duration.String(), so a preset the docs and
 // values.yaml both write as `1h` rendered as "🔕 Silence 1h0m0s" on the card.
 // The option VALUE is a machine token and deliberately keeps whatever spelling
 // round-trips through time.ParseDuration.
-func TestSilenceOverflowLabelsReadLikeTheDocs(t *testing.T) {
+func TestSilenceControlLabelsReadLikeTheDocs(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: "ns/app:CrashLoop"}
-	el, _ := findOverflow(t, feedbackBlocks(inv, true, []time.Duration{time.Hour, 4 * time.Hour, 24 * time.Hour}))
+	el, _ := findSilenceControl(t, feedbackBlocks(inv, true, []time.Duration{time.Hour, 4 * time.Hour, 24 * time.Hour}))
 	if el == nil {
-		t.Fatal("no silence overflow element rendered")
+		t.Fatal("no silence control rendered")
 	}
 	opts, ok := el["options"].([]map[string]any)
 	if !ok {
@@ -296,30 +299,34 @@ func TestSilenceOverflowLabelsReadLikeTheDocs(t *testing.T) {
 	}
 }
 
-// TestASingleSilenceWindowRendersNoOverflow is the render-site half of the
-// minimum-2 rule. Slack's overflow element requires between 2 and 5 options, and a
-// 1-option overflow does not merely fail to draw: chat.postMessage returns
-// invalid_blocks and the WHOLE finding goes undelivered.
+// TestASingleSilenceWindowRendersNoControl is the render-site half of the
+// minimum-2 rule.
+//
+// The rule's ORIGIN was Slack's: an overflow element requires between 2 and 5
+// options, and a 1-option overflow did not merely fail to draw — chat.postMessage
+// returned invalid_blocks and the WHOLE finding went undelivered. The control is a
+// static_select now and Slack would accept a single option, so the floor survives
+// only as a UX judgement: a one-entry dropdown is a button wearing a menu.
 //
 // Config validation rejects `windows: [4h]` with slack.silence_button on, so this
 // is defence in depth — but the render site is the one place that knows how many
 // options it is about to emit, and dropping one control is a failure mode this card
-// already accepts (see the over-long block_id branch) while losing the notification
-// is not. The 👍/👎 buttons must survive: they are gated independently.
-func TestASingleSilenceWindowRendersNoOverflow(t *testing.T) {
+// already accepts (see the over-long block_id branch). The 👍/👎 buttons must
+// survive: they are gated independently.
+func TestASingleSilenceWindowRendersNoControl(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: "tooling/harbor:HelmUpgradeFailed"}
 
 	blocks := feedbackBlocks(inv, true, []time.Duration{4 * time.Hour})
-	if el, blockID := findOverflow(t, blocks); el != nil {
-		t.Errorf("a single window rendered an overflow with %v — Slack rejects the entire message", el["options"])
+	if el, blockID := findSilenceControl(t, blocks); el != nil {
+		t.Errorf("a single window rendered a menu with %v — one option is a button wearing a dropdown", el["options"])
 	} else if blockID != "" {
-		t.Errorf("block_id = %q with no overflow to carry a key for", blockID)
+		t.Errorf("block_id = %q with no control to carry a key for", blockID)
 	}
 	if len(blocks) != 1 {
 		t.Fatalf("blocks = %v, want the actions block with the feedback buttons still on it", blocks)
 	}
 	if _, ok := blocks[0]["block_id"]; ok {
-		t.Errorf("actions block kept a block_id with no overflow: %v", blocks[0])
+		t.Errorf("actions block kept a block_id with no silence control: %v", blocks[0])
 	}
 	els, _ := blocks[0]["elements"].([]map[string]any)
 	if len(els) != 2 {
@@ -327,12 +334,49 @@ func TestASingleSilenceWindowRendersNoOverflow(t *testing.T) {
 	}
 
 	// Two is enough, and is what the config's own floor allows.
-	if el, _ := findOverflow(t, feedbackBlocks(inv, true, []time.Duration{time.Hour, 4 * time.Hour})); el == nil {
-		t.Error("two windows rendered no overflow: the guard is off by one")
+	if el, _ := findSilenceControl(t, feedbackBlocks(inv, true, []time.Duration{time.Hour, 4 * time.Hour})); el == nil {
+		t.Error("two windows rendered no control: the guard is off by one")
 	}
 
 	// With no feedback buttons either, a single window leaves nothing to draw.
 	if got := feedbackBlocks(inv, false, []time.Duration{4 * time.Hour}); got != nil {
-		t.Errorf("feedbackBlocks = %v, want nil — no buttons and no renderable overflow", got)
+		t.Errorf("feedbackBlocks = %v, want nil — no buttons and no renderable control", got)
+	}
+}
+
+// TestSilenceControlIsLabelledNotABareOverflow pins the fix for the first live
+// use of the 🔕 control, 2026-08-26: Slack's overflow element takes no text, so
+// it rendered as a bare "···" beside 👍 Accurate / 👎 Off-base and nobody could
+// tell what it was — the 🔕 appears only once the menu is already open, which is
+// after you have clicked something you could not identify. A static_select is
+// the only actions-block element that carries BOTH a visible label and a menu.
+func TestSilenceControlIsLabelledNotABareOverflow(t *testing.T) {
+	inv := providers.Investigation{Title: "t", TriggerKey: "k"}
+	blocks := feedbackBlocks(inv, true, []time.Duration{4 * time.Hour, 24 * time.Hour})
+	if len(blocks) != 1 {
+		t.Fatalf("want one actions block, got %d", len(blocks))
+	}
+	elements, _ := blocks[0]["elements"].([]map[string]any)
+	var silence map[string]any
+	for _, e := range elements {
+		if e["action_id"] == silenceActionID {
+			silence = e
+		}
+		if e["type"] == "overflow" {
+			t.Errorf("the silence control must not be an overflow: it renders as an unlabelled ···")
+		}
+	}
+	if silence == nil {
+		t.Fatal("no silence element rendered")
+	}
+	if silence["type"] != "static_select" {
+		t.Errorf("silence element type = %v, want static_select", silence["type"])
+	}
+	ph, _ := silence["placeholder"].(map[string]any)
+	if ph == nil || ph["text"] == "" {
+		t.Fatalf("static_select needs a non-empty placeholder, got %v", silence["placeholder"])
+	}
+	if !strings.Contains(ph["text"].(string), "🔕") {
+		t.Errorf("placeholder = %q, want it to carry the 🔕 the menu options use", ph["text"])
 	}
 }

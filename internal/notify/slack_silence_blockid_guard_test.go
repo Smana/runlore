@@ -16,7 +16,7 @@ import (
 // TestSilenceBlockIDPrefixMatchesTheServerHandler is a cross-package guard on a
 // constant that exists twice and has to agree byte for byte.
 //
-// slack.go stamps the silence overflow's block_id as silenceBlockIDPrefix +
+// slack.go stamps the silence control's block_id as silenceBlockIDPrefix +
 // TriggerKey; internal/server's interactions handler strips that prefix back off
 // to recover the key. internal/server deliberately does not import internal/notify
 // (the HTTP layer knows nothing about renderers, and the constant is unexported
