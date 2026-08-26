@@ -163,7 +163,7 @@ func (c *Client) rpc(ctx context.Context, method string, params any, attempts in
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return nil, fmt.Errorf("mcp %s status %d (request-id %q)", method, resp.StatusCode, httpx.RequestID(resp.Header))

@@ -414,7 +414,7 @@ func (c *Client) search(ctx context.Context, body map[string]any) ([]byte, int, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("logs query: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	// Bounded: the query is model-chosen and the pod is memory-capped, so an
 	// unbounded read turns one over-broad query into an OOM. The ERROR body gets
 	// the same generous bound rather than the 512-byte diagnostic prefix the
@@ -720,7 +720,7 @@ func (c *Client) FieldNames(ctx context.Context, _ string, _ providers.TimeWindo
 	if err != nil {
 		return nil, fmt.Errorf("logs query: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
 	}

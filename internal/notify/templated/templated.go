@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"text/template"
@@ -114,7 +113,7 @@ func (n *Notifier) deliverOne(ctx context.Context, in instance, p notify.Payload
 	if err != nil {
 		return httpx.SanitizeURLError(err)
 	}
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}

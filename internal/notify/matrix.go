@@ -104,7 +104,7 @@ func (m *Matrix) send(ctx context.Context, room string, content map[string]any) 
 	if err != nil {
 		return "", fmt.Errorf("matrix send: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("matrix status %d", resp.StatusCode)
 	}

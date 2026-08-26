@@ -70,7 +70,7 @@ func (s *AppTokenSource) Token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("installation token: status %d", resp.StatusCode)
 	}

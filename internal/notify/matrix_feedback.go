@@ -438,7 +438,7 @@ func (f *MatrixFeedback) sync(ctx context.Context, since string) (string, []matr
 	if err != nil {
 		return "", nil, fmt.Errorf("matrix sync: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return "", nil, fmt.Errorf("matrix sync status %d", resp.StatusCode)
 	}
@@ -842,7 +842,7 @@ func (f *MatrixFeedback) whoami(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("matrix whoami status %d", resp.StatusCode)
 	}
@@ -875,7 +875,7 @@ func (f *MatrixFeedback) fetchDisplayName(ctx context.Context, userID string) (s
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return "", nil // no display name set for this account
 	}
@@ -906,7 +906,7 @@ func (f *MatrixFeedback) fetchEvent(ctx context.Context, eventID string) (sender
 	if err != nil {
 		return "", nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return "", nil, fmt.Errorf("matrix event fetch status %d", resp.StatusCode)
 	}

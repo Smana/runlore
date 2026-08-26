@@ -80,7 +80,7 @@ func probeBody(ctx context.Context, url, tokenEnv string, headers map[string]str
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}

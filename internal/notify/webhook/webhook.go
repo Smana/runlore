@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"time"
@@ -73,7 +72,7 @@ func (n *Notifier) post(ctx context.Context, v any) error {
 	if err != nil {
 		return httpx.SanitizeURLError(err)
 	}
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return &deliverError{status: resp.StatusCode}
 	}

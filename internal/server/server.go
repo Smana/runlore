@@ -945,30 +945,11 @@ func (s *Server) postSlackResponse(ctx context.Context, responseURL string, body
 		s.log.Warn("slack response_url: request failed", "err", err)
 		return fmt.Errorf("post to slack response_url: %w", err)
 	}
-	// Drain before closing, so the connection can go back to the idle pool: net/http
-	// only returns it once the body reaches EOF.
-	//
-	// Honest about the size of the win, because it is easy to overstate and was
-	// overstated here first. Measured against a local server, a bare Close already
-	// reuses the connection for bodies up to ~2 KB — the transport has buffered
-	// them by the time Close runs — and stops reusing it from ~4 KB. Slack answers
-	// a response_url POST with "ok", so on the path this function actually takes,
-	// draining changes nothing at all.
-	//
-	// It stays because it costs nothing on that path (the body is already at EOF,
-	// so the copy returns immediately) and because it is correct for the sizes
-	// where it does matter: a Slack error envelope, or any future caller of this
-	// helper posting somewhere chattier. What it is NOT is a fix for the two-posts-
-	// inside-3s budget — that budget is bounded by slackResponseTimeout, not by a
-	// handshake this avoids.
-	//
-	// Bounded rather than unbounded so a runaway upstream cannot hold the click's
-	// budget open; past the cap the connection is dropped, exactly as a bare Close
-	// would have dropped it.
-	defer func() {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		_ = resp.Body.Close()
-	}()
+	// Drain before closing so the connection can be reused; httpx.Drain carries the
+	// rationale and its limits. Worth keeping locally: Slack answers a response_url
+	// POST with "ok", which is small enough that the transport has already buffered
+	// it, so on THIS path draining is free and changes nothing either way.
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		s.log.Warn("slack response_url: non-2xx status", "status", resp.StatusCode)
 		return fmt.Errorf("slack response_url returned %d", resp.StatusCode)

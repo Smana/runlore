@@ -89,7 +89,7 @@ func (b *Base) Stream(ctx context.Context, req Request, accumulate func(io.Reade
 	if err != nil {
 		return providers.CompletionResponse{}, providers.WithAttempts(fmt.Errorf("%s request: %w", req.Op, err), attempts)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		// Read a bounded prefix of the error body. Never echo the raw bytes
 		// into an Error-level log (info disclosure + log injection); surface

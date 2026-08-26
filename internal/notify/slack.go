@@ -158,7 +158,7 @@ func (s *Slack) post(ctx context.Context, msg map[string]any) error {
 	if err != nil {
 		return fmt.Errorf("slack post: %w", httpx.SanitizeURLError(err))
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("slack status %d", resp.StatusCode)
 	}
@@ -287,7 +287,7 @@ func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("slack post: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("slack status %d", resp.StatusCode)
 	}
