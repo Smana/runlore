@@ -81,6 +81,55 @@ func ReadBody(r io.Reader) ([]byte, error) {
 	return io.ReadAll(CappedReader(r))
 }
 
+// maxDrainBytes bounds how much of an unread response body Drain consumes.
+//
+// Sized from the measurement below, not from taste. Under ~2 KB there is nothing
+// to win — net/http has already buffered the body — so a useful cap sits above
+// that, and 32 KB covers the error envelopes real backends send (Elasticsearch
+// and Loki are the verbose ones here) without turning cleanup into work. Past it
+// the connection is dropped, which is what a bare Close would have done anyway.
+const maxDrainBytes = 32 << 10
+
+// Drain consumes up to maxDrainBytes of an unread response body so the connection
+// underneath it can go back to net/http's idle pool, which only happens once the
+// body reaches EOF. Pair it with the Close it does NOT perform:
+//
+//	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
+//
+// It deliberately does not close. A DrainClose(resp) helper reads better and was
+// written first, but it hides the Close from the bodyclose linter — which then
+// reports "response body must be closed" at EVERY call site. That is not a
+// tolerable trade: bodyclose catches a leak that is invisible in tests and fatal
+// in production, and this drain is worth far less than that. (The breakage is
+// easy to miss: golangci-lint's max-same-issues defaults to 3, so 25 flagged
+// sites surface as 3 — a different 3 each run.)
+//
+// How much it buys is size-dependent and easy to overstate — this comment did
+// overstate it, twice, before the tests were written. net/http has often already
+// buffered a small response by the time Close runs, in which case the connection
+// is pooled either way and draining changes nothing; past maxDrainBytes the body
+// never reaches EOF, so the connection goes either way again. In between there is
+// a band where draining rescues a connection a bare Close would drop, and where
+// that band falls moves with the header size and the transport's read-buffer
+// boundary — so no fixed table of "body size to dial count" is portable, and the
+// tests here assert only that draining is never WORSE.
+//
+// The stronger reason to use it uniformly is that the alternative is three
+// spellings of one idiom — bare Close, unbounded io.Copy, bounded io.Copy — and
+// the unbounded spelling is a hazard: a runaway upstream holds the caller's whole
+// timeout open inside what reads like cleanup.
+//
+// Belongs in the DEFER rather than at the read site, because the paths that skip
+// the read are exactly the early returns: a non-2xx branch, a header that fails
+// validation, a context cancelled mid-parse. On the path that did read the body
+// whole it finds EOF immediately, so one placement is correct for every path.
+func Drain(body io.Reader) {
+	if body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrainBytes))
+}
+
 // ReadErrorBody reads the diagnostic prefix of a non-2xx response body and makes
 // it safe to embed in an error: bounded at maxErrorBody (all SafeErrorBody would
 // keep anyway) and stripped of the given credentials. A read failure yields ""

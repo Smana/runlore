@@ -181,7 +181,7 @@ func (c *Client) get(ctx context.Context, path string, v url.Values) ([]byte, er
 	if err != nil {
 		return nil, fmt.Errorf("logs query: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
 	}

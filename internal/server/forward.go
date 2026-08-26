@@ -193,7 +193,7 @@ func (f *Forward) proxy(w http.ResponseWriter, r *http.Request, addr string) {
 		http.Error(w, "leader unreachable; retry", http.StatusServiceUnavailable)
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if f.Log != nil {
 		f.Log.Debug("forwarded to leader", "leader", addr,
 			"method", r.Method, "path", r.URL.Path, "status", resp.StatusCode)

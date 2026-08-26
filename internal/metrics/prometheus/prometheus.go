@@ -259,7 +259,7 @@ func (c *Client) getRaw(ctx context.Context, path string, v url.Values) (json.Ra
 	if err != nil {
 		return nil, fmt.Errorf("metrics query: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
 	}
@@ -293,7 +293,7 @@ func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiRespon
 	if err != nil {
 		return nil, fmt.Errorf("metrics query: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
 	}

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -69,7 +70,7 @@ func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sh
 	if err != nil {
 		return nil, "", false, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, "", false, nil
 	}
