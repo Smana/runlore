@@ -28,12 +28,14 @@ import (
 // Engine identifies a GitOps engine.
 type Engine string
 
-// Supported GitOps engines. EngineAWS marks a non-GitOps change from the cloud
-// control plane (CloudTrail), so cloud events join the same "what changed" model.
+// Supported GitOps engines. EngineAWS and EngineGCP mark a non-GitOps change from a
+// cloud control plane (CloudTrail / Cloud Audit Logs), so cloud events join the same
+// "what changed" model.
 const (
 	EngineFlux   Engine = "flux"
 	EngineArgoCD Engine = "argocd"
 	EngineAWS    Engine = "aws"
+	EngineGCP    Engine = "gcp"
 )
 
 // ChangeType classifies a detected change.
@@ -45,7 +47,7 @@ const (
 	ChangeChartBump ChangeType = "chart-bump" // a Helm chart version changed
 	ChangeImageBump ChangeType = "image-bump" // a container image tag changed
 	ChangeDrift     ChangeType = "drift"      // observed state diverged from desired
-	ChangeCloudAPI  ChangeType = "cloud-api"  // a mutating cloud control-plane call (CloudTrail)
+	ChangeCloudAPI  ChangeType = "cloud-api"  // a mutating cloud control-plane call (CloudTrail / Cloud Audit Logs)
 )
 
 // ResourceScope records whether a resource's KIND is namespaced, as a fact CARRIED
@@ -96,8 +98,8 @@ type Workload struct {
 	Kind      string
 	Name      string
 	Namespace string
-	Region    string // AWS region; "" for a Kubernetes object and for an unqualified resource
-	Account   string // AWS account id; "" for a Kubernetes object and for an unqualified resource
+	Region    string // AWS region / GCP location; "" for a Kubernetes object and for an unqualified resource
+	Account   string // AWS account id / GCP project id; "" for a Kubernetes object and for an unqualified resource
 
 	// Scope is what the cluster's own discovery said about Kind, when anything did.
 	// Populated where a discovery answer is reachable (see KindScoper) and left
@@ -1059,24 +1061,171 @@ type CloudChangeFilter struct {
 	FailedOnly bool
 }
 
-// CloudProvider abstracts read-only cloud-side context for an incident. It adds
-// the AWS-layer "what changed" lens (mutating control-plane events) and cloud
-// resource health (instances/ASGs/nodegroups) that the in-cluster signals can't see.
+// CloudProvider abstracts read-only cloud-side context for an incident. It adds a
+// cloud-layer "what changed" lens (mutating control-plane events — CloudTrail on
+// AWS, Cloud Audit Logs on GCP) and cloud resource health (instances/ASGs/nodegroups
+// on AWS; the GKE/MIG/Compute equivalents on GCP) that the in-cluster signals can't
+// see.
 //
-// Implemented with native cloud SDKs (aws-sdk-go-v2) and in-cluster identity
-// (EKS Pod Identity / IRSA) — not Steampipe and not a bundled CLI (both break the
-// single-binary property). Steampipe / cloud MCP servers stay optional MCP
+// Implemented with native cloud SDKs (aws-sdk-go-v2 on AWS) and in-cluster identity
+// (EKS Pod Identity / IRSA on AWS) — not Steampipe and not a bundled CLI (both break
+// the single-binary property). Steampipe / cloud MCP servers stay optional MCP
 // extensions. Cloud is opt-in (config.cloud.provider).
 type CloudProvider interface {
 	// CloudChanges returns recent mutating cloud control-plane events (AWS:
-	// CloudTrail) in the window, normalized to the engine-agnostic Change model so
-	// they join the same "what changed" timeline as GitOps diffs. f narrows WHICH of
-	// those events are kept; the zero value keeps all of them.
+	// CloudTrail; GCP: Cloud Audit Logs) in the window, normalized to the
+	// engine-agnostic Change model so they join the same "what changed" timeline as
+	// GitOps diffs. f narrows WHICH of those events are kept; the zero value keeps
+	// all of them.
 	CloudChanges(ctx context.Context, sel Selector, w TimeWindow, f CloudChangeFilter) ([]Change, error)
 	// ResourceHealth returns cloud-side state/health for resources backing the
-	// selector (EC2 instance status, ASG capacity/activities, EKS nodegroup), as
-	// normalized lines for the model.
+	// selector (EC2 instance status, ASG capacity/activities, EKS nodegroup on AWS;
+	// analogous GKE/MIG/Compute state on GCP), as normalized lines for the model.
 	ResourceHealth(ctx context.Context, sel Selector, w TimeWindow) (LogResult, error)
+}
+
+// CloudVocabulary is the cloud-specific vocabulary the cloud tools render their
+// model-facing descriptions from. It exists because those descriptions were written
+// as AWS literals ("MUTATING AWS control-plane events (CloudTrail)", "EC2 instance-id
+// (i-…)"), and a GCP deployment reading them would be told it is querying CloudTrail
+// while it queries Cloud Audit Logs.
+//
+// That is not cosmetic. cloud_tools.go documents a real investigation that dead-ended
+// because the model held a wrong belief about how the `resource` argument MATCHES.
+// Tool text is the only place that belief comes from, so it has to be true per cloud.
+//
+// The struct is fragments, not two finished strings, deliberately: the skeleton in
+// ChangeDescription/HealthDescription is shared, so the two clouds cannot drift into
+// describing structurally different contracts for the same tool. Cloud-independent
+// clauses — "OMIT it to see every mutating event, which is the right move when you
+// do not know the exact identifier", "and other infra changes invisible to GitOps"
+// — live in the skeleton itself, never duplicated into a fragment, so a GCP author
+// filling in the cloud-specific nouns cannot accidentally reword or drop one.
+//
+// Punctuation is part of each fragment's contract, because the skeleton splices
+// fragments into sentences rather than terminating each one uniformly: ChangeExamples,
+// LagNote and InstanceArg are bare phrases with NO trailing punctuation; ScopeGuidance
+// ends with ";" (the skeleton appends the OMIT clause and its own period);
+// FailureFilterNote and HealthSurface are complete sentences ending in "." — or, for
+// FailureFilterNote ONLY, the empty string for a cloud with nothing to say, which the
+// renderer omits outright rather than leaving a blank sentence.
+//
+// Not every field feeds ChangeDescription/HealthDescription: InstanceArg is schema
+// text — CloudResourceHealthTool's `instance_id` argument description — consumed
+// where the tool builds its JSON Schema, not by either renderer here. HealthSurface
+// and InstanceArg separately name the same optional-argument noun (today, "EC2
+// instance-id (i-…)" vs "EC2 instance id (i-…)" — already spelled two different
+// ways) rather than sharing a constant: they are not actually identical text today, so
+// deduplicating would mean either changing one — altering rendered output — or
+// defining two near-duplicate constants that dedupe nothing. Worth a future cloud's
+// author knowing they are naming the same argument twice.
+type CloudVocabulary struct {
+	Cloud          string // "AWS" | "GCP"
+	AuditLog       string // "CloudTrail" | "Cloud Audit Logs"
+	ChangeExamples string // bare, comma-joined list of the kinds of change this log carries; no trailing punctuation
+	ScopeGuidance  string // how the `resource` argument matches; ends with ";", no period
+
+	// FailureFilterNote explains cloud_what_changed's failed_only argument, or is ""
+	// for a cloud with nothing equivalent to filter for. It is its own field, rather
+	// than folded into ScopeGuidance, because cloud_what_changed's description has
+	// already grown one tool-specific paragraph since this struct was sketched (PR
+	// #551): a field per paragraph, not just per cloud noun, is what stops the next
+	// one vanishing silently the day a tool starts rendering from this struct instead
+	// of carrying its own literal.
+	FailureFilterNote string
+
+	// WidenedBanner renders the banner shown when a scoped cloud_what_changed lookup
+	// matched nothing and the tool retried unscoped. It is a func, not a template
+	// string, so the %q verb that formats the resource lives inside a fmt.Sprintf
+	// call written in THIS file — a string literal `go vet`'s printf check can
+	// actually verify — rather than in a dynamic field threaded into a distant
+	// fmt.Fprintf, where a GCP author's typo (%s, or two verbs) would ship
+	// %!q(MISSING) to the model with no compiler or vet warning.
+	//
+	// widenedFailedBanner (cloud_tools.go) has no equivalent slot here: its text —
+	// "no FAILED calls against resource %q…" — carries no cloud noun at all, so
+	// there is nothing for a GCP vocabulary to say differently. It stays a plain
+	// constant in the tool layer.
+	WidenedBanner func(resource string) string
+
+	LagNote       string // ingestion lag, e.g. "CloudTrail lags ~15m"; bare phrase, no punctuation
+	HealthSurface string // what cloud_resource_health actually describes; a complete sentence ending in "."
+	InstanceArg   string // schema description for the instance argument; bare phrase, no punctuation
+}
+
+// ChangeDescription renders the cloud_what_changed description for this cloud. It
+// joins non-empty sentences rather than splicing every field in positionally, so a
+// cloud with FailureFilterNote == "" (nothing to say about a failed-call filter)
+// renders one clean space between sentences instead of two.
+func (v CloudVocabulary) ChangeDescription() string {
+	sentences := []string{
+		fmt.Sprintf("List recent MUTATING %s control-plane events (%s) — %s, and other infra changes "+
+			"invisible to GitOps.", v.Cloud, v.AuditLog, v.ChangeExamples),
+		"Use when no Git change explains the incident.",
+		fmt.Sprintf("%s OMIT it to see every mutating event, which is the right move when you do not "+
+			"know the exact identifier.", v.ScopeGuidance),
+	}
+	if v.FailureFilterNote != "" {
+		sentences = append(sentences, v.FailureFilterNote)
+	}
+	sentences = append(sentences, fmt.Sprintf("since_minutes default 90 (%s).", v.LagNote))
+	return strings.Join(sentences, " ")
+}
+
+// HealthDescription renders the cloud_resource_health description for this cloud.
+func (v CloudVocabulary) HealthDescription() string {
+	return fmt.Sprintf(
+		"Describe %s-side health for the cluster's nodes/capacity: %s Use to confirm a "+
+			"node/infra/capacity cause. Optional since_minutes scopes the scaling-activity lookback "+
+			"to the incident window (default: recent activities).",
+		v.Cloud, v.HealthSurface,
+	)
+}
+
+// CloudDescriber is an OPTIONAL CloudProvider extension naming the cloud's own
+// vocabulary. Same shape as every other optional capability here (OwnerWalker,
+// EventWindower, GitOpsEngineReporter, ProgressNotifier): the tools type-assert for
+// it and degrade gracefully.
+//
+// Degrading means AWSCloudVocabulary, which reproduces the shipped AWS text byte for
+// byte — so a provider that does not implement this interface produces exactly the
+// tool descriptions it produced before this interface existed.
+type CloudDescriber interface {
+	CloudVocabulary() CloudVocabulary
+}
+
+// AWSCloudVocabulary is the AWS wording, and the fallback for any CloudProvider that
+// does not implement CloudDescriber. Every fragment is pinned by a test:
+// ChangeDescription/HealthDescription's fragments by
+// TestAWSCloudVocabularyReproducesTheLiveToolText, which compares this function's
+// rendered output against CloudWhatChangedTool/CloudResourceHealthTool's actual
+// Description() methods rather than a pasted copy; WidenedBanner by
+// TestWidenedBannerMatchesCloudToolsConstant, which reads cloud_tools.go's unexported
+// widenedBanner constant off disk; and InstanceArg by its presence in
+// CloudResourceHealthTool.Schema().
+func AWSCloudVocabulary() CloudVocabulary {
+	return CloudVocabulary{
+		Cloud:          "AWS",
+		AuditLog:       "CloudTrail",
+		ChangeExamples: "ASG/EC2/EKS/RDS/SG changes, manual actions",
+		ScopeGuidance: "Optional resource is an EXACT CloudTrail ResourceName — a full ARN, instance-id, " +
+			"ASG name, or a resource's full path (e.g. a Secrets Manager secret's \"apps/team/name\") — never a " +
+			"service name or substring;",
+		FailureFilterNote: "Set failed_only=true when the incident IS a failed AWS operation and you do not " +
+			"know which resource it happened to (a failed backup/snapshot job, a rejected API call): results " +
+			"are capped at the NEWEST events, which on a busy cluster are routine instance and tag churn, so " +
+			"the rejected call you are looking for is usually just past the cap. failed_only spends the cap " +
+			"on rejected calls instead and reports each one's error code.",
+		WidenedBanner: func(resource string) string {
+			return fmt.Sprintf("resource %q matched no CloudTrail events — ResourceName is an exact match "+
+				"on the full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a "+
+				"service or substring. Showing ALL mutating events in the window instead:\n", resource)
+		},
+		LagNote: "CloudTrail lags ~15m",
+		HealthSurface: "EKS nodegroup status + health issues, ASG scaling activities (launch/capacity " +
+			"failures), and — when given an EC2 instance-id (i-…) — its instance/system status checks.",
+		InstanceArg: "optional EC2 instance id (i-…)",
+	}
 }
 
 // ModelProvider abstracts the LLM (Anthropic | OpenAI-compatible: vLLM/Ollama).
