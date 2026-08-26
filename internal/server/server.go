@@ -658,17 +658,21 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	// suppression while silently failing at the announcement leaves them believing
 	// the channel knows.
 	if marker != "" && p.ResponseURL != "" {
-		marked := false
-		if rebuilt, ok := slackcard.Silenced(p.Message.Blocks, act.ActionID, marker); ok {
+		rebuilt, outcome := slackcard.Silenced(p.Message.Blocks, act.ActionID, marker)
+		switch outcome {
+		case slackcard.SilenceRewritten:
 			if err := s.updateSlackBlocks(r.Context(), p.ResponseURL, p.Message.Text, rebuilt); err != nil {
 				s.log.Warn("slack silence: card rewrite was not accepted", "err", err)
-			} else {
-				marked = true
+				msg += "\n\n" + thread.SilenceCardUnmarked
 			}
-		} else {
+		case slackcard.SilenceAlreadyRewritten:
+			// Not a failure: the ledger took this window, and the card is marked —
+			// with the EARLIER one. Logged at info because nothing is broken, and
+			// disclosed differently because "nobody can tell" would be false here.
+			s.log.Info("slack silence: card already marked by an earlier silence; ledger updated, card left as-is")
+			msg += "\n\n" + thread.SilenceCardStale
+		case slackcard.SilenceNoUsableCard:
 			s.log.Warn("slack silence: no usable blocks in the payload; leaving the card intact")
-		}
-		if !marked {
 			msg += "\n\n" + thread.SilenceCardUnmarked
 		}
 	}
@@ -927,7 +931,20 @@ func (s *Server) postSlackResponse(ctx context.Context, responseURL string, body
 		s.log.Warn("slack response_url: request failed", "err", err)
 		return fmt.Errorf("post to slack response_url: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// DRAIN before closing. net/http only returns a connection to the idle pool
+	// once its body reaches EOF; closing early marks the connection dead, so every
+	// response_url POST would redo DNS + TCP + TLS. That is the difference between
+	// slackResponseTimeout being a generous bound and being a coin flip: a silence
+	// makes two sequential posts inside Slack's 3s interaction budget, and a cold
+	// handshake on each is exactly how one of them times out AFTER Slack already
+	// applied it — telling the clicker their card went unmarked when it did not.
+	//
+	// Bounded: the answer is "ok", and a body large enough to be worth streaming
+	// would be a Slack bug, not something to spend the click's budget reading.
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode/100 != 2 {
 		s.log.Warn("slack response_url: non-2xx status", "status", resp.StatusCode)
 		return fmt.Errorf("slack response_url returned %d", resp.StatusCode)

@@ -336,11 +336,12 @@ const (
 // value makes Slack reject the ENTIRE message, so the failure would take out the
 // notification, not just the control.
 //
-// The prefix exists a SECOND time as a literal in internal/server's interactions
-// handler, which strips it back off to recover the key (that package deliberately
-// does not import this one). The two must agree byte for byte or every real click
-// lands in "could not identify the incident to silence" — enforced, not merely
-// documented, by TestSilenceBlockIDPrefixMatchesTheServerHandler.
+// internal/server's interactions handler strips this prefix back off to recover
+// the key. It used to carry its own literal — that package deliberately does not
+// import this one — and the two agreeing byte for byte was enforced by a test that
+// PARSED the other package's source. Both now read slackcard.SilenceBlockIDPrefix,
+// so a rename that reaches only one side does not compile, and the guard test is
+// gone.
 const (
 	silenceBlockIDPrefix = slackcard.SilenceBlockIDPrefix
 	slackBlockIDMax      = slackcard.BlockIDMax

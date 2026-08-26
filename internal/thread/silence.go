@@ -105,6 +105,20 @@ func SilenceAck(user string, window time.Duration, until time.Time, feedbackEnab
 const SilenceCardUnmarked = "⚠️ The silence is recorded, but the card itself could not be marked, " +
 	"so the channel cannot tell this finding is handled. Say so in the thread if someone else might pick it up."
 
+// SilenceCardStale is appended when the click DID change the ledger but the card
+// already carried a marker from an earlier silence, so it could not be re-marked.
+//
+// Distinct from SilenceCardUnmarked, and the distinction is the whole point: there
+// the channel can see nothing, here it can see the WRONG thing. Telling someone
+// "the channel cannot tell this finding is handled" about a card that plainly says
+// it is handled sends them to write a redundant note, while the real problem — the
+// card advertises the earlier window and the ledger now holds theirs — goes unsaid.
+//
+// It does not repeat the new window because the acknowledgement it is appended to
+// has just stated it in full; "the one above" is that line.
+const SilenceCardStale = "⚠️ This card already carried a silence marker, so it could not be re-marked: " +
+	"the window shown on it is the earlier one, not the one above. Say so in the thread if the difference matters."
+
 // SilenceMarker is the one-line stamp left ON THE CARD after a silence, as
 // distinct from SilenceAck's full explanation to the person who clicked.
 //

@@ -32,27 +32,37 @@ func TestSilencedRefusesRatherThanBlanksTheCard(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		blocks []map[string]any
+		want   SilenceOutcome
 	}{
-		{"no blocks in the payload at all", nil},
-		{"an empty block list", []map[string]any{}},
+		{"no blocks in the payload at all", nil, SilenceNoUsableCard},
+		{"an empty block list", []map[string]any{}, SilenceNoUsableCard},
 		{
 			"a lone actions block, so removing the control leaves nothing to post",
 			[]map[string]any{actionsBlock("sil:k", SilenceActionID)},
+			SilenceNoUsableCard,
 		},
 		{
 			// The double-marker case: the control is already gone, so this click is
 			// answering a card that was ALREADY rewritten.
 			"a card whose silence control has already been removed",
 			[]map[string]any{section("*Why:* something broke"), actionsBlock("", FeedbackUpActionID)},
+			SilenceAlreadyRewritten,
 		},
 		{
 			"a card that never carried a silence control",
 			[]map[string]any{section("*Why:* something broke")},
+			SilenceAlreadyRewritten,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got, ok := Silenced(tc.blocks, SilenceActionID, "marker"); ok {
-				t.Errorf("rebuild claimed success on %s: %v", tc.name, got)
+			got, outcome := Silenced(tc.blocks, SilenceActionID, "marker")
+			if outcome == SilenceRewritten {
+				t.Fatalf("rebuild claimed success on %s: %v", tc.name, got)
+			}
+			// The two refusals are opposite facts about what the channel can see, so
+			// the caller must be able to tell them apart to say the right thing.
+			if outcome != tc.want {
+				t.Errorf("outcome = %v, want %v — the caller cannot tell the clicker the truth about their card", outcome, tc.want)
 			}
 		})
 	}
@@ -63,15 +73,15 @@ func TestSilencedRefusesRatherThanBlanksTheCard(t *testing.T) {
 // with the same card open, the second click arriving after the first rewrite
 // landed. Appending anyway would report two different windows for one finding.
 func TestSilencedDoesNotStackASecondMarker(t *testing.T) {
-	first, ok := Silenced([]map[string]any{
+	first, outcome := Silenced([]map[string]any{
 		section("*Why:* something broke"),
 		actionsBlock("sil:k", FeedbackUpActionID, SilenceActionID),
 	}, SilenceActionID, "🔕 Silenced by <@U1> until tomorrow · 4h")
-	if !ok {
-		t.Fatal("the first rewrite refused, so there is nothing to race")
+	if outcome != SilenceRewritten {
+		t.Fatalf("the first rewrite refused (%v), so there is nothing to race", outcome)
 	}
-	if _, ok := Silenced(first, SilenceActionID, "🔕 Silenced by <@U2> until later · 24h"); ok {
-		t.Error("a second click stacked another marker onto an already-rewritten card")
+	if _, outcome := Silenced(first, SilenceActionID, "🔕 Silenced by <@U2> until later · 24h"); outcome != SilenceAlreadyRewritten {
+		t.Errorf("second click outcome = %v, want SilenceAlreadyRewritten — a stacked marker shows two windows for one finding", outcome)
 	}
 }
 
@@ -79,12 +89,12 @@ func TestSilencedDoesNotStackASecondMarker(t *testing.T) {
 // block_id is stamped only on the block carrying the silence control, because it
 // carries the TriggerKey that control's click is routed by. It must leave with it.
 func TestSilencedDropsTheBlockIDWithTheControl(t *testing.T) {
-	out, ok := Silenced([]map[string]any{
+	out, outcome := Silenced([]map[string]any{
 		section("*Why:* something broke"),
 		actionsBlock("sil:ns/app:CrashLoop", FeedbackUpActionID, SilenceActionID),
 	}, SilenceActionID, "marker")
-	if !ok {
-		t.Fatal("the rewrite refused a card it should have rebuilt")
+	if outcome != SilenceRewritten {
+		t.Fatalf("the rewrite refused (%v) a card it should have rebuilt", outcome)
 	}
 	dump, _ := json.Marshal(out)
 	if strings.Contains(string(dump), SilenceBlockIDPrefix) {
@@ -101,12 +111,12 @@ func TestSilencedDropsTheBlockIDWithTheControl(t *testing.T) {
 // TestSilencedKeepsASecondActionsBlocksOwnID guards the scope of the rule above:
 // only the block the control was ON loses its id.
 func TestSilencedKeepsASecondActionsBlocksOwnID(t *testing.T) {
-	out, ok := Silenced([]map[string]any{
+	out, outcome := Silenced([]map[string]any{
 		actionsBlock("sil:k", SilenceActionID, FeedbackUpActionID),
 		actionsBlock("other:block", FeedbackDownActionID),
 	}, SilenceActionID, "marker")
-	if !ok {
-		t.Fatal("the rewrite refused a card it should have rebuilt")
+	if outcome != SilenceRewritten {
+		t.Fatalf("the rewrite refused (%v) a card it should have rebuilt", outcome)
 	}
 	dump, _ := json.Marshal(out)
 	if !strings.Contains(string(dump), "other:block") {
@@ -123,8 +133,8 @@ func TestSilencedDoesNotMutateItsInput(t *testing.T) {
 		actionsBlock("sil:k", FeedbackUpActionID, SilenceActionID),
 	}
 	before, _ := json.Marshal(in)
-	if _, ok := Silenced(in, SilenceActionID, "marker"); !ok {
-		t.Fatal("the rewrite refused a card it should have rebuilt")
+	if _, outcome := Silenced(in, SilenceActionID, "marker"); outcome != SilenceRewritten {
+		t.Fatalf("the rewrite refused (%v) a card it should have rebuilt", outcome)
 	}
 	after, _ := json.Marshal(in)
 	if string(before) != string(after) {

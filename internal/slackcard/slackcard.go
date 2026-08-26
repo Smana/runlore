@@ -86,6 +86,30 @@ func ContextBlock(text string) map[string]any {
 	}
 }
 
+// SilenceOutcome says WHY a rewrite did or did not happen. The two ways of
+// refusing look identical to the caller as a bare false, but they are opposite
+// facts about what the channel can now see, and telling the person who clicked
+// the wrong one is worse than telling them nothing: one means the card carries no
+// marker at all, the other means it carries someone else's.
+type SilenceOutcome int
+
+const (
+	// SilenceRewritten means the control was removed and the marker appended.
+	SilenceRewritten SilenceOutcome = iota
+	// SilenceAlreadyRewritten means the control was not on the card, so this click is
+	// answering a view that had already been rewritten — an earlier click, or one
+	// that raced this one. The card is marked; it just does not say what THIS
+	// click recorded, and the ledger's latest-wins fold means the two now differ.
+	//
+	// A card that never carried the control at all lands here too. That shape
+	// cannot arise from a real click on a silence control, so the reading "already
+	// rewritten" is the one worth optimising the message for.
+	SilenceAlreadyRewritten
+	// SilenceNoUsableCard means there was nothing to rebuild from, or removing the
+	// control left nothing that could be posted. The card carries no marker.
+	SilenceNoUsableCard
+)
+
 // Silenced rewrites a card after a silence: the control carrying actionID is
 // removed and marker is appended as a context block. Other controls are KEPT — a
 // 👎 re-arms a silenced trigger immediately, and the acknowledgement names that
@@ -101,18 +125,18 @@ func ContextBlock(text string) map[string]any {
 //
 // Three things make it refuse:
 //
+//   - Nothing survived. Every block was dropped, or there were none to begin with,
+//     so there is no card left to post — SilenceNoUsableCard.
 //   - Nothing was removed. The control is not on the card, so this click is
-//     answering a card that was ALREADY rewritten — a second engineer clicking a
-//     stale card, or a click that raced the first rewrite. Appending anyway would
-//     stack a second marker under the first and report two different silence
-//     windows for one finding.
-//   - Nothing survived. Every block was dropped, so there is no card left to post.
-//   - There were no blocks to begin with, which lands on the same check.
+//     answering a view that was ALREADY rewritten — a second engineer on a stale
+//     card, or a click that raced the first rewrite. Appending anyway would stack
+//     a second marker under the first and show two windows for one finding —
+//     SilenceAlreadyRewritten.
 //
 // Only blocks whose type is literally "actions" are rewritten. A context block
 // also carries an "elements" array, so keying off the field alone would walk the
 // footer as though it held controls.
-func Silenced(blocks []map[string]any, actionID, marker string) ([]map[string]any, bool) {
+func Silenced(blocks []map[string]any, actionID, marker string) ([]map[string]any, SilenceOutcome) {
 	out := make([]map[string]any, 0, len(blocks)+1)
 	removed := false
 	for _, b := range blocks {
@@ -148,8 +172,13 @@ func Silenced(blocks []map[string]any, actionID, marker string) ([]map[string]an
 		}
 		out = append(out, nb)
 	}
-	if !removed || len(out) == 0 {
-		return nil, false
+	// Order matters: an empty result is "no card", even when the control was among
+	// what got dropped. Only a card that SURVIVED and kept its control is stale.
+	if len(out) == 0 {
+		return nil, SilenceNoUsableCard
 	}
-	return append(out, ContextBlock(marker)), true
+	if !removed {
+		return nil, SilenceAlreadyRewritten
+	}
+	return append(out, ContextBlock(marker)), SilenceRewritten
 }

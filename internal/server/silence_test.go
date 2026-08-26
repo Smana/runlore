@@ -559,7 +559,15 @@ func TestSilenceOnAnAlreadyRewrittenCardDoesNotStackAMarker(t *testing.T) {
 	if ack == nil {
 		t.Fatal("no acknowledgement reached the clicker")
 	}
-	if text, _ := ack["text"].(string); !strings.Contains(text, thread.SilenceCardUnmarked) {
-		t.Errorf("the clicker was not told their marker did not land: %q", text)
+	text, _ := ack["text"].(string)
+	// The distinction that matters: this card IS marked, just with someone else's
+	// window. Telling the clicker "the channel cannot tell this finding is handled"
+	// would send them to write a redundant note while the real problem — the card
+	// shows 4h, the ledger now holds theirs — goes unsaid.
+	if !strings.Contains(text, thread.SilenceCardStale) {
+		t.Errorf("the clicker was not told the card carries the EARLIER window: %q", text)
+	}
+	if strings.Contains(text, thread.SilenceCardUnmarked) {
+		t.Errorf("claimed the card is unmarked, but it plainly carries a marker: %q", text)
 	}
 }
