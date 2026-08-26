@@ -446,6 +446,13 @@ type slackInteraction struct {
 	// from a card posted back with replace_original: true.
 	Message struct {
 		Blocks []map[string]any `json:"blocks"`
+		// Text is the card's one-line notification/accessibility summary (see
+		// notify.fallbackText) — what Slack shows in a push notification and to a
+		// block-less client. It is carried over verbatim on a rewrite because
+		// replace_original clears whatever the new payload omits, and dropping it is
+		// invisible on screen: the card looks right while every later notification
+		// for it, and every screen reader, gets nothing.
+		Text string `json:"text"`
 	} `json:"message"`
 }
 
@@ -618,7 +625,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	// would post replace_original with no blocks and wipe the investigation.
 	if silenced && p.ResponseURL != "" {
 		if rebuilt, ok := silencedCard(p.Message.Blocks, act.ActionID, marker); ok {
-			s.updateSlackBlocks(r.Context(), p.ResponseURL, rebuilt)
+			s.updateSlackBlocks(r.Context(), p.ResponseURL, p.Message.Text, rebuilt)
 			return
 		}
 		s.log.Warn("slack silence: no usable blocks in the payload; leaving the card intact")
@@ -881,12 +888,20 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string, repl
 // replaces the original: a card is only ever built to stand in place of the one
 // the payload carried, never to be appended beside it.
 //
+// fallbackText is the original card's top-level "text" and is passed straight
+// back. replace_original clears every field the new payload omits, so leaving it
+// out would silently strip the summary Slack reads out in push notifications.
+//
 // Callers must have satisfied themselves that blocks is a card worth posting.
 // replace_original overwrites the message, so posting a rebuild one is unsure of
 // destroys the investigation — silencedCard's false return exists for exactly
 // that reason and must not be ignored.
-func (s *Server) updateSlackBlocks(ctx context.Context, responseURL string, blocks []map[string]any) {
-	body, err := json.Marshal(map[string]any{"replace_original": true, "blocks": blocks})
+func (s *Server) updateSlackBlocks(ctx context.Context, responseURL, fallbackText string, blocks []map[string]any) {
+	payload := map[string]any{"replace_original": true, "blocks": blocks}
+	if fallbackText != "" {
+		payload["text"] = fallbackText
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		// Unreachable in practice — the blocks came out of encoding/json in the
 		// first place — but silently skipping the post would leave the click with no

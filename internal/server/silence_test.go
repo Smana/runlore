@@ -278,9 +278,16 @@ func capturedSilenceServer(t *testing.T, got *map[string]any, rec *recordSilence
 // back rather than blank the card.
 func sendSilenceCard(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks string) *httptest.ResponseRecorder {
 	t.Helper()
+	return sendSilenceCardWithText(t, srv, secret, blockID, value, responseURL, blocks, "")
+}
+
+// sendSilenceCardWithText additionally sets the card's top-level "text", the
+// notification/accessibility fallback a rewrite must carry over.
+func sendSilenceCardWithText(t *testing.T, srv *Server, secret, blockID, value, responseURL, blocks, text string) *httptest.ResponseRecorder {
+	t.Helper()
 	msg := ""
 	if blocks != "" {
-		msg = `,"message":{"blocks":` + blocks + `}`
+		msg = `,"message":{"blocks":` + blocks + `,"text":"` + text + `"}`
 	}
 	payload := `{"user":{"id":"U9","username":"bob"},"response_url":"` + responseURL + `",` +
 		`"actions":[{"action_id":"runlore_silence","block_id":"` + blockID +
@@ -300,6 +307,27 @@ const testSilenceCardBlocks = `[
   {"type":"actions","block_id":"sil:k","elements":[
     {"type":"button","action_id":"runlore_feedback_up"},
     {"type":"static_select","action_id":"runlore_silence"}]}]`
+
+// TestSilenceKeepsTheNotificationFallbackText pins a field that is invisible on
+// screen and therefore easy to drop: the card's top-level "text", which is the
+// one-line summary Slack shows in push notifications and to block-less clients
+// (notify.fallbackText builds it). replace_original REPLACES the message, so a
+// rewrite that posts only blocks clears it — leaving every later notification for
+// that message, and every screen reader, with nothing to read.
+func TestSilenceKeepsTheNotificationFallbackText(t *testing.T) {
+	var got map[string]any
+	srv, capture := serverWithCapturedSlackResponse(t, &got)
+
+	const fallback = "🔍 harbor-db crash-looping — Action required"
+	blocks := testSilenceCardBlocks
+	rr := sendSilenceCardWithText(t, srv, capture.secret, "sil:k", "48h", capture.url, blocks, fallback)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("silence = %d, want 200", rr.Code)
+	}
+	if got["text"] != fallback {
+		t.Errorf("text = %v, want the original fallback %q preserved", got["text"], fallback)
+	}
+}
 
 // TestSilenceRewritesTheCardPublicly pins both halves of what the first live
 // silence exposed on 2026-08-26: the acknowledgement must not be ephemeral
