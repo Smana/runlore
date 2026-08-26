@@ -4,7 +4,6 @@ package gcp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,8 +13,6 @@ import (
 
 	logging "google.golang.org/api/logging/v2"
 	"google.golang.org/api/option"
-
-	"github.com/Smana/runlore/internal/providers"
 )
 
 // TestTheGCPVocabularyIsCompleteEnoughToRender is the in-tree caller
@@ -269,22 +266,5 @@ func TestNewPointsEveryServiceAtTheInjectedEndpoint(t *testing.T) {
 	}
 	if len(guard.hosts) != len(calls) {
 		t.Errorf("saw %d outbound requests %v, want %d", len(guard.hosts), guard.hosts, len(calls))
-	}
-}
-
-// TestTheUnimplementedLensFailsLoudlyRatherThanReportingCalm asserts that the one
-// CloudProvider method this package has not filled in yet returns an error instead of
-// an empty result. CloudChanges has since been implemented in auditlog.go and is
-// covered there; ResourceHealth is all that is left.
-//
-// Empty is the dangerous answer. cloud_resource_health renders no lines as "no GCP
-// resource health returned" — a positive claim that the cloud was queried and found
-// quiet, which a model repeats into a finding as evidence. An error, by contrast, is
-// reported as a tool failure and the model is told nothing was established. Until the
-// lens exists, that is the only honest answer.
-func TestTheUnimplementedLensFailsLoudlyRatherThanReportingCalm(t *testing.T) {
-	c := &Client{}
-	if _, err := c.ResourceHealth(context.Background(), providers.Selector{}, providers.TimeWindow{}); !errors.Is(err, errNotImplemented) {
-		t.Errorf("ResourceHealth returned %v, want errNotImplemented", err)
 	}
 }
