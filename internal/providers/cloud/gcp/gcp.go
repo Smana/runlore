@@ -26,9 +26,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
 
 	compute "google.golang.org/api/compute/v1"
 	container "google.golang.org/api/container/v1"
+	"google.golang.org/api/googleapi"
 	logging "google.golang.org/api/logging/v2"
 	"google.golang.org/api/option"
 
@@ -205,4 +208,96 @@ func (Client) CloudVocabulary() providers.CloudVocabulary {
 			"its instance status.",
 		InstanceArg: "optional Compute Engine instance name",
 	}
+}
+
+// Preflight makes one cheap authoritative read to confirm the Workload Identity
+// binding actually grants what the cloud lens needs, so a misconfiguration surfaces at
+// startup with a fix attached rather than as a bare 403 partway through an
+// investigation.
+//
+// With direct principal binding, ADC resolves credentials with no RunLore code at all —
+// so what was missing was never the wiring, it was the diagnosis. The failure this
+// catches is silent by construction: the pod starts, the tools register, and the first
+// investigation that reaches for the cloud lens gets a permission error naming an API
+// rather than the binding nobody created.
+//
+// It probes ONLY Cloud Logging — the changes lens, which is the core of the provider.
+// The health APIs degrade per-sub-query at call time (resourcehealth.go) and produce a
+// role-specific diagnosis in place, so probing them here would buy three extra startup
+// calls for an answer that already arrives where it is needed.
+func (c *Client) Preflight(ctx context.Context) error {
+	_, err := c.entries.List(ctx, &logging.ListLogEntriesRequest{
+		ResourceNames: []string{"projects/" + c.project},
+		Filter:        fmt.Sprintf(`logName="projects/%s/logs/%s"`, c.project, activityLog),
+		PageSize:      1,
+	})
+	if err == nil {
+		return nil
+	}
+	if !deniedStatus(err) {
+		return fmt.Errorf("cloud logging read failed on project %s: %w", c.project, err)
+	}
+	// Lowercase and no trailing period: staticcheck ST1005 and revive's error-strings
+	// are both in this repo's gate, and neither exempts "Cloud".
+	return fmt.Errorf("cloud logging read denied on project %s: "+
+		"RunLore authenticated as ServiceAccount %s/%s, which no GCP role is bound to\n\n"+
+		"  gcloud projects add-iam-policy-binding %s \\\n"+
+		"    --role=roles/logging.viewer \\\n"+
+		"    --member=%q\n\n"+
+		"repeat for roles/container.clusterViewer and roles/compute.viewer; "+
+		"note the project NUMBER in the member string — the project ID does not work there",
+		c.project, podNamespace(), podServiceAccount(),
+		c.project, c.principal())
+}
+
+// deniedStatus reports whether err is an authorization failure rather than any other
+// API error. 401 counts alongside 403 because a pod with no usable ADC at all fails
+// that way, and the binding command is the right answer to both.
+func deniedStatus(err error) bool {
+	var gerr *googleapi.Error
+	if !errors.As(err, &gerr) {
+		return false
+	}
+	return gerr.Code == http.StatusForbidden || gerr.Code == http.StatusUnauthorized
+}
+
+// principal renders the Workload Identity direct-binding member string for this pod's
+// Kubernetes ServiceAccount.
+//
+// It uses the numeric project id, which is NOT interchangeable with the project id
+// here: a member string built with the id is accepted by gcloud and then silently
+// never matches. That is the single most common way a direct binding is set up wrong,
+// and the reason this command is generated rather than left to the documentation.
+func (c *Client) principal() string {
+	// Same placeholder discipline as podNamespace/podServiceAccount, and for a sharper
+	// reason: projectNum comes only from the metadata server, so an operator using the
+	// explicit-config escape hatch on a pod that cannot reach it would otherwise render
+	// "projects//locations/…" — which gcloud accepts and which never matches. An
+	// obviously-a-template placeholder is the one thing worse than no command that is
+	// still better than a silently wrong one.
+	num := c.projectNum
+	if num == "" {
+		num = "<project-number>"
+	}
+	return fmt.Sprintf(
+		"principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/%s/sa/%s",
+		num, c.project, podNamespace(), podServiceAccount())
+}
+
+// podNamespace and podServiceAccount read the downward-API values the Helm chart
+// injects. They fall back to a placeholder rather than an empty string so a command
+// printed outside a pod is visibly a template, instead of a subtly wrong binding that
+// looks complete.
+func podNamespace() string {
+	if v := os.Getenv("POD_NAMESPACE"); v != "" {
+		return v
+	}
+	return "<namespace>"
+}
+
+func podServiceAccount() string {
+	if v := os.Getenv("POD_SERVICE_ACCOUNT"); v != "" {
+		return v
+	}
+	return "<serviceaccount>"
 }
