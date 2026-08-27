@@ -307,18 +307,31 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
 | Network | `NetworkProvider` | **Cilium Hubble**, **AWS VPC Flow Logs**, **GCP Firewall Logs** (pluggable, CNI-agnostic; none default-on) | Azure NSG Flow Logs; CNI-agnostic eBPF (Retina) |
-| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health) | GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
+| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health), **GCP¹** (Cloud Audit Logs what-changed + GKE/MIG/Compute health, Workload Identity direct principal binding) | Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **Gemini**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
+
+> ¹ **GCP is implemented but not yet verified on a live GKE cluster.** Both lenses, three-tier
+> identity resolution and the Workload Identity preflight are unit-tested against `httptest`
+> fixtures — but those fixtures were hand-written from the API reference rather than captured from
+> real responses, so the shapes are plausible rather than observed. See [GCP cloud control
+> plane]({{< relref "/docs/integrations/data-sources/gcp-cloud.md" >}}) for what the live run is
+> expected to settle, including whether the GKE metadata server exposes `cluster-location` to Pods
+> across every GKE version and mode — the one open question the design records.
 
 > **Cloud via native SDKs.** The AWS impl (`internal/providers/cloud/aws`, `aws-sdk-go-v2`) is **read-only**:
 > `CloudChanges` = CloudTrail `LookupEvents` (mutating events → the engine-agnostic `Change` model, so
 > cloud joins the same "what changed" timeline as Git diffs); `ResourceHealth` = EC2/ASG/EKS `Describe`.
 > Auth is **in-cluster identity** (EKS Pod Identity / IRSA via the default credential chain) — *not*
 > static keys, *not* Steampipe, *not* shelling out to cloud CLIs (both add heavy deps and break the
-> single-binary property). GCP/Azure follow the same shape. Steampipe and cloud MCP servers remain
-> available as optional MCP extensions.
+> single-binary property). GCP (`internal/providers/cloud/gcp`) follows the same shape —
+> `CloudChanges` = Cloud Audit Logs `entries.list` over the `activity`/`system_event` streams,
+> `ResourceHealth` = GKE/MIG/Compute Engine describes, auth a Workload Identity **direct principal
+> binding** (no GSA, no ServiceAccount annotation). Both lenses are implemented and
+> `wireCloudProvider` wires the provider into `serve`; what is missing is a run against a live
+> cluster (see the footnote above). Azure would follow the same shape too, once started. Steampipe and cloud
+> MCP servers remain available as optional MCP extensions.
 >
 > On Cilium clusters the Pod Identity credential endpoint is a host-network target (`169.254.170.23:80`),
 > which a Kubernetes NetworkPolicy can't match — the chart's `networkPolicy.awsPodIdentity` renders a

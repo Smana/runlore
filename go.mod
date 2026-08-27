@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.6
 
 require (
+	cloud.google.com/go/compute/metadata v0.9.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.37
 	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.72.1
 	github.com/aws/aws-sdk-go-v2/service/cloudtrail v1.58.6
@@ -33,7 +34,6 @@ require (
 require (
 	cloud.google.com/go/auth v0.23.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
-	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect

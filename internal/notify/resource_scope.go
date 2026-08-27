@@ -141,6 +141,21 @@ func kindKey(kind string) string {
 // Reading '/' or whitespace as "not Kubernetes" would strip a true namespace off
 // every one of those — the one new failure this file must not introduce — and would
 // buy nothing, because both motivating examples above carry a ':' anyway.
+//
+// ':' STAYS the only test as more clouds arrive, and that is a deliberate reversal.
+// GCP's monitored-resource types ("gke_nodepool", "gce_instance") carry no colon, and
+// the fix attempted here first was to add '_' alongside it. That does not hold up: this
+// function's input is model-written free text, so '_' also matches a REAL namespaced
+// object a model spelled "stateful_set" or "cron_job" — snake_case being one of the
+// most common normalizations an LLM reaches for — and it strips the true namespace off
+// every one of them. Nor does it generalize: Azure's "Microsoft.Compute/virtualMachines"
+// is dotted and slashed, both shapes that must keep reading as Kubernetes, so there is
+// no character class left to add for a third provider.
+//
+// Instead the PROVIDER qualifies its own types, which is the only layer that knows the
+// answer: providers.CloudKind stamps a "<engine>::" prefix, so every cloud resource
+// arrives here already carrying the one character no Kubernetes kind can contain. This
+// function then needs no per-provider knowledge and never changes again.
 func notKubernetesShaped(kind string) bool {
 	return strings.Contains(kind, ":")
 }

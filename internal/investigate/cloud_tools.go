@@ -12,8 +12,39 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// CloudWhatChangedTool exposes recent mutating AWS control-plane events (CloudTrail)
-// as the AWS-layer "what changed" lens — infra/manual changes invisible to GitOps.
+// vocabularyFor returns the cloud's own naming — what its audit log is called, how
+// its resource filter matches, which instance identifier its schema should ask for —
+// or the AWS wording when the provider does not describe itself.
+//
+// The fallback is the compatibility half of the promise: every CloudProvider that
+// existed before providers.CloudDescriber did keeps the tool text it had, byte for
+// byte. A nil Cloud resolves the same way rather than panicking, which
+// IncidentTimelineTool relies on — it is registered whenever ANY of its three
+// datasources is wired, so on a cluster with no cloud provider it still renders a
+// description naming one.
+func vocabularyFor(c providers.CloudProvider) providers.CloudVocabulary {
+	if d, ok := c.(providers.CloudDescriber); ok {
+		return d.CloudVocabulary()
+	}
+	return providers.AWSCloudVocabulary()
+}
+
+// jsonString encodes s as a JSON string literal, quotes included, for splicing into
+// the hand-written schema templates below — the same shape opEnumJSON (tools.go) uses
+// to splice the executable-op enum into submit_findings' schema. Splicing keeps the
+// schemas readable JSON in source and keeps their key order exactly as shipped, which
+// building them from a map[string]any would not: encoding/json sorts map keys, so a
+// map silently reorders every property. Marshalling a string has no reachable error
+// path — invalid UTF-8 is replaced with U+FFFD, not rejected.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// CloudWhatChangedTool exposes recent mutating cloud control-plane events (CloudTrail
+// on AWS, Cloud Audit Logs on GCP) as the cloud-layer "what changed" lens —
+// infra/manual changes invisible to GitOps. Every model-facing string it emits is
+// worded by the wired provider's vocabulary; see vocabularyFor.
 type CloudWhatChangedTool struct {
 	Cloud providers.CloudProvider
 }
@@ -21,25 +52,19 @@ type CloudWhatChangedTool struct {
 // Name returns the tool name.
 func (t CloudWhatChangedTool) Name() string { return "cloud_what_changed" }
 
-// Description returns the tool description.
+// Description returns the tool description, worded for the cloud actually wired.
 func (t CloudWhatChangedTool) Description() string {
-	return "List recent MUTATING AWS control-plane events (CloudTrail) — ASG/EC2/EKS/RDS/SG changes, " +
-		"manual actions, and other infra changes invisible to GitOps. Use when no Git change explains " +
-		"the incident. Optional resource is an EXACT CloudTrail ResourceName — a full ARN, instance-id, " +
-		"ASG name, or a resource's full path (e.g. a Secrets Manager secret's \"apps/team/name\") — never a " +
-		"service name or substring; OMIT it to see every mutating event, which is the right move when you do " +
-		"not know the exact identifier. Set failed_only=true when the incident IS a failed AWS operation and " +
-		"you do not know which resource it happened to (a failed backup/snapshot job, a rejected API call): " +
-		"results are capped at the NEWEST events, which on a busy cluster are routine instance and tag " +
-		"churn, so the rejected call you are looking for is usually just past the cap. failed_only spends the " +
-		"cap on rejected calls instead and reports each one's error code. since_minutes default 90 " +
-		"(CloudTrail lags ~15m)."
+	return vocabularyFor(t.Cloud).ChangeDescription()
 }
 
-// Schema returns the JSON schema for the arguments.
+// Schema returns the JSON schema for the arguments. failed_only's description is
+// cloud-specific — it promises which calls this tool can and cannot show, and that
+// promise rests on the audit log's own rules about recording reads versus writes — so
+// it comes from the vocabulary rather than being fixed here.
 func (t CloudWhatChangedTool) Schema() string {
 	return `{"type":"object","properties":{"resource":{"type":"string"},"since_minutes":{"type":"integer"},` +
-		`"failed_only":{"type":"boolean","description":"keep only MUTATING control-plane calls that were REJECTED, reporting each error code; use when the incident is itself a failed AWS write operation. Read-only calls are never listed by this tool, so a denied Describe/Get will NOT appear here"}},"required":[]}`
+		`"failed_only":{"type":"boolean","description":` + jsonString(vocabularyFor(t.Cloud).FailureFilterArg) +
+		`}},"required":[]}`
 }
 
 // Call lists cloud changes over the window and renders them.
@@ -79,6 +104,19 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	// spend a second one, and LookupEvents is limited to ~2 TPS per account/region, so
 	// 40 sequential pages can outlast the per-tool timeout and turn a partial answer
 	// into a hard dead end. A bounded scan is reported as bounded instead.
+	//
+	// The banner's text comes from the provider's vocabulary, because every paragraph
+	// above is an AWS fact and none of it survives the trip to another cloud. GCP's
+	// Cloud Logging filter language has a substring operator (`:`), so a scoped miss
+	// there means the resource genuinely did not appear in the window; telling that
+	// model it had probably used the wrong match semantics would send it renaming a
+	// resource it had already identified correctly. The RETRY is cloud-independent —
+	// a scoped miss is worth widening either way — so only the wording moves.
+	// Resolved once. It was re-resolved at three points inside this one function, two
+	// of them reachable together, and on the no-describer path each call rebuilds the
+	// whole AWS vocabulary struct — but the real cost was readability: three lookups of
+	// the same immutable value read as though they might disagree.
+	vocab := vocabularyFor(t.Cloud)
 	events, note := splitNote(changes)
 	var widened bool
 	if len(events) == 0 && in.Resource != "" && note == "" {
@@ -90,34 +128,38 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 
 	if len(events) == 0 {
 		if !in.FailedOnly {
-			return "no mutating AWS events in the window", nil
+			return vocab.EmptyChangesMessage(), nil
 		}
 		// Say which filter produced the empty result. "No events" from a filtered
 		// lookup is not the same claim as "the control plane was quiet", and the schema
 		// asks the model not to read absence as evidence. A bounded scan did not
 		// establish absence at all — it stopped reading — so it carries the provider's
 		// own note rather than the quiet window it never observed.
-		msg := "no FAILED AWS control-plane calls in the window (successful events were not listed — re-run without failed_only to see them)"
+		msg := vocab.EmptyFailedChangesMessage()
 		if note != "" {
 			msg += "\nNOTE: " + note
 		}
 		return msg, nil
 	}
 	if note != "" {
-		events = append(events, providers.ChangeNote(providers.EngineAWS, note))
+		// The engine comes from the wired provider's own vocabulary, so a GCP
+		// truncation note is not tagged as an AWS change. Absent a describer the
+		// vocabulary is the AWS one, which carries EngineAWS — so this is unchanged
+		// for AWS while no longer being a hardcoded assumption.
+		events = append(events, providers.ChangeNote(vocab.Engine, note))
 	}
 	changes = events
 	var b strings.Builder
 	if widened {
 		// Under failed_only a scoped miss means "no FAILURES for this resource", which
-		// is NOT evidence the name was wrong. The exact-match lecture would send the
+		// is NOT evidence the name was wrong. The scope-match lecture would send the
 		// model off inventing new names for a resource it had already identified
 		// correctly, and then attribute other resources' failures to it.
-		banner := widenedBanner
 		if in.FailedOnly {
-			banner = widenedFailedBanner
+			fmt.Fprintf(&b, widenedFailedBanner, in.Resource)
+		} else {
+			b.WriteString(vocab.RenderWidenedBanner(in.Resource))
 		}
-		fmt.Fprintf(&b, banner, in.Resource)
 	}
 	renderRows(&b, len(changes), "more", func(i int) {
 		c := changes[i]
@@ -129,18 +171,17 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	return b.String(), nil
 }
 
-// widenedBanner and widenedFailedBanner explain a dropped resource scope. They say
-// different things because a scoped miss means different things: without the filter
-// the name did not match anything, with it the name may be perfectly right and simply
-// have no rejected calls.
-const (
-	widenedBanner = "resource %q matched no CloudTrail events — ResourceName is an exact match on the " +
-		"full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a service or " +
-		"substring. Showing ALL mutating events in the window instead:\n"
-	widenedFailedBanner = "no FAILED calls against resource %q in the window — the name may still be " +
-		"correct, it simply had no rejected calls. Showing ALL rejected calls in the window, which " +
-		"may belong to OTHER resources:\n"
-)
+// widenedFailedBanner explains a dropped resource scope under failed_only. Its
+// unfiltered counterpart lives in the vocabulary (providers.CloudVocabulary's
+// WidenedBanner) because it has to explain the cloud's own scope-match rule, which
+// differs per cloud; this one does not — it says the name may be perfectly right and
+// simply have no rejected calls, which is true wherever the filter exists. Keeping it
+// a constant here is deliberate: a vocabulary slot would oblige every future cloud to
+// restate the same sentence, and near-identical restatements are how vocabularies
+// drift apart on text that was never supposed to differ.
+const widenedFailedBanner = "no FAILED calls against resource %q in the window — the name may still be " +
+	"correct, it simply had no rejected calls. Showing ALL rejected calls in the window, which " +
+	"may belong to OTHER resources:\n"
 
 // splitNote separates the real events from the provider's trailing note about the
 // shape of the result. CloudChanges may append one (see providers.ChangeNote), and a
@@ -159,7 +200,9 @@ func splitNote(changes []providers.Change) (events []providers.Change, note stri
 	return events, note
 }
 
-// CloudResourceHealthTool exposes AWS-side resource health (EC2/ASG/EKS) to the model.
+// CloudResourceHealthTool exposes cloud-side resource health to the model — EC2/ASG/
+// EKS state on AWS, the equivalent state on another cloud — worded by the wired
+// provider's vocabulary.
 type CloudResourceHealthTool struct {
 	Cloud providers.CloudProvider
 }
@@ -167,18 +210,23 @@ type CloudResourceHealthTool struct {
 // Name returns the tool name.
 func (t CloudResourceHealthTool) Name() string { return "cloud_resource_health" }
 
-// Description returns the tool description.
+// Description returns the tool description, worded for the cloud actually wired.
 func (t CloudResourceHealthTool) Description() string {
-	return "Describe AWS-side health for the cluster's nodes/capacity: EKS nodegroup status + health " +
-		"issues, ASG scaling activities (launch/capacity failures), and — when given an EC2 instance-id " +
-		"(i-…) — its instance/system status checks. Use to confirm a node/infra/capacity cause. " +
-		"Optional since_minutes scopes the scaling-activity lookback to the incident window " +
-		"(default: recent activities)."
+	return vocabularyFor(t.Cloud).HealthDescription()
 }
 
-// Schema returns the JSON schema for the arguments.
+// Schema returns the JSON schema for the arguments. BOTH descriptions are
+// cloud-specific and come from the vocabulary: "i-…" is an EC2 identifier, and
+// since_minutes scopes different things per cloud — ASG scaling activities on AWS,
+// instance-group errors on GCP, which has no scaling activities at all. The
+// since_minutes text was hardcoded with AWS's noun and shipped to every cloud.
 func (t CloudResourceHealthTool) Schema() string {
-	return `{"type":"object","properties":{"instance_id":{"type":"string","description":"optional EC2 instance id (i-…)"},"since_minutes":{"type":"integer","description":"scope scaling-activity lookback to the last N minutes"}},"required":[]}`
+	vocab := vocabularyFor(t.Cloud)
+	return `{"type":"object","properties":{"instance_id":{"type":"string","description":` +
+		jsonString(vocab.InstanceArg) +
+		`},"since_minutes":{"type":"integer","description":` +
+		jsonString(vocab.HealthWindowArg) +
+		`}},"required":[]}`
 }
 
 // Call renders cloud resource health.
@@ -190,8 +238,9 @@ func (t CloudResourceHealthTool) Call(ctx context.Context, args string) (string,
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	// A since_minutes bounds the scaling-activity lookback; unset ⇒ zero window
-	// (today's behaviour: recent activities, unscoped).
+	// A since_minutes bounds the provider's node-layer lookback (see
+	// CloudVocabulary.HealthWindowNote for what that is per cloud); unset ⇒ zero window,
+	// meaning unscoped.
 	var window providers.TimeWindow
 	if in.SinceMinutes > 0 {
 		end := time.Now()
@@ -202,7 +251,7 @@ func (t CloudResourceHealthTool) Call(ctx context.Context, args string) (string,
 		return "", err
 	}
 	if len(lines) == 0 {
-		return "no AWS resource health returned", nil
+		return vocabularyFor(t.Cloud).EmptyHealthMessage(), nil
 	}
 	var b strings.Builder
 	renderRows(&b, len(lines), "more", func(i int) {

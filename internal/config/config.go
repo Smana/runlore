@@ -273,13 +273,39 @@ func (f LogFields) withDefaults(d LogFields) LogFields {
 	return f
 }
 
-// Cloud configures the cloud context provider. Auth is in-cluster identity (EKS
-// Pod Identity / IRSA) via the AWS SDK's default credential chain — no static keys.
-// Empty Provider disables the cloud tools (default — cloud is opt-in).
+// Cloud provider identifiers for config.cloud.provider. Cloud context is opt-in;
+// an empty provider disables the cloud tools entirely.
+const (
+	CloudAWS = "aws" // CloudTrail what-changed + EC2/ASG/EKS health; auth is EKS Pod Identity / IRSA
+	CloudGCP = "gcp" // Cloud Audit Logs what-changed + GKE/MIG/Compute health; auth is GKE Workload Identity
+)
+
+// Cloud configures the cloud context provider. Auth is always in-cluster identity —
+// EKS Pod Identity / IRSA on AWS, a GKE Workload Identity direct principal binding on
+// GCP — never a static key. Empty Provider disables the cloud tools (default).
+//
+// The AWS fields are flat for back-compatibility with every deployment that predates
+// a second cloud; GCP is nested, matching the per-provider blocks Network already
+// uses in this file. New clouds nest.
 type Cloud struct {
-	Provider    string `yaml:"provider"`     // "" (disabled) | "aws"
-	Region      string `yaml:"region"`       // e.g. eu-west-3 (default: AWS_REGION / IMDS)
-	ClusterName string `yaml:"cluster_name"` // EKS cluster name, scopes nodegroup/ASG queries
+	Provider    string `yaml:"provider"`     // "" (disabled) | "aws" | "gcp"
+	Region      string `yaml:"region"`       // AWS only: e.g. eu-west-3 (default: AWS_REGION / IMDS)
+	ClusterName string `yaml:"cluster_name"` // AWS only: EKS cluster name, scopes nodegroup/ASG queries
+
+	GCP GCPCloudCfg `yaml:"gcp"` // when provider=gcp
+}
+
+// GCPCloudCfg configures the GCP cloud context provider. EVERY field is optional: on
+// GKE all three are resolved from the metadata server, falling back to the cluster's
+// own node objects, so `cloud: {provider: gcp}` is a complete configuration.
+//
+// Set them only to override that resolution — a cluster whose metadata server does
+// not expose the cluster attributes, or a deployment reading a project other than the
+// one it runs in.
+type GCPCloudCfg struct {
+	Project     string `yaml:"project"`      // GCP project id (default: metadata server)
+	Location    string `yaml:"location"`     // cluster region OR zone (default: metadata server)
+	ClusterName string `yaml:"cluster_name"` // GKE cluster name (default: metadata server)
 }
 
 // MCP configures outbound connections to external MCP servers whose tools the
@@ -1622,6 +1648,38 @@ func validGitLabProjectPath(s string) bool {
 // nobody takes, which is how a non-ASCII forge host reached the credential
 // boundary twice over (once per provider). Every key that can produce the
 // boundary is checked here — see asciiForgeHost.
+// validateCloud rejects a cloud block whose keys cannot all take effect.
+//
+// The flat region/cluster_name pair is AWS-only, kept flat for back-compatibility while
+// GCP nests. Nothing read them under provider=gcp and nothing said so: load.go uses
+// KnownFields(true), so `cloud: {provider: gcp, cluster_name: my-gke}` parses cleanly,
+// the value lands in a field wireCloudProvider never consults, and GKE autodetection
+// then either resolves a DIFFERENT cluster in the same project or leaves the scope
+// unresolved — while the startup line looks correct.
+//
+// An error rather than a warning, for the same reason the provider switch grew a
+// warning default: a deliberately-set cloud key that does nothing is the failure mode
+// this block keeps having. The message names the nested key to move to, because that is
+// the whole fix.
+func validateCloud(cl Cloud) error {
+	if cl.Provider != CloudGCP {
+		return nil
+	}
+	var misplaced []string
+	if strings.TrimSpace(cl.Region) != "" {
+		misplaced = append(misplaced, "cloud.region (use cloud.gcp.location)")
+	}
+	if strings.TrimSpace(cl.ClusterName) != "" {
+		misplaced = append(misplaced, "cloud.cluster_name (use cloud.gcp.cluster_name)")
+	}
+	if len(misplaced) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cloud.provider is %q but %s set: those keys are AWS-only and would be "+
+		"silently ignored, leaving the GKE scope to autodetection",
+		CloudGCP, strings.Join(misplaced, " and "))
+}
+
 func validateForgeGitHost(f Forge) error {
 	if f.GitHost != "" {
 		if !bareHost(f.GitHost) {
@@ -1911,6 +1969,9 @@ func ChatWithoutCaptureWarning(cfg *Config) string {
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
 func (c *Config) Validate() error {
+	if err := validateCloud(c.Cloud); err != nil {
+		return err
+	}
 	// Reject a nonsensical output-token cap before it reaches a provider request. 0
 	// means "use the default"; a negative value is always a misconfiguration.
 	if c.Model.MaxTokens < 0 {

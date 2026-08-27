@@ -49,7 +49,9 @@ type Client struct {
 	maxEvents   int    // cap on CloudTrail events rendered
 }
 
-const defaultMaxEvents = 25
+// defaultMaxEvents is the shared cross-cloud budget; see providers.DefaultCloudMaxEvents
+// for why it is not a per-provider choice.
+const defaultMaxEvents = providers.DefaultCloudMaxEvents
 
 // New builds a Client from the default AWS credential chain (Pod Identity / IRSA /
 // env / profile). region may be empty (resolved from the environment/IMDS).

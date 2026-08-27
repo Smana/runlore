@@ -101,18 +101,32 @@ spec:
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-{{- if .Values.networkPolicy.awsPodIdentity }}
+{{- if or .Values.networkPolicy.awsPodIdentity .Values.networkPolicy.gcpWorkloadIdentity }}
 ---
-# On Cilium clusters using EKS Pod Identity, the credential endpoint runs on the
-# node host network (link-local 169.254.170.23:80). Cilium classifies it as the
-# "host" entity, which a Kubernetes NetworkPolicy ipBlock cannot match — so the AWS
-# SDK's credential fetch is silently dropped and the cloud provider hangs. This
-# CiliumNetworkPolicy is the supported way to allow it. Enable when cloud.provider
-# is aws AND the cluster runs Cilium.
+# Cloud in-cluster identity: allow the node-local credential endpoint.
+#
+# Both clouds need the same thing, which is why this is ONE policy rather than two. The
+# credential endpoint runs on the node host network at a link-local address on :80 —
+# 169.254.170.23 for EKS Pod Identity, 169.254.169.254 for the GKE metadata server (and
+# Azure IMDS, when that arrives). Cilium classifies all of them as the "host" entity,
+# which a Kubernetes NetworkPolicy ipBlock cannot match, so the credential fetch is
+# silently DROPPED and no ipBlock rule can fix it. A CiliumNetworkPolicy toEntities:
+# [host] is the supported way to allow it, and "the node's host entity on :80" is
+# already cloud-independent — the two policies this replaced had byte-identical specs
+# and differed only in name.
+#
+# The failure does not look like a network failure, on either cloud. With no token the
+# cloud SDK reports a CREDENTIALS error, and RunLore's preflight answers a credentials
+# error with an IAM binding command — so the operator adds a binding that is already
+# correct, the symptom does not move, and nothing anywhere mentions egress.
+#
+# Enable when cloud.provider is set AND the cluster runs Cilium. Either toggle turns it
+# on; they are kept separate because they are the operator-facing API and their
+# documentation legitimately differs.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: {{ include "runlore.fullname" . }}-aws-pod-identity
+  name: {{ include "runlore.fullname" . }}-cloud-identity-host-egress
   labels:
     {{- include "runlore.labels" . | nindent 4 }}
 spec:

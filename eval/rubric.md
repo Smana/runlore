@@ -9,7 +9,7 @@ Pass requires `coverage == 1.0`. `optional_sources` are bonus, never gating. Any
 
 Data-source groups: `gitops` (what_changed, gitops_resource_status, gitops_tree), `kubernetes` (pod_status,
 kube_events, controller_logs), `metrics` (query_metrics), `logs` (query_logs), `network` (network_drops),
-`aws` (cloud_what_changed, cloud_resource_health), `kb` (kb_search).
+`cloud` (cloud_what_changed, cloud_resource_health), `kb` (kb_search).
 
 ## Track B — RCA quality (LLM-judge, blind, stronger model)
 

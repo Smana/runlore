@@ -115,15 +115,17 @@ func TestScoreCoverage(t *testing.T) {
 		{Name: "query_logs", Output: "boom"},
 		{Name: "cloud_what_changed", Err: "timeout"},
 	}
-	cov := ScoreCoverage([]string{"gitops", "logs"}, []string{"aws"}, calls)
+	// "cloud", not "aws": the datasource group names the lens, not the vendor behind
+	// it, so a GCP investigation is not scored as having covered AWS.
+	cov := ScoreCoverage([]string{"gitops", "logs"}, []string{"cloud"}, calls)
 	if cov.Ratio != 1.0 {
 		t.Fatalf("want full coverage, got %.2f (touched=%v missing=%v)", cov.Ratio, cov.Touched, cov.Missing)
 	}
 	if !cov.CrossSignal {
 		t.Fatal("want cross-signal true (gitops+logs)")
 	}
-	if len(cov.Bonus) != 1 || cov.Bonus[0] != "aws" {
-		t.Fatalf("want aws bonus, got %v", cov.Bonus)
+	if len(cov.Bonus) != 1 || cov.Bonus[0] != "cloud" {
+		t.Fatalf("want cloud bonus, got %v", cov.Bonus)
 	}
 	if len(cov.ToolErrors) != 1 || cov.ToolErrors[0] != "cloud_what_changed" {
 		t.Fatalf("want cloud_what_changed flagged, got %v", cov.ToolErrors)

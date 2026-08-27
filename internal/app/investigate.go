@@ -4,12 +4,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -34,6 +36,7 @@ import (
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
+	gcpcloud "github.com/Smana/runlore/internal/providers/cloud/gcp"
 	"github.com/Smana/runlore/internal/providers/cluster"
 	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/sourcerepo"
@@ -259,9 +262,14 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	// cluster is reachable. The same reader backs all three tools — and, when present,
 	// the fused incident_timeline below (as its KubeReader/EventWindower source).
 	var kubeReader providers.KubeReader
+	// Kept as the concrete type as well: the GCP cloud identity fallback needs a node
+	// read, which is not part of the providers.KubeReader interface (and should not be —
+	// no tool consumes it).
+	var clusterReader *cluster.Reader
 	if cs := KubeClientset(log); cs != nil {
 		cr := cluster.New(cs)
 		kubeReader = cr
+		clusterReader = cr
 		tools = append(tools, clusterTools(cr, cfg)...)
 	}
 	// resource_spec: read an arbitrary object's .spec/.status. Registered separately from
@@ -278,17 +286,8 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if sr := BuildResourceSpecReader(log); sr != nil {
 		tools = append(tools, investigate.ResourceSpecTool{Reader: sr}, investigate.ResourceListTool{Lister: sr})
 	}
-	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
-	var cloudProvider providers.CloudProvider
-	if cfg.Cloud.Provider == "aws" {
-		if cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName); err != nil {
-			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
-		} else {
-			cloudProvider = cl
-			tools = append(tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
-			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
-		}
-	}
+	// Cloud context: the control-plane "what changed" and node-health lenses. Opt-in.
+	cloudProvider := wireCloudProvider(ctx, cfg, &tools, log, clusterReader)
 	// source_diff (source-repo whitelist): read the code change behind an image
 	// or module version bump. Registered only when the operator listed repos.
 	tools = appendSourceDiffTool(cfg, tools, log)
@@ -1010,4 +1009,166 @@ func BuildFailureDebouncer(cfg *config.Config, gp providers.GitOpsProvider, metr
 		}
 	}
 	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.DebounceWindow(), check, log).WithMetrics(metrics)
+}
+
+// cloudPreflightTimeout bounds the startup credential probe.
+//
+// BuildInvestigator runs synchronously before any listener starts, and its context is a
+// signal.NotifyContext with no deadline, so an un-deadlined probe can block startup
+// indefinitely. That is not hypothetical for this particular call: the chart's own
+// network-policy comment documents that Cilium classifies the metadata endpoint as the
+// "host" entity and DROPS the token fetch rather than refusing it, and a dropped packet
+// is exactly the case that hangs instead of erroring. A pod that never serves is a
+// strange outcome for a lens whose every failure path is already non-fatal.
+const cloudPreflightTimeout = 10 * time.Second
+
+// newGCPCloud resolves the GKE scope and builds the provider.
+//
+// nodes is the tier-3 identity fallback and may be nil; see gcp/identity.go. Resolution
+// is deadlined for the same reason the preflight below is: the metadata client dials a
+// link-local address that, on a misconfigured network policy, simply never answers.
+func newGCPCloud(ctx context.Context, cfg *config.Config, nodes gcpcloud.NodeLookup, log *slog.Logger) (providers.CloudProvider, error) {
+	rctx, cancel := context.WithTimeout(ctx, cloudPreflightTimeout)
+	defer cancel()
+	id := gcpcloud.ResolveIdentity(rctx, gcpcloud.Identity{
+		Project:     cfg.Cloud.GCP.Project,
+		Location:    cfg.Cloud.GCP.Location,
+		ClusterName: cfg.Cloud.GCP.ClusterName,
+		// Pod identity comes from the layer that owns the question, rather than the
+		// provider reading the environment for itself: PodNamespace falls back to the
+		// service-account mount, which exists in every pod even where the chart's
+		// downward-API value does not.
+		PodNamespace:      PodNamespace(),
+		PodServiceAccount: PodServiceAccount(),
+	}, nodes, log)
+	return gcpcloud.New(ctx, id)
+}
+
+// nodeLookupFor adapts the cluster reader to the GCP identity fallback, or returns nil
+// when no cluster is reachable.
+//
+// Returning nil rather than a lookup that always errors is deliberate: the provider
+// treats a nil lookup as "tier 3 unavailable" and a returning-error lookup as "tier 3
+// tried and failed", and only the first is true when there is no cluster client at all.
+func nodeLookupFor(cr *cluster.Reader) gcpcloud.NodeLookup {
+	if cr == nil {
+		return nil
+	}
+	return func(ctx context.Context) (gcpcloud.NodeIdentity, error) {
+		providerID, region, err := cr.AnyNode(ctx)
+		if err != nil {
+			return gcpcloud.NodeIdentity{}, err
+		}
+		return gcpcloud.NodeIdentity{ProviderID: providerID, Region: region}, nil
+	}
+}
+
+// wireCloudProvider selects and builds the cloud provider named in config, registering
+// its two tools and returning it, or nil when cloud context is off or unavailable.
+//
+// A construction-only factory table, with everything AFTER construction shared. The
+// per-provider switch this replaced duplicated the tool registration and the "cloud
+// provider enabled" line once per branch, kept a hand-maintained `supported` list beside
+// the switch's own cases, and reached the startup preflight through a method on one
+// concrete type — so AWS never got one, even though a missing cloudtrail:LookupEvents on
+// its IRSA role produces the identical mid-investigation 403 that the preflight exists to
+// pre-empt. A third cloud now adds one map entry and nothing else.
+func wireCloudProvider(ctx context.Context, cfg *config.Config, tools *[]investigate.Tool, log *slog.Logger, cr *cluster.Reader) providers.CloudProvider {
+	if cfg.Cloud.Provider == "" {
+		// Cloud context is opt-in; saying nothing is correct here.
+		return nil
+	}
+	factories := map[string]func() (providers.CloudProvider, error){
+		config.CloudAWS: func() (providers.CloudProvider, error) {
+			return awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName)
+		},
+		config.CloudGCP: func() (providers.CloudProvider, error) {
+			return newGCPCloud(ctx, cfg, nodeLookupFor(cr), log)
+		},
+	}
+	build, ok := factories[cfg.Cloud.Provider]
+	if !ok {
+		log.Warn("unknown cloud.provider; cloud tools disabled",
+			"provider", cfg.Cloud.Provider, "supported", sortedKeys(factories))
+		return nil
+	}
+	cl, err := build()
+	if err != nil {
+		log.Warn("cloud provider unavailable; cloud tools disabled",
+			"provider", cfg.Cloud.Provider, "err", err)
+		return nil
+	}
+	return enableCloudProvider(ctx, cfg.Cloud.Provider, cl, tools, log)
+}
+
+// enableCloudProvider probes an already-built provider and, if the verdict allows it,
+// registers the two cloud tools.
+//
+// Split from the construction above because everything here is provider-AGNOSTIC — it
+// reads nothing from config and knows nothing about any cloud — while construction is
+// the only part that reaches for credentials. Keeping them in one function meant the
+// only way to exercise this policy was to build a real provider first, and the GCP one
+// resolves Application Default Credentials: the test then passed or failed on whether
+// the machine running it happened to have `gcloud` configured. See
+// TestPreflightDistinguishesADenialFromABlip.
+func enableCloudProvider(ctx context.Context, provider string, cl providers.CloudProvider, tools *[]investigate.Tool, log *slog.Logger) providers.CloudProvider {
+	if !cloudPreflightOK(ctx, provider, cl, log) {
+		return nil
+	}
+	*tools = append(*tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
+	log.Info("cloud provider enabled", "provider", provider)
+	return cl
+}
+
+// cloudPreflightOK runs the optional startup credential probe and reports whether the
+// cloud tools should be registered.
+//
+// The distinction it draws is the whole point. Wiring happens exactly once per process
+// (BuildModelAndTools is called from serve at startup and never again), so disabling the
+// lens is permanent until someone restarts the pod. Only an authorization denial — the
+// failure that genuinely cannot work until a binding changes — earns that. A 503, a DNS
+// hiccup or a deadline during a slow pod start gets a warning and the tools anyway,
+// because the alternative is strictly worse than the no-probe behaviour this replaced:
+// the provider would have worked fine on the first real investigation.
+func cloudPreflightOK(ctx context.Context, provider string, cl providers.CloudProvider, log *slog.Logger) bool {
+	pf, ok := cl.(providers.CloudPreflighter)
+	if !ok {
+		return true
+	}
+	pctx, cancel := context.WithTimeout(ctx, cloudPreflightTimeout)
+	defer cancel()
+	err := pf.Preflight(pctx)
+	if err == nil {
+		return true
+	}
+	if !providers.CloudPreflightDenied(err) {
+		log.Warn("cloud preflight inconclusive; registering cloud tools anyway",
+			"provider", provider, "err", err)
+		return true
+	}
+	// The remediation command is written to stderr rather than logged, and this is the
+	// only reason it is worth generating: under the chart's default JSON logging any
+	// multi-line value becomes one escaped string, with the backslash-continuations and
+	// the %q-quoted principal:// member rendered literally. An operator cannot paste
+	// that. Stderr keeps it copyable; the summary stays in the log where it is queryable.
+	var denied *gcpcloud.DeniedError
+	if errors.As(err, &denied) {
+		log.Warn("cloud provider unavailable; cloud tools disabled",
+			"provider", provider, "err", denied.Summary)
+		fmt.Fprintf(os.Stderr, "\nRunLore: %s cloud lens disabled. To fix:\n\n  %s\n\n", provider, denied.Command)
+		return false
+	}
+	log.Warn("cloud provider unavailable; cloud tools disabled", "provider", provider, "err", err)
+	return false
+}
+
+// sortedKeys returns m's keys in a stable order, so a log line listing supported values
+// does not reorder itself between restarts.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

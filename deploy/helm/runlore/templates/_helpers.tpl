@@ -125,6 +125,17 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # The GCP cloud provider renders its Workload Identity binding command (the
+        # `gcloud … add-iam-policy-binding … --member=principal://…` fix for a denied
+        # preflight read) from its own principal: namespace + ServiceAccount name.
+        # Namespace already comes from POD_NAMESPACE above; spec.serviceAccountName is
+        # a downward-API field, so this needs no extra RBAC. Without it, the printed
+        # command falls back to a <serviceaccount> placeholder the operator has to fill
+        # in by hand — exactly where a wrong name gets pasted into a live IAM binding.
+        - name: POD_SERVICE_ACCOUNT
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
         # Routable leader identity (#264): the agent encodes this IP into the
         # leader-election Lease identity (<podName>_<podIP>) so a NON-leader
         # replica can proxy incoming work (webhooks, Slack interactions, action

@@ -39,6 +39,18 @@ func PodNamespace() string {
 	return "default"
 }
 
+// PodServiceAccount returns the Kubernetes ServiceAccount name this pod runs as, from
+// the downward API value the chart injects. Empty when unset.
+//
+// There is no mounted equivalent to fall back on the way PodNamespace has one: the
+// projected service-account token carries the name only inside a JWT claim, and parsing
+// a token to render a diagnostic hint would be a strange trade. Callers that need a
+// value for display substitute their own placeholder, which is honest about the
+// difference between "this is the SA" and "put your SA here".
+func PodServiceAccount() string {
+	return os.Getenv("POD_SERVICE_ACCOUNT")
+}
+
 // ReadyFunc gates readiness on process + catalog health — and deliberately NOT
 // on leadership (#264). Readiness used to also require holding the leader
 // Lease, which kept every standby replica permanently NotReady: with

@@ -1,6 +1,6 @@
 ---
 title: Grafana (via MCP)
-weight: 313
+weight: 314
 integration: {kind: mcp, id: grafana-mcp}
 ---
 

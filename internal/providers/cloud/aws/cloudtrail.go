@@ -100,7 +100,7 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 			changes = append(changes, eventToChange(out.Events[i], code, msg))
 		}
 		if len(changes) > c.maxEvents {
-			stopNote = truncatedNote(c.maxEvents)
+			stopNote = providers.ChangeTruncatedNote(int64(c.maxEvents))
 			break // we already have more than the cap; further pages cannot change the kept top-N
 		}
 		// A failure scan has to look past the cap — failures are sparse, and the
@@ -124,7 +124,7 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	sort.SliceStable(changes, func(i, j int) bool { return changes[i].When.After(changes[j].When) })
 	if len(changes) > c.maxEvents {
 		if stopNote == "" {
-			stopNote = truncatedNote(c.maxEvents)
+			stopNote = providers.ChangeTruncatedNote(int64(c.maxEvents))
 		}
 		changes = changes[:c.maxEvents]
 	}
@@ -176,12 +176,6 @@ type ctEventJSON struct {
 	ErrorMessage string `json:"errorMessage"`
 }
 
-// truncatedNote is what the CAP says: more events matched than were kept, so the
-// answer is among the newest and the search should be narrowed.
-func truncatedNote(limit int) string {
-	return fmt.Sprintf("results truncated at %d — more events matched; narrow the window or resource", limit)
-}
-
 // scanBoundedNote is what the BUDGET says, which is the opposite advice. Nothing was
 // truncated at the cap; the scan simply stopped reading, and a sparse failure is
 // typically OLDER than the newest events — so "narrow the window" would push it
@@ -206,22 +200,27 @@ func eventToChange(e cttypes.Event, code, msg string) providers.Change {
 	// Workload: the first resource the event touched, else the event name.
 	if len(e.Resources) > 0 {
 		ch.Workload = providers.Workload{
-			Kind: deref(e.Resources[0].ResourceType),
+			Kind: providers.CloudKind(providers.EngineAWS, deref(e.Resources[0].ResourceType)),
 			Name: deref(e.Resources[0].ResourceName),
 		}
 	} else {
-		ch.Workload = providers.Workload{Kind: deref(e.EventSource), Name: deref(e.EventName)}
+		// The EventSource fallback ("ec2.amazonaws.com") is dotted and carries no colon,
+		// so unlike a real "AWS::EC2::Instance" it did NOT read as non-Kubernetes
+		// downstream and the card dropped the resource identity. CloudKind qualifies both.
+		ch.Workload = providers.Workload{
+			Kind: providers.CloudKind(providers.EngineAWS, deref(e.EventSource)),
+			Name: deref(e.EventName),
+		}
 	}
 	// Source.Path carries "eventName by username", plus a FAILED suffix when the
 	// raw CloudTrail JSON carries an errorCode — so the model sees failed calls
 	// (InsufficientInstanceCapacity, UnauthorizedOperation, etc.) not as successes.
-	path := deref(e.EventName) + " by " + deref(e.Username)
-	if code != "" {
-		path += " — FAILED: " + code
-		if msg != "" {
-			path += " (" + msg + ")"
-		}
+	// Shared with the GCP lens so the two clouds cannot spell this field differently.
+	// It also drops the dangling " by " a service-initiated event used to render with —
+	// an empty Username produced "RunInstances by ", which claims a caller whose identity
+	// was lost rather than an action nobody called.
+	ch.Source = providers.SourceRef{
+		Path: providers.CallPath(deref(e.EventName), deref(e.Username), code, msg),
 	}
-	ch.Source = providers.SourceRef{Path: path}
 	return ch
 }
