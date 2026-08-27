@@ -13,7 +13,7 @@ ground_truth:
   # at run time to a known recent event (e.g. the Karpenter bottlerocket AMI bump, or a
   # node scale event) by reading CloudTrail before the run. Edit this line per run.
   root_cause: "PIN-AT-RUNTIME: a recent CloudTrail mutating event on mycluster-0 (e.g. EC2 RunInstances/ASG update)"
-  expected_sources: [aws]
+  expected_sources: [cloud]
   optional_sources: [kubernetes]
   expected_action: confirm the change was intended; correlate with any node disruption
   must_reach_root: false

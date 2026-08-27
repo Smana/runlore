@@ -3,6 +3,7 @@
 package eval
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -66,6 +67,14 @@ func LoadScenarios(dir string) ([]Scenario, error) {
 		}
 		if s.Trigger.Mode == "" {
 			s.Trigger.Mode = "cli"
+		}
+		// Validated at LOAD, so a group rename is a startup error naming the file
+		// instead of a permanent silent zero in the coverage column.
+		if err := errors.Join(
+			ValidateSourceGroups("expected_sources", s.GroundTruth.ExpectedSources),
+			ValidateSourceGroups("optional_sources", s.GroundTruth.OptionalSources),
+		); err != nil {
+			return nil, fmt.Errorf("scenario %s: %w", e.Name(), err)
 		}
 		scns = append(scns, s)
 	}

@@ -4,7 +4,10 @@ package eval
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Smana/runlore/internal/investigate"
@@ -29,6 +32,47 @@ var toolSource = map[string]string{
 	"cloud_what_changed":    "cloud",
 	"cloud_resource_health": "cloud",
 	"kb_search":             "kb",
+}
+
+// SourceGroups returns every data-source group a scenario may name, sorted.
+//
+// Derived from toolSource rather than listed separately, because the two hand-maintained
+// copies of this list were how a rename went wrong: the group was renamed "aws" -> "cloud"
+// in Go while two scenario files and the rubric kept saying "aws", and since the name is
+// an untyped string shared between Go and YAML with no validation at either end, the
+// scenario that exists to exercise the cloud lens scored Ratio 0.0 with Missing=[aws] on
+// every run — silently, and while the tools it names were being used correctly.
+func SourceGroups() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, g := range toolSource {
+		if g == "" || seen[g] {
+			continue
+		}
+		seen[g] = true
+		out = append(out, g)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidateSourceGroups reports an error for every name in groups that is not a real
+// data-source group, naming the field it came from and listing the valid values.
+//
+// A rename should fail loudly at load rather than score zero forever.
+func ValidateSourceGroups(field string, groups []string) error {
+	valid := map[string]bool{}
+	for _, g := range SourceGroups() {
+		valid[g] = true
+	}
+	var errs []error
+	for _, g := range groups {
+		if !valid[g] {
+			errs = append(errs, fmt.Errorf("unknown source group %q in %s; valid: %s",
+				g, field, strings.Join(SourceGroups(), ", ")))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Call is one recorded tool invocation during a live investigation.
