@@ -1645,6 +1645,38 @@ func validGitLabProjectPath(s string) bool {
 // nobody takes, which is how a non-ASCII forge host reached the credential
 // boundary twice over (once per provider). Every key that can produce the
 // boundary is checked here — see asciiForgeHost.
+// validateCloud rejects a cloud block whose keys cannot all take effect.
+//
+// The flat region/cluster_name pair is AWS-only, kept flat for back-compatibility while
+// GCP nests. Nothing read them under provider=gcp and nothing said so: load.go uses
+// KnownFields(true), so `cloud: {provider: gcp, cluster_name: my-gke}` parses cleanly,
+// the value lands in a field wireCloudProvider never consults, and GKE autodetection
+// then either resolves a DIFFERENT cluster in the same project or leaves the scope
+// unresolved — while the startup line looks correct.
+//
+// An error rather than a warning, for the same reason the provider switch grew a
+// warning default: a deliberately-set cloud key that does nothing is the failure mode
+// this block keeps having. The message names the nested key to move to, because that is
+// the whole fix.
+func validateCloud(cl Cloud) error {
+	if cl.Provider != CloudGCP {
+		return nil
+	}
+	var misplaced []string
+	if strings.TrimSpace(cl.Region) != "" {
+		misplaced = append(misplaced, "cloud.region (use cloud.gcp.location)")
+	}
+	if strings.TrimSpace(cl.ClusterName) != "" {
+		misplaced = append(misplaced, "cloud.cluster_name (use cloud.gcp.cluster_name)")
+	}
+	if len(misplaced) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cloud.provider is %q but %s set: those keys are AWS-only and would be "+
+		"silently ignored, leaving the GKE scope to autodetection",
+		CloudGCP, strings.Join(misplaced, " and "))
+}
+
 func validateForgeGitHost(f Forge) error {
 	if f.GitHost != "" {
 		if !bareHost(f.GitHost) {
@@ -1934,6 +1966,9 @@ func ChatWithoutCaptureWarning(cfg *Config) string {
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
 func (c *Config) Validate() error {
+	if err := validateCloud(c.Cloud); err != nil {
+		return err
+	}
 	// Reject a nonsensical output-token cap before it reaches a provider request. 0
 	// means "use the default"; a negative value is always a misconfiguration.
 	if c.Model.MaxTokens < 0 {
