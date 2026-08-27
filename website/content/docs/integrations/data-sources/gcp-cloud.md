@@ -4,19 +4,19 @@ weight: 311
 integration: {kind: cloud, id: gcp}
 ---
 
-> **Status: not yet wired into the binary.** `internal/providers/cloud/gcp` exists on `main` as a
-> client skeleton and its model-facing tool vocabulary — both unit-tested. The two lenses,
-> `CloudChanges` and `ResourceHealth`, are stubs: they unconditionally return an "unimplemented
-> lens" error (`TestTheUnimplementedLensesFailLoudlyRatherThanReportingCalm` pins exactly that).
-> And `internal/app/investigate.go`'s cloud-provider switch only matches `cfg.Cloud.Provider ==
-> "aws"` — there is no `gcp` case and no fallback warning. **Setting `cloud.provider: gcp` today is
-> a silent no-op:** the YAML parses, but no tool registers, nothing is logged, nothing errors. This
-> is a different claim from "implemented but not verified on a live cluster" (which is where the
-> AWS provider and most of this project's integrations sit) — GCP genuinely does not run yet. The
-> rest of this page describes the design it is being built to, so it's ready to use the moment the
-> remaining tasks land; every forward-looking claim below is marked.
+> **Status: implemented, not yet verified on a live GKE cluster.** Both lenses,
+> identity resolution and the Workload Identity preflight are implemented and unit-tested
+> against `httptest` fixtures hand-written from the API reference. `cloud.provider: gcp`
+> registers the cloud tools and logs the resolved project, location, cluster and the tier
+> autodetection resolved them from.
+>
+> What has *not* happened is a run against a real cluster. The fixtures were written from
+> documentation rather than captured from live responses, so the shapes are plausible
+> rather than observed — see [Live validation](#live-validation) for what that leaves open.
+> This is the same "functional but less exercised" posture the project uses elsewhere, and
+> it is a weaker claim than the AWS provider's.
 
-## What it gives you (by design)
+## What it gives you
 
 `cloud_*` tools: Cloud Audit Logs (the `activity` and `system_event` streams — a "what changed
 outside GitOps" lens covering GKE/Compute/IAM/network changes, manual actions, and
@@ -107,19 +107,32 @@ kubectl -n runlore logs deploy/runlore | grep -E 'cloud provider enabled.*gcp'
 Per the design, that startup line will also carry an `identity_source` field naming which of the
 three identity-resolution tiers (explicit config, the GKE metadata server, the node's
 `providerID`) won — but neither the log field nor the resolver that would produce it
-(`internal/providers/cloud/gcp/identity.go`) exists on this branch yet. Treat both commands above
-as a preview of the intended interface, not something to run today.
+(`internal/providers/cloud/gcp/identity.go`) resolves it. Treat both commands above
+as the interface it is today.
 
-## Autopilot (design)
+## Autopilot
 
-`ResourceHealth` is currently a two-line stub that unconditionally returns an unimplemented-lens
-error — there are no sub-queries yet, so there's nothing to skip. Per the design, once
-implemented: on an Autopilot cluster, the node-layer sub-queries (managed-instance-group errors,
-instance status) will be skipped entirely, because the node layer is Google-managed and there is
-no MIG to query. The tool is designed to say so explicitly, rather than running those sub-queries
-anyway and returning an empty result a model could read as "capacity is fine."
+On an Autopilot cluster the node-layer sub-queries **still run**, and an empty answer is
+caveated rather than reported as healthy:
 
-## Limitations (by design, once wired)
+```
+gke node groups: no instance-group errors or instance churn reported — this is an Autopilot
+cluster, so the node layer is Google-managed and this may reflect limited visibility rather
+than an absence of problems
+```
+
+The design originally said to skip them on Autopilot, on the reasoning that the node layer
+is Google's. That was overridden during implementation, because it is wrong in the way that
+matters: Autopilot node VMs and their instance groups live in **your** project and read with
+the same `roles/compute.viewer`, and a zonal stockout strands Autopilot Pods as Pending
+exactly as it strands Standard ones. Skipping discarded the highest-value line this provider
+emits, precisely where you have the least visibility of your own node layer.
+
+What the original reasoning got right is kept: an empty node-layer answer must not read as
+"capacity is fine". So the answer is hedged rather than not sought — and a real stockout is
+reported plainly, with no hedge at all.
+
+## Limitations
 
 - **Single project.** No folder-level, org-level or multi-project audit reads.
 - **Data Access audit logs are not read.** Only the `activity` and `system_event` streams — both
@@ -132,6 +145,36 @@ anyway and returning an empty result a model could read as "capacity is fine."
 - Complements, doesn't replace, [Source repos]({{< relref "source-repos.md" >}}) and GitOps
   `what_changed`: this is the layer for changes that happened **outside** your GitOps pipeline
   entirely.
+
+## Live validation
+
+Not yet run. The unit tests use `httptest` fixtures hand-written from the API reference,
+so every shape below is plausible rather than observed — this section records what a run
+against a real cluster is expected to settle.
+
+1. **Which tier resolves the scope.** The startup line reports `identity_source`. Seeing
+   `metadata-server` there is proof the Kubernetes-node fallback contributed nothing — and
+   that fallback is provisional precisely because it is not established that the GKE
+   metadata server exposes `instance/attributes/cluster-location` to Pods across every GKE
+   version and mode. If tier 2 proves reliable, the node tier is deleted rather than kept
+   as dead weight.
+2. **Whether `protoPayload.status.code!=0` matches an absent field.** A successful audit
+   entry omits `status` entirely. If Cloud Logging's `!=` over-matches, `failed_only`
+   becomes correct-but-slow — it pages through successes — rather than wrong, because a
+   local re-check drops any entry that arrives with a zero status.
+3. **Whether a stockout actually surfaces.** Request a rare machine type in a node pool and
+   confirm `listErrors` reports it. This is the highest-value line the provider emits.
+4. **Whether Autopilot answers the node-layer lookups at all.** They are attempted rather
+   than skipped, and an empty answer is caveated — the live run says which of those two
+   paths a real Autopilot cluster takes.
+5. **Which `StatusCondition` field GKE populates** on a degraded pool: `canonicalCode`,
+   the deprecated `code`, or both. All three are handled; only a live response says which
+   is observed.
+6. **That the printed IAM binding works when pasted.** Unbind a role, trigger the preflight,
+   and paste the command it prints. The project *number* in the `principal://` string is the
+   part most often wrong, and gcloud accepts the id without ever matching.
+
+Once run, the fixtures should be replaced with captured responses.
 
 ## Reference
 

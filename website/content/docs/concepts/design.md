@@ -307,18 +307,18 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
 | Network | `NetworkProvider` | **Cilium Hubble**, **AWS VPC Flow Logs**, **GCP Firewall Logs** (pluggable, CNI-agnostic; none default-on) | Azure NSG Flow Logs; CNI-agnostic eBPF (Retina) |
-| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health), **GCP¹** (design target: Cloud Audit Logs what-changed + GKE/MIG/Compute health, Workload Identity direct principal binding) | Azure via native SDKs; Steampipe/cloud-MCP optional |
+| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health), **GCP¹** (Cloud Audit Logs what-changed + GKE/MIG/Compute health, Workload Identity direct principal binding) | Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **Gemini**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
 
-> ¹ **GCP is in progress, not shipped.** `internal/providers/cloud/gcp` has the client skeleton and
-> the model-facing tool vocabulary, both unit-tested — but `CloudChanges` and `ResourceHealth` are
-> still stubs that unconditionally return an unimplemented-lens error, and
-> `internal/app/investigate.go` has no `gcp` case in its cloud-provider switch. Setting
-> `cloud.provider: gcp` today is a silent no-op: no tools register, nothing logs, nothing errors.
-> See [GCP cloud control plane]({{< relref "/docs/integrations/data-sources/gcp-cloud.md" >}}) for
-> the exact gap and what's already true (config parsing, IAM role list) versus still to come.
+> ¹ **GCP is implemented but not yet verified on a live GKE cluster.** Both lenses, three-tier
+> identity resolution and the Workload Identity preflight are unit-tested against `httptest`
+> fixtures — but those fixtures were hand-written from the API reference rather than captured from
+> real responses, so the shapes are plausible rather than observed. See [GCP cloud control
+> plane]({{< relref "/docs/integrations/data-sources/gcp-cloud.md" >}}) for what the live run is
+> expected to settle, including whether the GKE metadata server exposes `cluster-location` to Pods
+> across every GKE version and mode — the one open question the design records.
 
 > **Cloud via native SDKs.** The AWS impl (`internal/providers/cloud/aws`, `aws-sdk-go-v2`) is **read-only**:
 > `CloudChanges` = CloudTrail `LookupEvents` (mutating events → the engine-agnostic `Change` model, so
