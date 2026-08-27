@@ -112,6 +112,11 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	// model it had probably used the wrong match semantics would send it renaming a
 	// resource it had already identified correctly. The RETRY is cloud-independent —
 	// a scoped miss is worth widening either way — so only the wording moves.
+	// Resolved once. It was re-resolved at three points inside this one function, two
+	// of them reachable together, and on the no-describer path each call rebuilds the
+	// whole AWS vocabulary struct — but the real cost was readability: three lookups of
+	// the same immutable value read as though they might disagree.
+	vocab := vocabularyFor(t.Cloud)
 	events, note := splitNote(changes)
 	var widened bool
 	if len(events) == 0 && in.Resource != "" && note == "" {
@@ -122,7 +127,6 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	}
 
 	if len(events) == 0 {
-		vocab := vocabularyFor(t.Cloud)
 		if !in.FailedOnly {
 			return vocab.EmptyChangesMessage(), nil
 		}
@@ -142,7 +146,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		// truncation note is not tagged as an AWS change. Absent a describer the
 		// vocabulary is the AWS one, which carries EngineAWS — so this is unchanged
 		// for AWS while no longer being a hardcoded assumption.
-		events = append(events, providers.ChangeNote(vocabularyFor(t.Cloud).Engine, note))
+		events = append(events, providers.ChangeNote(vocab.Engine, note))
 	}
 	changes = events
 	var b strings.Builder
@@ -154,7 +158,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		if in.FailedOnly {
 			fmt.Fprintf(&b, widenedFailedBanner, in.Resource)
 		} else {
-			b.WriteString(vocabularyFor(t.Cloud).RenderWidenedBanner(in.Resource))
+			b.WriteString(vocab.RenderWidenedBanner(in.Resource))
 		}
 	}
 	renderRows(&b, len(changes), "more", func(i int) {
@@ -211,13 +215,18 @@ func (t CloudResourceHealthTool) Description() string {
 	return vocabularyFor(t.Cloud).HealthDescription()
 }
 
-// Schema returns the JSON schema for the arguments. instance_id's description is
-// cloud-specific — "i-…" is an EC2 identifier, and a cloud that names instances
-// differently has to say so here — so it comes from the vocabulary.
+// Schema returns the JSON schema for the arguments. BOTH descriptions are
+// cloud-specific and come from the vocabulary: "i-…" is an EC2 identifier, and
+// since_minutes scopes different things per cloud — ASG scaling activities on AWS,
+// instance-group errors on GCP, which has no scaling activities at all. The
+// since_minutes text was hardcoded with AWS's noun and shipped to every cloud.
 func (t CloudResourceHealthTool) Schema() string {
+	vocab := vocabularyFor(t.Cloud)
 	return `{"type":"object","properties":{"instance_id":{"type":"string","description":` +
-		jsonString(vocabularyFor(t.Cloud).InstanceArg) +
-		`},"since_minutes":{"type":"integer","description":"scope scaling-activity lookback to the last N minutes"}},"required":[]}`
+		jsonString(vocab.InstanceArg) +
+		`},"since_minutes":{"type":"integer","description":` +
+		jsonString(vocab.HealthWindowArg) +
+		`}},"required":[]}`
 }
 
 // Call renders cloud resource health.
@@ -229,8 +238,9 @@ func (t CloudResourceHealthTool) Call(ctx context.Context, args string) (string,
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	// A since_minutes bounds the scaling-activity lookback; unset ⇒ zero window
-	// (today's behaviour: recent activities, unscoped).
+	// A since_minutes bounds the provider's node-layer lookback (see
+	// CloudVocabulary.HealthWindowNote for what that is per cloud); unset ⇒ zero window,
+	// meaning unscoped.
 	var window providers.TimeWindow
 	if in.SinceMinutes > 0 {
 		end := time.Now()

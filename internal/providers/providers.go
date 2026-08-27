@@ -1188,6 +1188,33 @@ type CloudVocabulary struct {
 	LagNote       string // ingestion lag, e.g. "CloudTrail lags ~15m"; bare phrase, no punctuation
 	HealthSurface string // what cloud_resource_health actually describes; a complete sentence ending in "."
 	InstanceArg   string // schema description for the instance argument; bare phrase, no punctuation
+
+	// HealthWindowNote is the since_minutes clause for cloud_resource_health: what that
+	// argument scopes on THIS cloud, and what an unset one means.
+	//
+	// A fragment rather than skeleton text because the two clouds window different
+	// things. AWS scopes ASG *scaling activities*; GCP has no such concept and scopes
+	// managed-instance-group *errors*. The skeleton carried AWS's noun, so a GCP model
+	// was told it could narrow a lookback over a mechanism its provider does not have —
+	// the precise class of wrong belief this whole type exists to prevent, and one the
+	// AWS golden structurally cannot catch.
+	//
+	// Form: a bare clause naming what is scoped, then the unset default in parentheses,
+	// ending with "." — it is spliced into HealthDescription.
+	HealthWindowNote string
+
+	// HealthWindowArg is the since_minutes SCHEMA description, which is a separate
+	// fragment from HealthWindowNote rather than the same string reused.
+	//
+	// Two fields because the two surfaces are worded differently and always were: the
+	// description explains what the argument does in prose, the schema tells the model
+	// how to use it in imperative form. Deriving one from the other produced a schema
+	// reading "scope the lookback to the last N minutes — scopes the scaling-activity
+	// lookback to the incident window (default: recent activities)." — which changed
+	// AWS's shipped text for the worse to fix GCP's. Both clouds get their own.
+	//
+	// Form: an imperative phrase, bare, no punctuation.
+	HealthWindowArg string
 }
 
 // ChangeDescription renders the cloud_what_changed description for this cloud. It
@@ -1213,9 +1240,8 @@ func (v CloudVocabulary) ChangeDescription() string {
 func (v CloudVocabulary) HealthDescription() string {
 	return fmt.Sprintf(
 		"Describe %s-side health for the cluster's nodes/capacity: %s Use to confirm a "+
-			"node/infra/capacity cause. Optional since_minutes scopes the scaling-activity lookback "+
-			"to the incident window (default: recent activities).",
-		v.Cloud, v.HealthSurface,
+			"node/infra/capacity cause. Optional since_minutes %s",
+		v.Cloud, v.HealthSurface, v.HealthWindowNote,
 	)
 }
 
@@ -1274,6 +1300,9 @@ func (v CloudVocabulary) Validate() error {
 		{"LagNote", v.LagNote, "tells the model how far behind the log runs, inside since_minutes' default"},
 		{"HealthSurface", v.HealthSurface, "is the entire subject of cloud_resource_health's description"},
 		{"InstanceArg", v.InstanceArg, "is cloud_resource_health's instance_id schema description"},
+		{"HealthWindowNote", v.HealthWindowNote, "is cloud_resource_health's since_minutes clause in the " +
+			"description — empty leaves the model an argument with no stated effect"},
+		{"HealthWindowArg", v.HealthWindowArg, "is cloud_resource_health's since_minutes schema description"},
 	}
 	var errs []error
 	for _, r := range required {
@@ -1330,6 +1359,38 @@ type CloudDescriber interface {
 	CloudVocabulary() CloudVocabulary
 }
 
+// CloudPreflighter is an optional CloudProvider extension: one cheap authoritative
+// read at startup that confirms the credentials actually grant what the lens needs, so
+// a misconfiguration surfaces with a fix attached instead of as a bare 403 partway
+// through an investigation.
+//
+// Optional, and the same shape as every other optional capability here (CloudDescriber,
+// OwnerWalker, EventWindower, GitOpsEngineReporter, ProgressNotifier), so the wiring
+// runs it for whichever provider offers it rather than one branch of a switch calling a
+// concrete method. A provider that cannot probe cheaply simply does not implement it.
+//
+// A non-nil error must be treated as DIAGNOSTIC, not fatal: see CloudPreflightDenied
+// for the distinction the caller has to draw between "this will never work" and "the
+// network was briefly unhappy at startup".
+type CloudPreflighter interface {
+	Preflight(ctx context.Context) error
+}
+
+// CloudPreflightDenied reports whether a CloudPreflighter error is an authorization
+// failure — the permanent kind, where the tools genuinely cannot work until someone
+// changes a binding — rather than a transient one.
+//
+// The distinction is load-bearing because wiring happens exactly once per process. A
+// caller that disables the lens on ANY preflight error turns a 503 or a DNS hiccup
+// during a slow pod start into cloud tools that stay unregistered until someone
+// restarts the pod, which is strictly worse than the no-probe behaviour it replaced.
+// Providers signal the permanent case by wrapping ErrCloudPreflightDenied.
+func CloudPreflightDenied(err error) bool { return errors.Is(err, ErrCloudPreflightDenied) }
+
+// ErrCloudPreflightDenied marks a preflight failure as an authorization denial.
+// Providers wrap it; callers ask via CloudPreflightDenied.
+var ErrCloudPreflightDenied = errors.New("cloud preflight denied")
+
 // AWSCloudVocabulary is the AWS wording, and the fallback for any CloudProvider that
 // does not implement CloudDescriber.
 //
@@ -1366,6 +1427,9 @@ func AWSCloudVocabulary() CloudVocabulary {
 		HealthSurface: "EKS nodegroup status + health issues, ASG scaling activities (launch/capacity " +
 			"failures), and — when given an EC2 instance-id (i-…) — its instance/system status checks.",
 		InstanceArg: "optional EC2 instance id (i-…)",
+		HealthWindowNote: "scopes the scaling-activity lookback to the incident window " +
+			"(default: recent activities).",
+		HealthWindowArg: "scope scaling-activity lookback to the last N minutes",
 	}
 }
 
@@ -1708,6 +1772,85 @@ func ChangeNote(engine Engine, msg string) Change {
 // that count or render events must skip these; callers that want to surface the
 // caveat read c.Workload.Name.
 func IsChangeNote(c Change) bool { return c.Workload.Kind == changeNoteKind }
+
+// DefaultCloudMaxEvents bounds how many entries a single cloud lens returns.
+//
+// ONE constant for every cloud, because the budget is a cross-provider invariant rather
+// than a per-provider choice: an investigation's conclusions should not depend on which
+// cloud it ran against, and neither cloud should flood a model's context where the other
+// would not. Each provider used to declare its own 25 with a comment saying the two must
+// match — which is the shape of an invariant with nothing enforcing it.
+const DefaultCloudMaxEvents = 25
+
+// ChangeTruncatedNote is the message a Change-producing cloud lens caps with: more
+// events matched than were kept, so the answer is among the newest and the search
+// should be narrowed.
+//
+// Shared rather than worded per provider, for the reason ChangeNote and TruncationLine
+// are shared: a partial view must read identically on either cloud, and an invariant
+// asserted only in a doc comment ("worded exactly as the AWS lens words it") has
+// nothing enforcing it. Both provider packages had a byte-identical private copy, one
+// typed int and one int64, which is exactly the seam this closes.
+func ChangeTruncatedNote(limit int64) string {
+	return fmt.Sprintf("results truncated at %d — more events matched; narrow the window or resource", limit)
+}
+
+// CallPath renders the "what was called, by whom, and did it work" line both cloud
+// audit lenses put in Change.Source.Path.
+//
+// principal is omitted rather than left dangling when empty: that is not an edge case
+// but every Google-initiated system_event and every AWS service-initiated call, and
+// "compute.instances.hostError by " reads as a caller whose identity was lost — a
+// different and far more alarming claim than "nobody called this".
+//
+// failCode empty means the call succeeded. When it is set the FAILED suffix is the
+// highest-value thing either lens produces: without it a denied or quota-exhausted
+// call reads as a change that took effect, and the model reasons forward from a state
+// the cloud never reached. Shared so the two clouds cannot spell that suffix
+// differently in the same field — KB entries and eval scenarios match on it.
+func CallPath(call, principal, failCode, failMessage string) string {
+	path := call
+	if principal != "" {
+		path += " by " + principal
+	}
+	if failCode == "" {
+		return path
+	}
+	path += " — FAILED: " + failCode
+	if failMessage != "" {
+		path += " (" + failMessage + ")"
+	}
+	return path
+}
+
+// CloudKind qualifies a cloud provider's own resource-type spelling so downstream
+// consumers can tell it from a Kubernetes kind by SHAPE, without knowing any provider.
+//
+// Workload.Kind is one field carrying two vocabularies: Kubernetes kinds, and whatever
+// each cloud calls its resource types. internal/notify has to tell them apart to decide
+// whether a namespace qualifier is a fact about the object, and it was doing so by
+// accumulating character classes — ':' for AWS's "AWS::EC2::Instance", then '_' for
+// GCP's "gke_nodepool". That approach cannot survive a third provider (Azure's
+// "Microsoft.Compute/virtualMachines" is dotted and slashed, both shapes that must keep
+// reading as Kubernetes), and the '_' rule silently strips the namespace off any real
+// namespaced kind a model spells snake_case — "stateful_set", "cron_job".
+//
+// So the provider, which is the only layer that knows the truth, marks its own: a
+// "<engine>::" prefix. ':' is the one character no Kubernetes kind can contain, it is
+// already AWS's native separator, and it needs no per-provider knowledge downstream —
+// one test, forever. An empty vendorType stays empty rather than becoming a bare
+// prefix, since a kind nothing supplied is not a claim about anything.
+func CloudKind(engine Engine, vendorType string) string {
+	if vendorType == "" {
+		return ""
+	}
+	if strings.Contains(vendorType, ":") {
+		// Already colon-qualified (AWS's "AWS::EC2::Instance"). Re-prefixing would
+		// change shipped text for no gain — the shape test already answers for it.
+		return vendorType
+	}
+	return string(engine) + "::" + vendorType
+}
 
 // TruncationLine is the sentinel appended when a logs/flow query stops at its cap
 // with more entries upstream, so the model knows the view is partial. It carries no
