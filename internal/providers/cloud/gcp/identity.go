@@ -16,9 +16,9 @@ import (
 //
 // The first two exist on every Compute Engine instance. The two cluster attributes are
 // GKE-specific: the control plane stamps them onto each node's instance metadata, and
-// the GKE metadata server is what re-serves them to a Pod. Whether it re-serves
-// cluster-location across every GKE version and mode is the open question this
-// package's tier 3 exists to cover.
+// the GKE metadata server is what re-serves them to a Pod. It does re-serve
+// cluster-location on GKE Standard 1.35.6 (#562); whether it does so across every GKE
+// version and mode — Autopilot above all — is the open question tier 3 still covers.
 const (
 	metaProjectID   = "project/project-id"
 	metaProjectNum  = "project/numeric-project-id"
@@ -206,6 +206,14 @@ func ResolveIdentity(ctx context.Context, cfg Identity, nodes NodeLookup, log *s
 // the zero-configuration promise should not rest on an untested assumption. A live GKE
 // startup log line reporting source=metadata-server settles that; source=node-provider-id
 // says this tier earned its place.
+//
+// STATUS: the first live run (GKE Standard 1.35.6-gke.1710000, zonal, self-managed
+// Cilium — #562) reported source=metadata-server, so tier 3 contributed nothing there.
+// That is one version in one mode, and the criterion above is "every GKE version and
+// mode". AUTOPILOT is the reading still wanted: it is the mode most likely to expose a
+// different metadata surface, and it is the one where an operator has the least
+// visibility of the node layer to fall back on. An Autopilot run reporting
+// metadata-server retires this block by the removal recipe below.
 //
 // It is WIRED: internal/app passes a NodeLookup backed by the cluster reader, so that
 // log line can actually be produced. It was briefly not, and the difference matters —

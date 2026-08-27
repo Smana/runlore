@@ -312,13 +312,15 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
 
-> ¹ **GCP is implemented but not yet verified on a live GKE cluster.** Both lenses, three-tier
-> identity resolution and the Workload Identity preflight are unit-tested against `httptest`
-> fixtures — but those fixtures were hand-written from the API reference rather than captured from
-> real responses, so the shapes are plausible rather than observed. See [GCP cloud control
-> plane]({{< relref "/docs/integrations/data-sources/gcp-cloud.md" >}}) for what the live run is
-> expected to settle, including whether the GKE metadata server exposes `cluster-location` to Pods
-> across every GKE version and mode — the one open question the design records.
+> ¹ **GCP starts and authenticates on live GKE; its lenses' responses are still unobserved.**
+> A first run on GKE Standard 1.35.6 with self-managed Cilium
+> ([#562](https://github.com/Smana/runlore/issues/562)) confirmed three-tier identity resolution
+> (the metadata server answered, so tier 3 contributed nothing) and that a Workload Identity
+> direct principal binding passes the preflight. What remains unobserved is a real Cloud Logging
+> or Container API payload: the tests run against `httptest` fixtures hand-written from the API
+> reference, so response shapes are plausible rather than captured. See [GCP cloud control
+> plane]({{< relref "/docs/integrations/data-sources/gcp-cloud.md" >}}) for what is settled and
+> what is not — Autopilot, which decides whether the node-tier fallback survives, is untested.
 
 > **Cloud via native SDKs.** The AWS impl (`internal/providers/cloud/aws`, `aws-sdk-go-v2`) is **read-only**:
 > `CloudChanges` = CloudTrail `LookupEvents` (mutating events → the engine-agnostic `Change` model, so
@@ -329,13 +331,17 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 > `CloudChanges` = Cloud Audit Logs `entries.list` over the `activity`/`system_event` streams,
 > `ResourceHealth` = GKE/MIG/Compute Engine describes, auth a Workload Identity **direct principal
 > binding** (no GSA, no ServiceAccount annotation). Both lenses are implemented and
-> `wireCloudProvider` wires the provider into `serve`; what is missing is a run against a live
-> cluster (see the footnote above). Azure would follow the same shape too, once started. Steampipe and cloud
+> `wireCloudProvider` wires the provider into `serve`; what is missing is an investigation that
+> actually calls the lenses on a live cluster (see the footnote above). Azure would follow the same shape too, once started. Steampipe and cloud
 > MCP servers remain available as optional MCP extensions.
 >
-> On Cilium clusters the Pod Identity credential endpoint is a host-network target (`169.254.170.23:80`),
-> which a Kubernetes NetworkPolicy can't match — the chart's `networkPolicy.awsPodIdentity` renders a
-> `CiliumNetworkPolicy` (`toEntities: [host]`) to allow it.
+> On Cilium clusters the credential endpoint needs its own `CiliumNetworkPolicy`, and the two clouds
+> need *different* rules. `networkPolicy.awsPodIdentity` renders `toEntities: [host]` — the EKS Pod
+> Identity agent (`169.254.170.23:80`) really does run on the node host network, which a Kubernetes
+> NetworkPolicy can't match. `networkPolicy.gcpWorkloadIdentity` renders
+> `toCIDR: 169.254.169.254/32` instead, because Cilium does **not** classify the GKE metadata server
+> as the `host` entity: a shared rule was tried, matched nothing, and dropped every metadata call
+> ([#562](https://github.com/Smana/runlore/issues/562)).
 
 **Why the GitOps abstraction is real, not hand-wavy** — both engines reduce to *revision history +
 git diff*:

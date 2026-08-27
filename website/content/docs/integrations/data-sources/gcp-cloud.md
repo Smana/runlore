@@ -4,17 +4,17 @@ weight: 311
 integration: {kind: cloud, id: gcp}
 ---
 
-> **Status: implemented, not yet verified on a live GKE cluster.** Both lenses,
-> identity resolution and the Workload Identity preflight are implemented and unit-tested
-> against `httptest` fixtures hand-written from the API reference. `cloud.provider: gcp`
-> registers the cloud tools and logs the resolved project, location, cluster and the tier
-> autodetection resolved them from.
+> **Status: starts and authenticates on a live GKE cluster; the two lenses' responses are
+> still unobserved.** A first run on GKE Standard 1.35.6 with self-managed Cilium
+> ([#562](https://github.com/Smana/runlore/issues/562)) confirmed startup end to end —
+> the metadata server resolves all three scope fields, a Workload Identity direct
+> principal binding is accepted, and the preflight passes, registering both tools.
 >
-> What has *not* happened is a run against a real cluster. The fixtures were written from
-> documentation rather than captured from live responses, so the shapes are plausible
-> rather than observed — see [Live validation](#live-validation) for what that leaves open.
-> This is the same "functional but less exercised" posture the project uses elsewhere, and
-> it is a weaker claim than the AWS provider's.
+> What is still *not* observed is a real Cloud Logging or Container API payload. The unit
+> tests run against `httptest` fixtures hand-written from the API reference, so the
+> response shapes remain plausible rather than captured — see
+> [Live validation](#live-validation) for which questions that leaves open. This is still
+> a weaker claim than the AWS provider's.
 
 ## What it gives you
 
@@ -114,11 +114,18 @@ resolved triple alone cannot be checked, because autodetection landing on a same
 a neighbouring region answers confidently about the wrong cluster and is indistinguishable from a
 quiet one.
 
-It also settles whether tier 3 is needed at all. `source=metadata-server` proves the GKE metadata
-server proxies `instance/attributes/cluster-location` to Pods on your cluster, which means the
-node fallback contributed nothing and can be removed along with the `nodes` RBAC rule it needs;
-`source=node-provider-id` proves it earned its place. If you run this on GKE, that one field is
-the most useful thing you can report back.
+It also settles whether tier 3 is needed on your cluster. `source=metadata-server` means the
+metadata server answered and the node fallback contributed nothing; `source=node-provider-id`
+means the fallback earned its place. On GKE Standard 1.35.6 it reported `metadata-server`
+([#562](https://github.com/Smana/runlore/issues/562)). **The reading still wanted is an
+Autopilot one** — that is the mode most likely to expose a different metadata surface, and it
+decides whether tier 3 and its cluster-wide `nodes` RBAC grant can be dropped. If you run this
+on Autopilot, that one field is the most useful thing you can report back.
+
+If autodetection fails outright — `source="unresolved"` and a `project is required` error — on a
+Cilium cluster, read [Cilium clusters need one extra toggle](#cilium-clusters-need-one-extra-toggle)
+before setting `cloud.gcp.*`. A blocked metadata server presents as a config problem, and
+hardcoding the values hides it without fixing the token path.
 
 ## Autopilot
 
@@ -158,10 +165,8 @@ reported plainly, with no hedge at all.
 
 ## Cilium clusters need one extra toggle
 
-ADC fetches its Workload Identity token from the GKE metadata server on the node host
-network (`169.254.169.254:80`). Cilium classifies that as the `host` entity, which a
-Kubernetes NetworkPolicy `ipBlock` cannot match — so on Cilium the token fetch is
-silently dropped:
+ADC fetches its Workload Identity token from the GKE metadata server at
+`169.254.169.254:80`, and on Cilium that fetch is dropped unless you allow it:
 
 <!-- docsguard:ignore Helm chart values, not a runlore.yaml — networkPolicy is a chart key, outside .Values.config -->
 
@@ -170,46 +175,78 @@ networkPolicy:
   gcpWorkloadIdentity: true   # Cilium only
 ```
 
-Worth setting deliberately rather than discovering, because the failure does not look
-like a network failure. With no token the Google client reports a *credentials* error,
-and RunLore's preflight answers a credentials error with an IAM binding command — so you
-add a binding that was already correct, the symptom does not move, and nothing in the
-chain mentions egress.
+**This toggle is not interchangeable with `awsPodIdentity`, and the reason is worth
+knowing if you write your own policy.** The two once shared a single
+`toEntities: [host]` rule, on the reasoning that both clouds' credential endpoints are
+link-local addresses served by the node. That is false on GKE: Cilium does **not**
+classify `169.254.169.254` as the `host` entity, so the shared rule matched nothing.
+A/B tested on GKE Standard 1.35.6 with self-managed Cilium, from a pod carrying
+RunLore's own labels ([#562](https://github.com/Smana/runlore/issues/562)):
 
-Other CNIs match the link-local address with an ordinary `ipBlock`, which the default
+| egress rule | `curl http://169.254.169.254/computeMetadata/v1/project/project-id` |
+|---|---|
+| `toEntities: [host]` | **timed out** |
+| `toCIDR: [169.254.169.254/32]` | returned the project id |
+
+So `gcpWorkloadIdentity` renders `toCIDR`, and `awsPodIdentity` keeps `toEntities:
+[host]`, which is correct there — the EKS Pod Identity agent really does run on the node
+host network.
+
+Worth setting deliberately rather than discovering, because the failure does not present
+as a network failure at any point. With no token, autodetection finds nothing and RunLore
+reports:
+
+```
+gcp: could not resolve project, location or cluster … source="unresolved"
+cloud provider unavailable; cloud tools disabled  err="gcp: project is required (autodetection found none; set cloud.gcp.project)"
+```
+
+That reads as a configuration problem. Follow it, hardcode all three values, and the
+symptom goes away while ADC still cannot mint a token for the API calls that come later —
+which then fail as a *credentials* error, which the preflight answers with an IAM binding
+command, sending you to fix a binding that was already correct. Nothing anywhere in that
+chain mentions egress. **If autodetection fails on a Cilium cluster, check this toggle
+before you touch `cloud.gcp.*`.**
+
+Non-Cilium CNIs match the link-local address with an ordinary `ipBlock`, which the default
 `strict: false` already permits. In strict mode you must additionally allow 443 to
 `logging.googleapis.com`, `container.googleapis.com` and `compute.googleapis.com` — the
 toggle above covers only the token fetch, not the API calls it authenticates.
 
 ## Live validation
 
-Not yet run. The unit tests use `httptest` fixtures hand-written from the API reference,
-so every shape below is plausible rather than observed — this section records what a run
-against a real cluster is expected to settle.
+First run: GKE Standard 1.35.6-gke.1710000, zonal `europe-west4-a`, self-managed Cilium
+([#562](https://github.com/Smana/runlore/issues/562)). Two of the six questions are
+settled; the rest need an investigation that actually calls the lenses.
 
-1. **Which tier resolves the scope.** The startup line reports `identity_source`. Seeing
-   `metadata-server` there is proof the Kubernetes-node fallback contributed nothing — and
-   that fallback is provisional precisely because it is not established that the GKE
-   metadata server exposes `instance/attributes/cluster-location` to Pods across every GKE
-   version and mode. If tier 2 proves reliable, the node tier is deleted rather than kept
-   as dead weight.
-2. **Whether `protoPayload.status.code!=0` matches an absent field.** A successful audit
-   entry omits `status` entirely. If Cloud Logging's `!=` over-matches, `failed_only`
-   becomes correct-but-slow — it pages through successes — rather than wrong, because a
-   local re-check drops any entry that arrives with a zero status.
-3. **Whether a stockout actually surfaces.** Request a rare machine type in a node pool and
-   confirm `listErrors` reports it. This is the highest-value line the provider emits.
-4. **Whether Autopilot answers the node-layer lookups at all.** They are attempted rather
-   than skipped, and an empty answer is caveated — the live run says which of those two
-   paths a real Autopilot cluster takes.
-5. **Which `StatusCondition` field GKE populates** on a degraded pool: `canonicalCode`,
-   the deprecated `code`, or both. All three are handled; only a live response says which
-   is observed.
-6. **That the printed IAM binding works when pasted.** Unbind a role, trigger the preflight,
-   and paste the command it prints. The project *number* in the `principal://` string is the
-   part most often wrong, and gcloud accepts the id without ever matching.
+**1. Which tier resolves the scope — settled: `metadata-server`.** All three fields came
+from tier 2, so the Kubernetes-node fallback contributed nothing on that cluster. It also
+settles the sub-question this page flagged as unestablished: the GKE metadata server
+*does* proxy `instance/attributes/cluster-location` to Pods.
 
-Once run, the fixtures should be replaced with captured responses.
+That is one cluster, and one mode. Tier 3 stays for now rather than being deleted on it —
+the bar stated here was "across every GKE version and mode", and **Autopilot in
+particular is still untested**, which is exactly the mode most likely to differ in what
+its metadata server exposes. If an Autopilot run also reports `source=metadata-server`,
+tier 3 and the `nodes` RBAC rule it needs should go together.
+
+**6. That the printed IAM binding works when pasted — settled for the positive half.**
+Three roles bound to the direct principal using the project **number** produced a passing
+preflight, so `cloud provider enabled` is itself evidence that a binding in that exact
+shape is accepted. The negative path was not exercised: no role was unbound to make the
+preflight *print* its command, so the generated text remains unverified.
+
+**2, 3, 5 — still open.** They need real `cloud_what_changed` / `cloud_resource_health`
+calls. On that run the tools registered (`tools: 13`, `incident_timeline cloud:true`) and
+an investigation was accepted, but no evidence was emitted before teardown. Nothing was
+observed either way about `protoPayload.status.code!=0` over an absent field, whether a
+stockout surfaces through `listErrors`, or which `StatusCondition` field GKE populates.
+
+**4. Whether Autopilot answers the node-layer lookups — not applicable.** That cluster was
+Standard.
+
+Until 2, 3 and 5 are answered, the fixtures stay hand-written from the API reference and
+should be replaced with captured responses once a real payload is seen.
 
 ## Reference
 

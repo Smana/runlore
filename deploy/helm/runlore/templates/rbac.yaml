@@ -40,8 +40,11 @@ rules:
   # Limit(1) and happens once at startup.
   #
   # Node objects carry no secret material, but this is still a cluster-wide grant for a
-  # fallback: if a live GKE run reports identity_source=metadata-server, tier 3 is not
-  # needed on that cluster and this rule can go with it.
+  # fallback. The first live run (GKE Standard 1.35.6, #562) reported
+  # source=metadata-server, so tier 3 contributed nothing there. Kept anyway: one cluster
+  # in one mode does not cover "every GKE version and mode", and AUTOPILOT is untested —
+  # the mode most likely to expose a different metadata surface. An Autopilot run that
+  # also reports metadata-server retires tier 3 and this rule together.
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["list"]

@@ -101,32 +101,22 @@ spec:
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-{{- if or .Values.networkPolicy.awsPodIdentity .Values.networkPolicy.gcpWorkloadIdentity }}
+{{- if .Values.networkPolicy.awsPodIdentity }}
 ---
-# Cloud in-cluster identity: allow the node-local credential endpoint.
+# EKS Pod Identity: allow the credential endpoint on the node's host network.
 #
-# Both clouds need the same thing, which is why this is ONE policy rather than two. The
-# credential endpoint runs on the node host network at a link-local address on :80 —
-# 169.254.170.23 for EKS Pod Identity, 169.254.169.254 for the GKE metadata server (and
-# Azure IMDS, when that arrives). Cilium classifies all of them as the "host" entity,
-# which a Kubernetes NetworkPolicy ipBlock cannot match, so the credential fetch is
-# silently DROPPED and no ipBlock rule can fix it. A CiliumNetworkPolicy toEntities:
-# [host] is the supported way to allow it, and "the node's host entity on :80" is
-# already cloud-independent — the two policies this replaced had byte-identical specs
-# and differed only in name.
+# The Pod Identity agent genuinely runs on the node host network at 169.254.170.23:80,
+# and Cilium classifies it as the "host" entity — which a Kubernetes NetworkPolicy
+# ipBlock cannot match, so without this the credential fetch is silently DROPPED and no
+# ipBlock rule can fix it.
 #
-# The failure does not look like a network failure, on either cloud. With no token the
-# cloud SDK reports a CREDENTIALS error, and RunLore's preflight answers a credentials
-# error with an IAM binding command — so the operator adds a binding that is already
-# correct, the symptom does not move, and nothing anywhere mentions egress.
-#
-# Enable when cloud.provider is set AND the cluster runs Cilium. Either toggle turns it
-# on; they are kept separate because they are the operator-facing API and their
-# documentation legitimately differs.
+# The failure does not look like a network failure. With no token the AWS SDK reports a
+# CREDENTIALS error, so the operator goes looking at IAM while nothing anywhere mentions
+# egress.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
-  name: {{ include "runlore.fullname" . }}-cloud-identity-host-egress
+  name: {{ include "runlore.fullname" . }}-aws-pod-identity
   labels:
     {{- include "runlore.labels" . | nindent 4 }}
 spec:
@@ -135,6 +125,48 @@ spec:
       {{- include "runlore.selectorLabels" . | nindent 6 }}
   egress:
     - toEntities: [host]
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+{{- end }}
+{{- if .Values.networkPolicy.gcpWorkloadIdentity }}
+---
+# GKE Workload Identity: allow the metadata server by ADDRESS, not by the host entity.
+#
+# This is a separate policy from the AWS one above, and the difference is load-bearing
+# rather than cosmetic. Both endpoints are link-local addresses on :80, which is why
+# these two were once merged into a single `toEntities: [host]` rule — reasoning that
+# "the node's host entity on :80" covered both clouds. It does not. Cilium does NOT
+# classify 169.254.169.254 as the host entity on GKE, so that rule matched nothing and
+# every metadata call was dropped. Measured on GKE Standard 1.35.6-gke.1710000 with
+# self-managed Cilium, from a pod carrying these same labels (#562):
+#
+#   toEntities: [host]              -> curl 169.254.169.254/... timed out
+#   toCIDR: [169.254.169.254/32]    -> returned the project id
+#
+# Adding the toCIDR rule was the only change between a startup that logged
+# `source:"unresolved"` and one that logged `source:"metadata-server"`.
+#
+# Do not re-merge these two policies. The endpoints look interchangeable and are not.
+#
+# The failure is worse than a plain drop, because it does not present as a network
+# problem: autodetection fails, RunLore reports `gcp: project is required (set
+# cloud.gcp.project)`, and an operator who follows that hardcodes the three values and
+# "fixes" the symptom — while ADC still cannot mint a token for the API calls that come
+# later, and nothing in the chain has mentioned egress.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "runlore.fullname" . }}-gcp-workload-identity
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "runlore.selectorLabels" . | nindent 6 }}
+  egress:
+    - toCIDR: ["169.254.169.254/32"]
       toPorts:
         - ports:
             - port: "80"
