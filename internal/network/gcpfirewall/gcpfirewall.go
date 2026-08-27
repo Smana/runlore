@@ -26,11 +26,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"time"
 
 	logging "google.golang.org/api/logging/v2"
 	"google.golang.org/api/option"
 
+	"github.com/Smana/runlore/internal/gcplog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -44,7 +44,7 @@ const firewallLogName = "compute.googleapis.com%2Ffirewall"
 // Client queries GCP Firewall Rules Logging via the Cloud Logging API for a
 // single project.
 type Client struct {
-	svc       *logging.Service
+	entries   gcplog.EntriesAPI
 	project   string
 	maxEvents int64
 }
@@ -62,7 +62,7 @@ func New(ctx context.Context, project string, opts ...option.ClientOption) (*Cli
 	if err != nil {
 		return nil, fmt.Errorf("new logging service: %w", err)
 	}
-	return &Client{svc: svc, project: project, maxEvents: defaultMaxEvents}, nil
+	return &Client{entries: gcplog.Entries(svc), project: project, maxEvents: defaultMaxEvents}, nil
 }
 
 var _ providers.NetworkProvider = (*Client)(nil)
@@ -116,68 +116,43 @@ func scopingNote(sel providers.Selector) providers.LogLine {
 // model sees the IP-based, project-wide limitation before any results. The window
 // is applied via timestamp filters when set.
 func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
-	filter := fmt.Sprintf(
+	filter := gcplog.WindowFilter(fmt.Sprintf(
 		`logName="projects/%s/logs/%s" AND jsonPayload.disposition="DENIED"`,
 		c.project, firewallLogName,
-	)
-	if !w.Start.IsZero() {
-		filter += fmt.Sprintf(` AND timestamp>="%s"`, w.Start.Format(time.RFC3339Nano))
-	}
-	if !w.End.IsZero() {
-		filter += fmt.Sprintf(` AND timestamp<="%s"`, w.End.Format(time.RFC3339Nano))
-	}
+	), w)
 
 	// Prepend the scoping note so it is always the first entry the model sees,
 	// regardless of how many flow lines follow (or whether the window is empty).
 	// flowCount tracks only parsed DENIED entries so the maxEvents cap applies to
 	// real firewall flows, not the synthetic note.
+	// The scoping note is prepended so it is always the first entry the model sees,
+	// regardless of how many flow lines follow (or whether the window is empty), and it
+	// is excluded from the cap — the budget is for real firewall flows, not the
+	// synthetic caveat.
 	out := providers.LogResult{scopingNote(sel)}
-	var flowCount int64
-	truncated := false
-	token := ""
-
-	// Follow NextPageToken until we collect maxEvents lines or pages are exhausted.
-	// A single Entries.List().Do() returns one page (the API may return fewer than
-	// PageSize entries plus a token), so without paging a busy window is silently
-	// truncated to whatever the first page held. When the cap binds with more
-	// available, a sentinel line signals the partial view to the model.
-	for {
-		req := &logging.ListLogEntriesRequest{
-			ResourceNames: []string{"projects/" + c.project},
-			Filter:        filter,
-			OrderBy:       "timestamp desc",
-			PageSize:      c.maxEvents,
-			PageToken:     token,
+	var flows providers.LogResult
+	res, err := gcplog.Walk(ctx, c.entries, gcplog.Query{
+		Project: c.project,
+		Filter:  filter,
+		Cap:     c.maxEvents,
+	}, func(e *logging.LogEntry) bool {
+		var p fwPayload
+		// JsonPayload is a googleapi.RawMessage ([]byte) holding the raw object.
+		if err := json.Unmarshal([]byte(e.JsonPayload), &p); err != nil {
+			// Skip entries we cannot parse rather than failing the whole query.
+			return false
 		}
-		resp, err := c.svc.Entries.List(req).Context(ctx).Do()
-		if err != nil {
-			return nil, fmt.Errorf("list firewall log entries: %w", err)
-		}
-		for _, e := range resp.Entries {
-			if e == nil {
-				continue
-			}
-			var p fwPayload
-			// JsonPayload is a googleapi.RawMessage ([]byte) holding the raw object.
-			if err := json.Unmarshal([]byte(e.JsonPayload), &p); err != nil {
-				// Skip entries we cannot parse rather than failing the whole query.
-				continue
-			}
-			out = append(out, payloadToLine(p, e.Timestamp))
-			flowCount++
-			if flowCount >= c.maxEvents {
-				// Cap reached: truncated iff there is more to fetch (more on this
-				// page is implied by another page token, or this page being full).
-				truncated = resp.NextPageToken != ""
-				break
-			}
-		}
-		if flowCount >= c.maxEvents || resp.NextPageToken == "" {
-			break
-		}
-		token = resp.NextPageToken
+		flows = append(flows, payloadToLine(p, e.Timestamp))
+		return true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list firewall log entries: %w", err)
 	}
-	if truncated {
+	if int64(len(flows)) > c.maxEvents {
+		flows = flows[:c.maxEvents]
+	}
+	out = append(out, flows...)
+	if res.CapBound || res.PageBudgetSpent {
 		out = append(out, providers.TruncationLine(c.maxEvents))
 	}
 	return out, nil
@@ -204,10 +179,6 @@ func payloadToLine(p fwPayload, ts string) providers.LogLine {
 			"rule":        ruleRef,
 		},
 	}
-	if ts != "" {
-		if t, err := time.Parse(time.RFC3339, ts); err == nil {
-			line.Time = t
-		}
-	}
+	line.Time = gcplog.EntryTime(ts)
 	return line
 }
