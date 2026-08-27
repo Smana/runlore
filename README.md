@@ -193,7 +193,7 @@ additive. Full setup detail in **[Data sources](https://runlore.io/docs/concepts
 | **Metrics** | VictoriaMetrics · Prometheus *(PromQL)* | `metrics.url` |
 | **Logs** | VictoriaLogs *(LogsQL)* | `logs.url` |
 | **Network flows** | Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs | `network.provider` |
-| **Cloud** | AWS — CloudTrail + EC2 / ASG / EKS | `cloud.provider` |
+| **Cloud** | AWS — CloudTrail + EC2 / ASG / EKS · GCP — [in progress, not yet wired](https://runlore.io/docs/integrations/data-sources/gcp-cloud/) | `cloud.provider` |
 | **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
 | **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |

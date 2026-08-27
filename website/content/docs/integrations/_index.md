@@ -73,6 +73,8 @@ it would have unlocked.
     subtitle="DENIED connections on any GCP VPC, including GKE." >}}
   {{< hextra/feature-card link="data-sources/aws-cloud/" icon="cloud-download" title="AWS cloud control plane"
     subtitle="CloudTrail + EC2/ASG/EKS — what changed outside GitOps." >}}
+  {{< hextra/feature-card link="data-sources/gcp-cloud/" icon="cloud-download" title="GCP cloud control plane"
+    subtitle="Cloud Audit Logs + GKE/MIG/Compute — in progress, not yet wired into serve." >}}
   {{< hextra/feature-card link="data-sources/source-repos/" icon="link" title="Source repos"
     subtitle="Turns a manifest bump into the actual code diff behind it." >}}
   {{< hextra/feature-card link="data-sources/mcp/" icon="puzzle" title="MCP"
