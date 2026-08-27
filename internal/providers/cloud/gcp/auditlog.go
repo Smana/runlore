@@ -175,10 +175,16 @@ func truncatedNote(limit int64) string {
 	return fmt.Sprintf("results truncated at %d — more events matched; narrow the window or resource", limit)
 }
 
-// decodeAudit decodes an entry's AuditLog protoPayload. ok=false means the entry
-// carried none — Cloud Logging can return other payload shapes under a logName filter
-// — and the caller skips it rather than failing a whole investigation's lookup over one
-// unrecognized row.
+// decodeAudit decodes an entry's AuditLog protoPayload. ok=false means the payload was
+// absent or did not parse, and the caller skips that row rather than failing a whole
+// investigation's lookup over one unrecognized entry.
+//
+// It does NOT check the @type discriminator, so a non-AuditLog payload under these two
+// log names would decode to an empty-valued struct rather than being rejected. That is
+// unreachable in practice — activity and system_event are audit-only log IDs and Cloud
+// Logging guarantees the shape — and the fields are all optional, so a stricter check
+// would buy nothing today. Worth knowing if this decoder is ever pointed at a third
+// stream, where the guarantee no longer holds.
 func decodeAudit(e *logging.LogEntry) (auditPayload, bool) {
 	if len(e.ProtoPayload) == 0 {
 		return auditPayload{}, false
