@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	compute "google.golang.org/api/compute/v1"
@@ -33,17 +35,50 @@ import (
 // returned", which a model reads as a positive claim that the cloud was queried and
 // found quiet.
 func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
-	var lines providers.LogResult
-	add := func(format string, a ...any) {
-		lines = append(lines, providers.LogLine{Message: fmt.Sprintf(format, a...)})
-	}
+	var b lineBuf
 
-	migs, autopilot := c.describeCluster(ctx, add)
+	migs, autopilot := c.describeCluster(ctx, &b)
 
-	c.describeMIGs(ctx, migs, w, autopilot, add)
-	c.describeInstance(ctx, sel, autopilot, add)
-	return lines, nil
+	c.describeMIGs(ctx, &b, migs, w, autopilot)
+	c.describeInstance(ctx, &b, sel, autopilot)
+	return b.lines, nil
 }
+
+// lineBuf accumulates the model-facing lines one call produces.
+//
+// A type rather than the closure this replaced, for two reasons. The closure had to be
+// threaded through five signatures as an `add func(string, ...any)` parameter, and — the
+// reason that matters — it appended to a captured slice, so it could not be called from
+// the goroutines describeMIGs now uses. Each concurrent worker owns its own buffer and
+// the results are merged in input order, which keeps the output deterministic.
+type lineBuf struct{ lines providers.LogResult }
+
+func (b *lineBuf) addf(format string, a ...any) {
+	b.lines = append(b.lines, providers.LogLine{Message: fmt.Sprintf(format, a...)})
+}
+
+// migConcurrency bounds the in-flight Compute calls one ResourceHealth makes.
+//
+// The groups are independent, so the depth of this sub-query used to be its width: a
+// regional cluster with a few dozen node pools contributes one instance group per zone
+// per pool, and each group costs a sequential round-trip. Enough of those and the whole
+// tool call hits its timeout and the lens returns nothing at all — the failure mode
+// where being slow becomes being absent.
+//
+// Eight rather than unbounded: Compute's per-project read quota is shared with
+// everything else in the project, and a health lens that answers by exhausting it has
+// traded one problem for a worse one.
+const migConcurrency = 8
+
+// maxMIGsExamined is a hard ceiling on how many instance groups one call will QUERY.
+//
+// Distinct from the node-pool listing cap, which bounds only how many pool lines are
+// printed. GKE allows hundreds of node pools; a regional cluster multiplies that by its
+// zone count, and a blue-green node-pool upgrade — precisely when this lens gets
+// consulted — has the container API report both the blue and the green groups at once.
+// Without a ceiling the fan-out is unbounded in the one situation it most needs to be
+// bounded. What is dropped is always reported: a silent cap reads as "checked, clean".
+const maxMIGsExamined = 48
 
 // describeCluster reports cluster and node-pool state and returns the instance-group
 // URLs the pools name, so the MIG sub-query is HANDED the groups belonging to this
@@ -52,29 +87,32 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, w p
 //
 // autopilot comes back alongside because cluster.autopilot.enabled is only readable
 // here, and it decides whether the node-level sub-queries run at all.
-func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) (migs []string, autopilot bool) {
-	if c.clusterName == "" || c.location == "" {
+func (c *Client) describeCluster(ctx context.Context, b *lineBuf) (migs []string, autopilot bool) {
+	if c.id.ClusterName == "" || c.id.Location == "" {
 		// Not attempted rather than attempted and failed. A get built from an empty
 		// name is a guaranteed 404 whose message blames the API for what is really an
 		// unset config key, and this lens has no way to tell that 404 from a real one.
-		add("gke: cluster scope unresolved (cluster=%q location=%q) — set cloud.gcp.cluster_name "+
-			"and cloud.gcp.location", c.clusterName, c.location)
+		b.addf("gke: cluster scope unresolved (cluster=%q location=%q) — set cloud.gcp.cluster_name "+
+			"and cloud.gcp.location", c.id.ClusterName, c.id.Location)
 		return nil, false
 	}
 
-	resource := fmt.Sprintf("projects/%s/locations/%s/clusters/%s", c.project, c.location, c.clusterName)
-	cl, err := c.container.Projects.Locations.Clusters.Get(resource).Context(ctx).Do()
+	resource := fmt.Sprintf("projects/%s/locations/%s/clusters/%s", c.id.Project, c.id.Location, c.id.ClusterName)
+	// Field mask: clusters.get otherwise returns every NodePool's full NodeConfig —
+	// labels, taints, metadata, accelerators, shielded config — none of which is read
+	// here. On a large cluster that is a few hundred KB of JSON parsed and discarded on
+	// every call.
+	cl, err := c.container.Projects.Locations.Clusters.Get(resource).
+		Fields("name", "status", "statusMessage", "currentMasterVersion", "currentNodeCount",
+			"autopilot/enabled", "conditions",
+			"nodePools(name,status,statusMessage,version,autoscaling,conditions,instanceGroupUrls)").
+		Context(ctx).Do()
 	if err != nil {
-		add("gke cluster %s: %s", c.clusterName, describeAPIError(err,
-			fmt.Sprintf("the RunLore principal is missing roles/container.clusterViewer on project %s%s",
-				c.project,
-				// The project NUMBER, not the id: an IAM principal:// binding is written
-				// with the number and rejects the id, so an operator pasting the id from
-				// this line would get a binding that does not resolve.
-				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum)),
+		b.addf("gke cluster %s: %s", c.id.ClusterName, describeAPIError(err,
+			c.missingRole("container.clusterViewer"),
 			fmt.Sprintf("no cluster %q at location %q in project %q — check cloud.gcp.cluster_name "+
-				"and cloud.gcp.location%s", c.clusterName, c.location, c.project,
-				optional(" (this scope was resolved from: %s)", c.identitySrc))))
+				"and cloud.gcp.location%s", c.id.ClusterName, c.id.Location, c.id.Project,
+				optional(" (this scope was resolved from: %s)", c.id.Source))))
 		return nil, false
 	}
 
@@ -92,19 +130,19 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 	}
 	name := cl.Name
 	if name == "" {
-		name = c.clusterName
+		name = c.id.ClusterName
 	}
 	// The location is echoed because the scope is usually autodetected. Autodetection
 	// landing on a same-named cluster in a neighbouring region answers confidently
 	// about the wrong cluster, and this line is where a reader can catch it.
-	add("GKE cluster %s (%s): status=%s%s%s%s%s", name, c.location, cl.Status,
+	b.addf("GKE cluster %s (%s): status=%s%s%s%s%s", name, c.id.Location, cl.Status,
 		optional(" (%s)", cl.StatusMessage),
 		optional(" control-plane version=%s", cl.CurrentMasterVersion), nodes, mode)
 	for _, cond := range cl.Conditions {
 		if cond == nil {
 			continue
 		}
-		add("  cluster condition: %s", renderCondition(cond))
+		b.addf("  cluster condition: %s", renderCondition(cond))
 	}
 
 	if len(cl.NodePools) == 0 && !autopilot {
@@ -112,7 +150,7 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 		// nowhere to schedule, which is a complete answer to "why is nothing running".
 		// Autopilot is excluded because a cluster with no workloads legitimately has no
 		// pools yet, and Google creates them on demand.
-		add("  no node pools — this cluster has no capacity to schedule on")
+		b.addf("  no node pools — this cluster has no capacity to schedule on")
 	}
 	// Bound the listing the way every other listing in this lens family is bounded
 	// (cloud/aws/resourcehealth.go caps nodegroups and ASGs at the same budget), because
@@ -123,12 +161,22 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 	// drop the degraded pool behind twenty healthy ones — losing precisely the row this
 	// lens exists to surface, and silently, since a truncation line cannot say what it
 	// cut.
-	quiet := int64(0)
+	//
+	// It caps the LINE, never the lookup. An omitted pool's instance groups are still
+	// handed to the MIG sub-query, because "quiet at the pool level" and "healthy" are
+	// different claims: a pool whose scale-out is failing on a zonal stockout or an
+	// exhausted IP range reports status=RUNNING with no conditions, so notablePool
+	// returns false and it lands in exactly this bucket. Skipping its groups would drop
+	// the highest-value finding this provider emits, and the truncation line below would
+	// then assert those pools were fine — something nothing had checked.
+	quiet := 0
 	omitted := 0
 	for _, np := range cl.NodePools {
 		if np == nil {
 			continue
 		}
+		// Collected before the cap decision, for every pool, on purpose.
+		migs = append(migs, np.InstanceGroupUrls...)
 		if !notablePool(np, cl.CurrentMasterVersion) {
 			if quiet >= c.maxEvents {
 				omitted++
@@ -143,7 +191,7 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 		// headroom where there is none — the opposite conclusion, in the lens whose
 		// whole job is capacity. The real number is the sum of the pool's instance
 		// groups' targetSize, which the MIG sub-query is what fetches.
-		add("  node pool %s: status=%s%s%s%s", np.Name, np.Status,
+		b.addf("  node pool %s: status=%s%s%s%s", np.Name, np.Status,
 			optional(" (%s)", np.StatusMessage),
 			versionSummary(np.Version, cl.CurrentMasterVersion),
 			autoscalingSummary(np.Autoscaling))
@@ -154,9 +202,8 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 			// Named rather than only indented. These lines reach a model as a flat list
 			// of messages, where indentation alone leaves a condition attached to
 			// whichever pool the reader last saw.
-			add("    node pool %s condition: %s", np.Name, renderCondition(cond))
+			b.addf("    node pool %s condition: %s", np.Name, renderCondition(cond))
 		}
-		migs = append(migs, np.InstanceGroupUrls...)
 	}
 	if omitted > 0 {
 		// Not providers.TruncationLine: that sentinel tells the reader to "narrow the
@@ -164,8 +211,8 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 		// lens words its own listing caps for the same reason
 		// (cloud/aws/resourcehealth.go). Saying the omitted pools were healthy is the
 		// load-bearing part — it is what keeps the cap from reading as a hidden finding.
-		add("  … %d further node pools omitted, all RUNNING with no conditions and at the "+
-			"control-plane version", omitted)
+		b.addf("  … %d further node pools omitted from this listing, all RUNNING with no conditions "+
+			"and at the control-plane version; their instance groups were still checked below", omitted)
 	}
 	return migs, autopilot
 }
@@ -236,6 +283,19 @@ func renderCondition(cond *container.StatusCondition) string {
 	}
 }
 
+// missingRole renders the "bind this role" half of a permission diagnosis.
+//
+// One copy because the parenthetical is load-bearing and was written out four times: an
+// IAM principal:// binding is spelled with the project NUMBER and silently never
+// matches when given the id, so an operator pasting the id from this line gets a
+// binding that looks right and does nothing. Four copies of a sentence whose exact
+// wording is what prevents that is four chances for one of them to drift.
+func (c *Client) missingRole(role string) string {
+	return fmt.Sprintf("the RunLore principal is missing roles/%s on project %s%s",
+		role, c.id.Project,
+		optional(" (project number %s — the form an IAM principal:// binding requires)", c.id.ProjectNumber))
+}
+
 // describeAPIError turns a Google API error into an actionable line.
 //
 // 403 and 404 are separated deliberately, and this is the one place this provider goes
@@ -302,67 +362,196 @@ func optional(format, v string) string {
 // Autopilot does change is what silence means — Google manages that layer, so an empty
 // answer may be missing visibility rather than missing problems, and the two must not
 // render identically.
-func (c *Client) describeMIGs(ctx context.Context, migs []string, w providers.TimeWindow, autopilot bool, add func(string, ...any)) {
+func (c *Client) describeMIGs(ctx context.Context, b *lineBuf, migs []string, w providers.TimeWindow, autopilot bool) {
 	if len(migs) == 0 {
 		return
 	}
-	found := false
-	for _, self := range migs {
-		scope, name, zonal, ok := migName(self)
-		if !ok {
-			// Reported rather than skipped: an unparseable self-link means a group
-			// this lens cannot check, and silence would count as "checked, clean".
-			add("gke node group: cannot route a lookup for %q — unrecognised self-link shape", self)
-			found = true
-			continue
-		}
-		if c.migErrors(ctx, scope, name, zonal, w, add) {
-			found = true
-		}
-		if c.migChurn(ctx, scope, name, zonal, add) {
-			found = true
+	// Ceiling on groups QUERIED, applied before any call is made.
+	overflow := 0
+	if len(migs) > maxMIGsExamined {
+		overflow = len(migs) - maxMIGsExamined
+		migs = migs[:maxMIGsExamined]
+	}
+
+	// One aggregated read answers "which groups have anything moving at all", so the
+	// per-group instance listing only runs where there is churn to enumerate. On a
+	// healthy cluster — the normal case — that replaces one round-trip per group with
+	// one round-trip total.
+	churn, haveChurn := c.migChurnCounts(ctx)
+
+	// Fan out over the groups. Each worker writes its OWN buffer and the buffers are
+	// concatenated in input order afterwards, so concurrency changes the latency and
+	// nothing else: the lines a model sees are byte-identical to the sequential order.
+	bufs := make([]lineBuf, len(migs))
+	found := make([]bool, len(migs))
+	sem := make(chan struct{}, migConcurrency)
+	var wg sync.WaitGroup
+	for i, self := range migs {
+		wg.Add(1)
+		go func(i int, self string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			wb := &bufs[i]
+			scope, name, zonal, ok := migName(self)
+			if !ok {
+				// Reported rather than skipped: an unparseable self-link means a group
+				// this lens cannot check, and silence would count as "checked, clean".
+				wb.addf("gke node group: cannot route a lookup for %q — unrecognised self-link shape", self)
+				found[i] = true
+				return
+			}
+			if c.migErrors(ctx, wb, scope, name, zonal, w) {
+				found[i] = true
+			}
+			// Skip the listing only when the aggregated summary was actually read AND
+			// reported this group still. An unavailable summary must not be read as
+			// "nothing is churning" — that would turn a permission gap into a clean
+			// bill of health — so the per-group call still runs in that case.
+			if !haveChurn || churn[scope+"/"+name] > 0 {
+				if c.migChurn(ctx, wb, scope, name, zonal) {
+					found[i] = true
+				}
+			}
+		}(i, self)
+	}
+	wg.Wait()
+
+	anyFound := false
+	for i := range bufs {
+		b.lines = append(b.lines, bufs[i].lines...)
+		if found[i] {
+			anyFound = true
 		}
 	}
-	if found {
+	if overflow > 0 {
+		// Said out loud, and said even when everything examined was clean. A capped
+		// fan-out that reports nothing is indistinguishable from a healthy cluster,
+		// which is the one reading this line exists to prevent.
+		b.addf("gke node groups: … %d further instance groups NOT checked (examined %d of %d) — "+
+			"this cluster has more node pools than one health call can query; scope the "+
+			"investigation to a node or pool to see them", overflow, len(migs), len(migs)+overflow)
+	}
+	if anyFound {
 		return
 	}
 	if autopilot {
-		add("gke node groups: no instance-group errors or instance churn reported — this is an " +
+		b.addf("gke node groups: no instance-group errors or instance churn reported — this is an " +
 			"Autopilot cluster, so the node layer is Google-managed and this may reflect limited " +
 			"visibility rather than an absence of problems")
 		return
 	}
-	add("gke node groups: no instance-group errors or instance churn in the window")
+	b.addf("gke node groups: no instance-group errors or instance churn in the window")
+}
+
+// migChurnCounts reports, in one aggregated call, how many instances each managed
+// instance group in the project currently has mid-action, keyed by "<scope>/<name>".
+//
+// ok=false means the summary is unavailable — the call failed, or the caller must not
+// rely on it. It deliberately reports no error line of its own: every group's own
+// lookups run right after and produce a role-specific diagnosis in place, so an error
+// here would be the same permission problem stated twice.
+func (c *Client) migChurnCounts(ctx context.Context) (map[string]int64, bool) {
+	counts := map[string]int64{}
+	token := ""
+	for {
+		call := c.compute.InstanceGroupManagers.AggregatedList(c.id.Project).
+			// returnPartialSuccess is what the API's own documentation recommends for
+			// aggregated lists: without it a single unreachable zone fails the whole
+			// call, and this is an optimisation that must never cost the answer.
+			ReturnPartialSuccess(true).
+			Fields("nextPageToken", "items").
+			Context(ctx)
+		if token != "" {
+			call = call.PageToken(token)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, false
+		}
+		for scope, list := range resp.Items {
+			for _, m := range list.InstanceGroupManagers {
+				if m == nil || m.CurrentActions == nil {
+					continue
+				}
+				counts[strings.TrimPrefix(strings.TrimPrefix(scope, "zones/"), "regions/")+"/"+m.Name] =
+					movingInstances(m.CurrentActions)
+			}
+		}
+		if resp.NextPageToken == "" {
+			return counts, true
+		}
+		token = resp.NextPageToken
+	}
+}
+
+// movingInstances sums every current action except None.
+//
+// Enumerated rather than derived from a total, because there is no total field and
+// because "moving" is the question: a group sitting at its target size with every
+// instance in None is not churning, and counting those would make every group look busy.
+func movingInstances(a *compute.InstanceGroupManagerActionsSummary) int64 {
+	return a.Abandoning + a.Creating + a.CreatingWithoutRetries + a.Deleting +
+		a.Recreating + a.Refreshing + a.Restarting + a.Resuming +
+		a.Starting + a.Stopping + a.Suspending + a.Verifying
+}
+
+// listMIGErrors reads one group's recent failures, routing zonal and regional groups to
+// their own endpoints. Split out so migErrors reads as a flat function: the shape this
+// replaced declared its response inside each branch while assigning to an `err` from the
+// enclosing scope, which is the hardest thing in this file to follow.
+func (c *Client) listMIGErrors(ctx context.Context, scope, name string, zonal bool) ([]*compute.InstanceManagedByIgmError, error) {
+	if zonal {
+		resp, err := c.compute.InstanceGroupManagers.ListErrors(c.id.Project, scope, name).Context(ctx).Do()
+		if err != nil {
+			return nil, err
+		}
+		return resp.Items, nil
+	}
+	resp, err := c.compute.RegionInstanceGroupManagers.ListErrors(c.id.Project, scope, name).Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
+// listManagedInstances reads one group's instances, routing zonal and regional groups to
+// their own endpoints.
+func (c *Client) listManagedInstances(ctx context.Context, scope, name string, zonal bool) ([]*compute.ManagedInstance, error) {
+	const fields = "managedInstances(name,currentAction,instanceStatus)"
+	if zonal {
+		resp, err := c.compute.InstanceGroupManagers.ListManagedInstances(c.id.Project, scope, name).
+			Fields(fields).Context(ctx).Do()
+		if err != nil {
+			return nil, err
+		}
+		return resp.ManagedInstances, nil
+	}
+	resp, err := c.compute.RegionInstanceGroupManagers.ListManagedInstances(c.id.Project, scope, name).
+		Fields(fields).Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+	return resp.ManagedInstances, nil
 }
 
 // migErrors reads one group's recent failures, window-scoped. It reports whether it
 // wrote anything, so the caller can tell a quiet group from an unchecked one.
-func (c *Client) migErrors(ctx context.Context, scope, name string, zonal bool, w providers.TimeWindow, add func(string, ...any)) bool {
-	var (
-		errs []*compute.InstanceManagedByIgmError
-		err  error
-	)
-	if zonal {
-		var resp *compute.InstanceGroupManagersListErrorsResponse
-		resp, err = c.compute.InstanceGroupManagers.ListErrors(c.project, scope, name).Context(ctx).Do()
-		if resp != nil {
-			errs = resp.Items
-		}
-	} else {
-		var resp *compute.RegionInstanceGroupManagersListErrorsResponse
-		resp, err = c.compute.RegionInstanceGroupManagers.ListErrors(c.project, scope, name).Context(ctx).Do()
-		if resp != nil {
-			errs = resp.Items
-		}
-	}
+func (c *Client) migErrors(ctx context.Context, b *lineBuf, scope, name string, zonal bool, w providers.TimeWindow) bool {
+	errs, err := c.listMIGErrors(ctx, scope, name, zonal)
 	if err != nil {
-		add("gke node group %s (%s): %s", name, scope, describeAPIError(err,
-			"the RunLore principal is missing roles/compute.viewer on project "+c.project+
-				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum),
+		b.addf("gke node group %s (%s): %s", name, scope, describeAPIError(err,
+			c.missingRole("compute.viewer"),
 			fmt.Sprintf("no instance group %q in %q — a pool deleted mid-incident reads this way", name, scope)))
 		return true
 	}
-	wrote := false
+	// Capped, the way migChurn below is capped and for the same reason. ListErrors
+	// defaults to 500 results per page, and a group stuck in a create-fail-recreate
+	// loop — the exact case this sub-query exists to catch — returns hundreds of
+	// in-window errors that are all the same error. Uncapped, one such group spends the
+	// whole per-call row budget and crowds out every other group's lines.
+	shown, inWindow := 0, 0
 	for _, e := range errs {
 		if e == nil || e.Error == nil {
 			continue
@@ -370,12 +559,19 @@ func (c *Client) migErrors(ctx context.Context, scope, name string, zonal bool, 
 		if !errorInWindow(e.Timestamp, w) {
 			continue
 		}
-		add("gke node group %s (%s): %s%s%s", name, scope, e.Error.Code,
+		inWindow++
+		if shown >= c.maxEvents {
+			continue
+		}
+		b.addf("gke node group %s (%s): %s%s%s", name, scope, e.Error.Code,
 			optional(" — %s", strings.TrimSpace(e.Error.Message)),
 			optional(" at %s", e.Timestamp))
-		wrote = true
+		shown++
 	}
-	return wrote
+	if over := inWindow - shown; over > 0 {
+		b.addf("gke node group %s (%s): %d further errors in the window, not listed", name, scope, over)
+	}
+	return shown > 0
 }
 
 // errorInWindow keeps an error the window covers, and keeps one the API dated in a form
@@ -406,28 +602,11 @@ func errorInWindow(ts string, w providers.TimeWindow) bool {
 // one symptom while crowding out the listErrors line that says why they keep failing.
 // Only instances actually moving are listed: a steady instance is not churn, and
 // spending the budget on it would hide the ones that are.
-func (c *Client) migChurn(ctx context.Context, scope, name string, zonal bool, add func(string, ...any)) bool {
-	var (
-		insts []*compute.ManagedInstance
-		err   error
-	)
-	if zonal {
-		var resp *compute.InstanceGroupManagersListManagedInstancesResponse
-		resp, err = c.compute.InstanceGroupManagers.ListManagedInstances(c.project, scope, name).Context(ctx).Do()
-		if resp != nil {
-			insts = resp.ManagedInstances
-		}
-	} else {
-		var resp *compute.RegionInstanceGroupManagersListInstancesResponse
-		resp, err = c.compute.RegionInstanceGroupManagers.ListManagedInstances(c.project, scope, name).Context(ctx).Do()
-		if resp != nil {
-			insts = resp.ManagedInstances
-		}
-	}
+func (c *Client) migChurn(ctx context.Context, b *lineBuf, scope, name string, zonal bool) bool {
+	insts, err := c.listManagedInstances(ctx, scope, name, zonal)
 	if err != nil {
-		add("gke node group %s (%s) instances: %s", name, scope, describeAPIError(err,
-			"the RunLore principal is missing roles/compute.viewer on project "+c.project+
-				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum),
+		b.addf("gke node group %s (%s) instances: %s", name, scope, describeAPIError(err,
+			c.missingRole("compute.viewer"),
 			fmt.Sprintf("no instance group %q in %q", name, scope)))
 		return true
 	}
@@ -437,15 +616,15 @@ func (c *Client) migChurn(ctx context.Context, scope, name string, zonal bool, a
 			continue
 		}
 		moving++
-		if int64(shown) >= c.maxEvents {
+		if shown >= c.maxEvents {
 			continue
 		}
-		add("gke node group %s (%s): instance %s %s%s", name, scope, mi.Name, mi.CurrentAction,
+		b.addf("gke node group %s (%s): instance %s %s%s", name, scope, mi.Name, mi.CurrentAction,
 			optional(" (%s)", mi.InstanceStatus))
 		shown++
 	}
 	if over := moving - shown; over > 0 {
-		add("gke node group %s (%s): %d further instances mid-action, not listed", name, scope, over)
+		b.addf("gke node group %s (%s): %d further instances mid-action, not listed", name, scope, over)
 	}
 	return shown > 0
 }
@@ -458,38 +637,105 @@ func (c *Client) migChurn(ctx context.Context, scope, name string, zonal bool, a
 // zone. get needs both, so reaching it would mean guessing a zone — and a wrong guess
 // 404s, which this lens renders as "that instance is gone": a false negative on exactly
 // the question being asked.
-func (c *Client) describeInstance(ctx context.Context, sel providers.Selector, autopilot bool, add func(string, ...any)) {
+func (c *Client) describeInstance(ctx context.Context, b *lineBuf, sel providers.Selector, autopilot bool) {
 	if sel.Name == "" {
 		return
 	}
-	resp, err := c.compute.Instances.AggregatedList(c.project).
-		Filter("name=" + sel.Name).Context(ctx).Do()
+	// Quoted: sel.Name is model-written free text, and an unquoted value containing a
+	// space or a quote makes Compute reject the whole filter with a 400 that this lens
+	// then renders as a lookup failure for a name that may well exist.
+	matches, err := c.findInstances(ctx, sel.Name)
 	if err != nil {
-		add("compute instance %s: %s", sel.Name, describeAPIError(err,
-			"the RunLore principal is missing roles/compute.viewer on project "+c.project+
-				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum),
-			fmt.Sprintf("no instance %q in project %q", sel.Name, c.project)))
+		b.addf("compute instance %s: %s", sel.Name, describeAPIError(err,
+			c.missingRole("compute.viewer"),
+			fmt.Sprintf("no instance %q in project %q", sel.Name, c.id.Project)))
 		return
 	}
-	for scope, list := range resp.Items {
-		for _, in := range list.Instances {
-			if in == nil || in.Name != sel.Name {
-				continue
-			}
-			add("compute instance %s (%s): status=%s%s%s", in.Name,
-				strings.TrimPrefix(scope, "zones/"), in.Status,
-				optional(" (%s)", strings.TrimSpace(in.StatusMessage)),
-				optional(" last started %s", in.LastStartTimestamp))
-			return
-		}
+	for _, m := range matches {
+		b.addf("compute instance %s (%s): status=%s%s%s", m.instance.Name,
+			m.zone, m.instance.Status,
+			optional(" (%s)", strings.TrimSpace(m.instance.StatusMessage)),
+			optional(" last started %s", m.instance.LastStartTimestamp))
+	}
+	if len(matches) > 1 {
+		// Reported rather than resolved, because this lens cannot resolve it: a GCE
+		// instance name is unique per ZONE, not per project, and the selector carries no
+		// zone. Returning whichever one came back first made the answer depend on Go's
+		// randomised map iteration order — the same node could be reported RUNNING on
+		// one call and TERMINATED on the next.
+		b.addf("compute instance %s: %d instances share this name in different zones — "+
+			"all are listed above; the node under investigation is whichever zone it "+
+			"schedules in", sel.Name, len(matches))
+	}
+	if len(matches) > 0 {
+		return
 	}
 	if autopilot {
-		add("compute instance %s: not found in project %s — this is an Autopilot cluster, so the "+
+		b.addf("compute instance %s: not found in project %s — this is an Autopilot cluster, so the "+
 			"node layer is Google-managed and this may reflect limited visibility rather than a "+
-			"deleted instance", sel.Name, c.project)
+			"deleted instance", sel.Name, c.id.Project)
 		return
 	}
-	add("compute instance %s: not found in project %s", sel.Name, c.project)
+	b.addf("compute instance %s: not found in project %s", sel.Name, c.id.Project)
+}
+
+// instanceFilterFor builds the aggregatedList filter for an instance name.
+//
+// %q, not concatenation. name is model-written free text, and an unquoted value carrying
+// a space or a quote makes Compute reject the whole filter with a 400 — which this lens
+// renders as a lookup failure for a name that may well exist, i.e. a false negative on
+// exactly the question being asked.
+func (c *Client) instanceFilterFor(name string) string {
+	return fmt.Sprintf("name=%q", name)
+}
+
+// instanceMatch is one instance that carried the requested name, with the zone that
+// disambiguates it.
+type instanceMatch struct {
+	zone     string
+	instance *compute.Instance
+}
+
+// findInstances returns every instance in the project with this exact name, ordered by
+// zone so the answer does not depend on map iteration order.
+//
+// It follows nextPageToken. An aggregated list that stops at its first page renders a
+// match on a later page as "not found in project" — which describeInstance's own doc
+// comment calls a false negative on exactly the question being asked.
+func (c *Client) findInstances(ctx context.Context, name string) ([]instanceMatch, error) {
+	var out []instanceMatch
+	token := ""
+	for {
+		call := c.compute.Instances.AggregatedList(c.id.Project).
+			Filter(c.instanceFilterFor(name)).
+			ReturnPartialSuccess(true).
+			Fields("nextPageToken", "items").
+			Context(ctx)
+		if token != "" {
+			call = call.PageToken(token)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, err
+		}
+		for scope, list := range resp.Items {
+			for _, in := range list.Instances {
+				// The name is re-checked because the server-side filter is the API's,
+				// not this lens's: a filter that ever matched more loosely would put a
+				// different instance's status under the name being investigated.
+				if in == nil || in.Name != name {
+					continue
+				}
+				out = append(out, instanceMatch{zone: strings.TrimPrefix(scope, "zones/"), instance: in})
+			}
+		}
+		if resp.NextPageToken == "" {
+			break
+		}
+		token = resp.NextPageToken
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].zone < out[j].zone })
+	return out, nil
 }
 
 // migName splits a compute self-link into the scope its lookup must target, the group

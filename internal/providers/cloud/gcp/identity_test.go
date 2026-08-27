@@ -275,16 +275,20 @@ func TestTheLiveMetadataSourceReadsTheDocumentedGKEAttributePaths(t *testing.T) 
 	}
 }
 
-// captureLogs redirects slog's default logger into a buffer for the duration of the
-// test. ResolveIdentity logs through the default logger because it runs during app
-// wiring, before any component-scoped logger exists.
-func captureLogs(t *testing.T) *bytes.Buffer {
+// captureLogs returns a logger writing into a buffer, plus the buffer.
+//
+// It builds a logger and hands it to ResolveIdentity rather than installing one with
+// slog.SetDefault, and that is the whole point of this helper's shape. The earlier
+// version DID call SetDefault — which made the test pass while production was broken:
+// ResolveIdentity logged through the package-level default, nothing in this repo ever
+// calls SetDefault, so in a real deployment those two lines went to Go's default
+// handler (plain text, stderr) instead of the JSON pipeline every neighbouring line
+// lands in. A test that installs the default logger cannot observe that difference; one
+// that passes a logger in fails to compile unless the code accepts it.
+func captureLogs(t *testing.T) (*slog.Logger, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	return &buf
+	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
 }
 
 // TestResolveIdentityLogsTheResolvedTripleAndTheTierThatProducedIt covers the one
@@ -301,9 +305,9 @@ func TestResolveIdentityLogsTheResolvedTripleAndTheTierThatProducedIt(t *testing
 			"instance/attributes/cluster-name":     "log-cluster",
 			"instance/attributes/cluster-location": "europe-west1",
 		})
-		buf := captureLogs(t)
+		log, buf := captureLogs(t)
 
-		ResolveIdentity(context.Background(), Identity{}, nil)
+		ResolveIdentity(context.Background(), Identity{}, nil, log)
 
 		out := buf.String()
 		for _, want := range []string{"log-proj", "europe-west1", "log-cluster", sourceMetadata} {
@@ -318,9 +322,9 @@ func TestResolveIdentityLogsTheResolvedTripleAndTheTierThatProducedIt(t *testing
 
 	t.Run("an unresolved identity warns and names every key that would fix it", func(t *testing.T) {
 		metadataServer(t, nil)
-		buf := captureLogs(t)
+		log, buf := captureLogs(t)
 
-		ResolveIdentity(context.Background(), Identity{}, nil)
+		ResolveIdentity(context.Background(), Identity{}, nil, log)
 
 		out := buf.String()
 		if !strings.Contains(out, "level=WARN") {

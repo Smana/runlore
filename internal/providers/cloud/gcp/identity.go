@@ -158,17 +158,25 @@ func resolveIdentity(ctx context.Context, cfg Identity, meta metadataSource, nod
 // ResolveIdentity resolves the GCP scope for this process and logs what it found.
 //
 // cfg carries whatever cloud.gcp.* stated; nodes is an optional reader for a cluster
-// node, and may be nil.
+// node, and may be nil. log is the application's logger and must not be nil.
 //
-// The log line is emitted here rather than in the resolver so that the resolver stays a
-// pure function of its inputs, and because this is the once-per-process call: RunLore
+// The logger is a parameter rather than the package-level slog default, which is what
+// this used. Nothing in this repo calls slog.SetDefault — serve builds its own logger
+// and the chart defaults to JSON on stdout — so those lines went to Go's default
+// handler instead: plain text on stderr, at the default level, outside the pipeline
+// every neighbouring line lands in. That made the one field an operator is told to grep
+// for (`source`, to settle which tier resolved the scope) invisible to the query the
+// docs prescribe.
+//
+// The line is emitted here rather than in the resolver so that the resolver stays a pure
+// function of its inputs, and because this is the once-per-process call: RunLore
 // resolves the scope during wiring and then reuses it for every investigation, so one
 // line at startup is a complete record. It reports the tier alongside the triple
 // because the triple alone cannot be checked. Autodetection landing on a neighbouring
 // cluster in the same project produces answers that are confidently about the wrong
 // cluster and indistinguishable from a quiet one, and the tier is the only part of the
 // line that says where the scope came from.
-func ResolveIdentity(ctx context.Context, cfg Identity, nodes NodeLookup) Identity {
+func ResolveIdentity(ctx context.Context, cfg Identity, nodes NodeLookup, log *slog.Logger) Identity {
 	id := resolveIdentity(ctx, cfg, liveMetadata{}, nodes)
 
 	attrs := []any{
@@ -182,11 +190,11 @@ func ResolveIdentity(ctx context.Context, cfg Identity, nodes NodeLookup) Identi
 		// is strictly required. This line names all three because an operator reading
 		// it has to set the ones autodetection missed, and being told about
 		// cloud.gcp.project alone would earn a second restart for the location.
-		slog.Warn("gcp: could not resolve project, location or cluster; "+
+		log.Warn("gcp: could not resolve project, location or cluster; "+
 			"set cloud.gcp.project, cloud.gcp.location and cloud.gcp.cluster_name", attrs...)
 		return id
 	}
-	slog.Info("gcp: resolved cloud identity", attrs...)
+	log.Info("gcp: resolved cloud identity", attrs...)
 	return id
 }
 
@@ -199,19 +207,25 @@ func ResolveIdentity(ctx context.Context, cfg Identity, nodes NodeLookup) Identi
 // startup log line reporting source=metadata-server settles that; source=node-provider-id
 // says this tier earned its place.
 //
+// It is WIRED: internal/app passes a NodeLookup backed by the cluster reader, so that
+// log line can actually be produced. It was briefly not, and the difference matters —
+// with the argument hardwired to nil the tier could never contribute, so the experiment
+// this block exists to run could never return a positive result, and the removal
+// criterion below could never be met either way.
+//
 // To remove it once tier 2 is proven, three edits, all of which the compiler will point
 // at:
 //
 //  1. Delete everything below this banner.
 //  2. Delete the applyNodeTier call in resolveIdentity.
 //  3. Drop the nodes parameter from resolveIdentity and ResolveIdentity, and the
-//     argument wherever ResolveIdentity is called.
+//     argument wherever ResolveIdentity is called — then drop the "nodes" RBAC rule
+//     from the chart's ClusterRole, which exists only for this tier.
 //
-// Those three are the whole footprint: above the banner, tier 3 appears only as that
-// parameter and that statement. No tier-1 or tier-2 behaviour changes when it goes,
-// because the fields it fills are the fields tier 2 fills, by the same per-field rule —
-// removing it can only turn a resolved field back into an empty one, which New already
-// refuses with a message naming the config key.
+// Above the banner, tier 3 appears only as that parameter and that statement. No tier-1
+// or tier-2 behaviour changes when it goes, because the fields it fills are the fields
+// tier 2 fills, by the same per-field rule — removing it can only turn a resolved field
+// back into an empty one, which New already refuses with a message naming the config key.
 // ---------------------------------------------------------------------------
 
 // sourceNode marks an identity that needed the node fallback.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,13 +51,30 @@ type gapiError struct {
 // nothing and a lookup that was never issued produce the same silence in the returned
 // lines, and the difference between them is the difference between evidence and its
 // absence.
+// The mutex is required, not defensive: describeMIGs queries instance groups
+// CONCURRENTLY, so this handler runs on several goroutines at once and an unguarded
+// append here is a real data race that -race fails on.
 type healthServer struct {
 	*httptest.Server
+	mu    sync.Mutex
 	paths []string
 }
 
+func (s *healthServer) record(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paths = append(s.paths, path)
+}
+
+// requestedPaths returns a snapshot, so callers iterate without holding the lock.
+func (s *healthServer) requestedPaths() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.paths...)
+}
+
 func (s *healthServer) requested(frag string) bool {
-	for _, p := range s.paths {
+	for _, p := range s.requestedPaths() {
 		if strings.Contains(p, frag) {
 			return true
 		}
@@ -70,7 +88,7 @@ func healthClient(t *testing.T, id Identity, routes ...route) (*Client, *healthS
 	t.Helper()
 	srv := &healthServer{}
 	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		srv.paths = append(srv.paths, r.URL.Path)
+		srv.record(r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		for _, rt := range routes {
 			if !strings.Contains(r.URL.Path, rt.frag) {

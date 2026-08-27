@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"time"
 
 	logging "google.golang.org/api/logging/v2"
 
+	"github.com/Smana/runlore/internal/gcplog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -78,26 +78,22 @@ var rpcCodeName = map[int64]string{
 // difference from the AWS lens. CloudTrail accepts exactly one LookupAttribute, already
 // spent on ResourceName or ReadOnly, so AWS filters rejected calls in the client and has
 // to bound the scan (maxFailureScanPages in cloudtrail.go) because a sparse failure sits
-// behind pages of successful churn. Cloud Logging composes clauses freely, so failed_only
-// costs nothing here: the cap is spent entirely on rejected calls, there is no scan
-// budget to bound, and no budget note to tell two kinds of partial result apart. (The
-// kept set is still re-checked against each entry's own status in the loop below, which
-// fetches nothing extra; the reason is there.)
+// behind pages of successful churn. Cloud Logging composes clauses freely, so the cap
+// here is usually spent entirely on rejected calls.
+//
+// "Usually" is why the read is still page-budgeted (gcplog.Walk). failed_only's
+// cheapness rests on a promise about how Cloud Logging's "!=" treats an ABSENT field,
+// and a successful AuditLog omits status entirely. If that promise ever bends, the
+// server returns successes, the client-side re-check below drops every one of them, and
+// a loop whose only exits were "cap bound" and "no more pages" would follow the token
+// across the whole window — hundreds of round-trips inside one tool call. The budget
+// converts that from a dead investigation into a bounded partial answer that says so.
 //
 // Cloud Audit Logs lag well under a minute, so unlike CloudTrail's ~15 minutes a narrow
 // window is not itself a reason to miss a change that just happened.
 func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w providers.TimeWindow, f providers.CloudChangeFilter) ([]providers.Change, error) {
-	filter := fmt.Sprintf(`logName=("projects/%s/logs/%s" OR "projects/%s/logs/%s")`,
-		c.project, activityLog, c.project, systemEventLog)
-	// RFC3339Nano rather than RFC3339: the window's End is a time.Now() carrying
-	// sub-second precision, and truncating it moves the boundary backwards over exactly
-	// the newest events the cap is there to keep.
-	if !w.Start.IsZero() {
-		filter += fmt.Sprintf(` AND timestamp>="%s"`, w.Start.Format(time.RFC3339Nano))
-	}
-	if !w.End.IsZero() {
-		filter += fmt.Sprintf(` AND timestamp<="%s"`, w.End.Format(time.RFC3339Nano))
-	}
+	filter := gcplog.WindowFilter(fmt.Sprintf(`logName=("projects/%s/logs/%s" OR "projects/%s/logs/%s")`,
+		c.id.Project, activityLog, c.id.Project, systemEventLog), w)
 	if sel.Name != "" {
 		filter += fmt.Sprintf(` AND protoPayload.resourceName:%q`, sel.Name)
 	}
@@ -106,73 +102,69 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	}
 
 	var changes []providers.Change
-	token := ""
-	// Page until the cap binds or the stream is exhausted. A single List returns one
-	// page, so without paging a busy window is silently cut to whatever fit in it —
-	// and "silently" is the problem, since the short list is indistinguishable from a
-	// quiet control plane. Nothing else bounds the loop, and nothing else needs to:
-	// every entry returned already matches, so pages are never spent skipping over
-	// successes the way the AWS failure scan must, and the window plus the caller's
-	// context deadline bound the read from outside.
-	for {
-		resp, err := c.entries.List(ctx, &logging.ListLogEntriesRequest{
-			ResourceNames: []string{"projects/" + c.project},
-			Filter:        filter,
-			OrderBy:       "timestamp desc",
-			// Over-collect by one so a single page settles whether the cap is BINDING
-			// (more matched) or the result is merely exactly full. Asking for the cap
-			// exactly would need a second round-trip to tell those apart.
-			PageSize:  c.maxEvents + 1,
-			PageToken: token,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list audit log entries: %w", err)
+	res, err := gcplog.Walk(ctx, c.entries, gcplog.Query{
+		Project: c.id.Project,
+		Filter:  filter,
+		Cap:     int64(c.maxEvents),
+	}, func(e *logging.LogEntry) bool {
+		p, ok := decodeAudit(e)
+		if !ok {
+			return false // not an AuditLog payload; skip it rather than fail the query
 		}
-		for _, e := range resp.Entries {
-			if e == nil {
-				continue
-			}
-			p, ok := decodeAudit(e)
-			if !ok {
-				continue // not an AuditLog payload; skip it rather than fail the query
-			}
-			// The server-side clause is what makes failed_only cheap, but it rests on a
-			// promise about how Cloud Logging's "!=" treats an ABSENT field, and a
-			// successful AuditLog omits status entirely. If that promise ever bends the
-			// whole window arrives labelled as rejected — the exact inversion the flag
-			// exists to prevent — so the answer is also checked against the entry's own
-			// status. One field, read once: the filter and the FAILED annotation cannot
-			// disagree about what failed.
-			if f.FailedOnly && p.Status.Code == 0 {
-				continue
-			}
-			changes = append(changes, c.entryToChange(e, p))
+		// The server-side clause is what makes failed_only cheap, but it rests on a
+		// promise about how Cloud Logging's "!=" treats an ABSENT field, and a
+		// successful AuditLog omits status entirely. If that promise ever bends the
+		// whole window arrives labelled as rejected — the exact inversion the flag
+		// exists to prevent — so the answer is also checked against the entry's own
+		// status. One field, read once: the filter and the FAILED annotation cannot
+		// disagree about what failed.
+		//
+		// Returning false rather than counting it is what keeps the cap honest: an
+		// entry filtered out here must not consume the budget, or a selective query
+		// would report itself truncated on its first page.
+		if f.FailedOnly && p.Status.Code == 0 {
+			return false
 		}
-		if int64(len(changes)) > c.maxEvents || resp.NextPageToken == "" {
-			break
-		}
-		token = resp.NextPageToken
+		changes = append(changes, c.entryToChange(e, p))
+		return true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list audit log entries: %w", err)
 	}
 
 	// Sort newest-first BEFORE capping, so the cap keeps the newest events regardless
 	// of what order the API returned them in.
 	sort.SliceStable(changes, func(i, j int) bool { return changes[i].When.After(changes[j].When) })
-	if int64(len(changes)) > c.maxEvents {
+	if len(changes) > c.maxEvents {
 		changes = changes[:c.maxEvents]
 		// Appended AFTER the sort and the cap. The note carries no When, so appending
 		// it any earlier would sort it among events from 1970 — last on a good day, and
 		// in the middle of the list as soon as anything else lacks a timestamp — and
 		// the cap would then slice off a real event to make room for it.
-		changes = append(changes, providers.ChangeNote(providers.EngineGCP, truncatedNote(c.maxEvents)))
+		changes = append(changes, providers.ChangeNote(providers.EngineGCP,
+			providers.ChangeTruncatedNote(int64(c.maxEvents))))
+	} else if res.PageBudgetSpent {
+		// A DIFFERENT partial result from the one above, and it has to read differently.
+		// The cap was never reached, yet the stream was not exhausted either: the filter
+		// matched far more than it kept. Reporting this as an ordinary truncation would
+		// tell the model to narrow a window that is not the problem, and reporting
+		// nothing would present a page-budgeted read as a complete one.
+		changes = append(changes, providers.ChangeNote(providers.EngineGCP, fmt.Sprintf(
+			"partial view: stopped after %d pages of Cloud Audit Logs with the stream still "+
+				"open and only %d matching entr%s kept — the filter matched far more than it "+
+				"kept, so treat silence here as unproven rather than clean",
+			res.Pages, res.Kept, plural(res.Kept, "y", "ies"))))
 	}
 	return changes, nil
 }
 
-// truncatedNote is what the cap says: more events matched than were kept, so the answer
-// is among the newest and the search should be narrowed. Worded exactly as the AWS
-// lens words it (cloudtrail.go) so a partial view reads the same on either cloud.
-func truncatedNote(limit int64) string {
-	return fmt.Sprintf("results truncated at %d — more events matched; narrow the window or resource", limit)
+// plural picks a suffix for n. Inline-able, but the alternative at the one call site is
+// a message that says "1 entries".
+func plural(n int64, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // decodeAudit decodes an entry's AuditLog protoPayload. ok=false means the payload was
@@ -205,15 +197,18 @@ func (c *Client) entryToChange(e *logging.LogEntry, p auditPayload) providers.Ch
 		ToRev:     e.InsertId, // stable handle for the model's change_ref
 		Workload: providers.Workload{
 			Name:    p.ResourceName,
-			Account: c.project,
+			Account: c.id.Project,
 		},
 		Source: providers.SourceRef{Path: renderCall(p)},
 	}
-	if t, err := time.Parse(time.RFC3339, e.Timestamp); err == nil {
-		ch.When = t
-	}
+	ch.When = gcplog.EntryTime(e.Timestamp)
 	if e.Resource != nil {
-		ch.Workload.Kind = e.Resource.Type
+		// Qualified, not raw. A GCP monitored-resource type ("gke_nodepool") carries no
+		// character that distinguishes it from a Kubernetes kind, and downstream
+		// consumers have to tell those apart to know whether a namespace is a fact
+		// about the object. providers.CloudKind marks it once, here, where the answer
+		// is known.
+		ch.Workload.Kind = providers.CloudKind(providers.EngineGCP, e.Resource.Type)
 		// GCP labels the scope differently per resource type: a regional resource
 		// (gke_cluster, gke_nodepool) carries "location" and a zonal one (gce_instance)
 		// carries "zone". Reading only one of them leaves half the changes with no
@@ -239,12 +234,8 @@ func (c *Client) entryToChange(e *logging.LogEntry, p auditPayload) providers.Ch
 // reads as a caller whose identity was lost, which is a different and far more alarming
 // claim than "nobody called this".
 func renderCall(p auditPayload) string {
-	path := p.MethodName
-	if p.AuthenticationInfo.PrincipalEmail != "" {
-		path += " by " + p.AuthenticationInfo.PrincipalEmail
-	}
 	if p.Status.Code == 0 {
-		return path
+		return providers.CallPath(p.MethodName, p.AuthenticationInfo.PrincipalEmail, "", "")
 	}
 	name, ok := rpcCodeName[p.Status.Code]
 	if !ok {
@@ -252,9 +243,5 @@ func renderCall(p auditPayload) string {
 		// actionable; dropping it would turn a failure into a silent success.
 		name = fmt.Sprintf("code %d", p.Status.Code)
 	}
-	path += " — FAILED: " + name
-	if p.Status.Message != "" {
-		path += " (" + p.Status.Message + ")"
-	}
-	return path
+	return providers.CallPath(p.MethodName, p.AuthenticationInfo.PrincipalEmail, name, p.Status.Message)
 }

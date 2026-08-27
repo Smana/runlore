@@ -4,12 +4,15 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"google.golang.org/api/option"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // preflightClient wires a Client to a fake Cloud Logging that answers every request
@@ -41,17 +44,37 @@ func preflightClient(t *testing.T, id Identity, status int, body string) *Client
 // to carry the three parts operators most often get wrong: the project NUMBER, the
 // namespace and the KSA.
 func TestPreflightPrintsAPastableBindingOnDenial(t *testing.T) {
-	t.Setenv("POD_NAMESPACE", "runlore")
-	t.Setenv("POD_SERVICE_ACCOUNT", "runlore")
-
-	c := preflightClient(t, Identity{Project: "my-proj", ProjectNumber: "123456789012"},
-		http.StatusForbidden, `{"error":{"code":403,"message":"Permission 'logging.logEntries.list' denied"}}`)
+	// Injected rather than set as process environment: pod identity is resolved by
+	// internal/app and handed over on Identity, so a test states it the same way
+	// production does instead of reaching for t.Setenv.
+	c := preflightClient(t, Identity{
+		Project:           "my-proj",
+		ProjectNumber:     "123456789012",
+		PodNamespace:      "runlore",
+		PodServiceAccount: "runlore",
+	}, http.StatusForbidden, `{"error":{"code":403,"message":"Permission 'logging.logEntries.list' denied"}}`)
 
 	err := c.Preflight(context.Background())
 	if err == nil {
 		t.Fatal("Preflight must fail when Cloud Logging denies the read")
 	}
 	msg := err.Error()
+	if !providers.CloudPreflightDenied(err) {
+		t.Errorf("a 403 must report as a DENIAL, or the caller cannot tell it from a startup blip "+
+			"and will disable the lens for both: %v", err)
+	}
+	var denied *DeniedError
+	if !errors.As(err, &denied) {
+		t.Fatalf("a denial must carry the summary and the command as separate fields, so the "+
+			"command can be written somewhere it stays pastable: %v", err)
+	}
+	if strings.Contains(denied.Summary, "\n") {
+		t.Errorf("the summary is logged as a structured field and must stay single-line, got:\n%s",
+			denied.Summary)
+	}
+	if !strings.Contains(denied.Command, "add-iam-policy-binding") {
+		t.Errorf("the command field must carry the pastable binding, got:\n%s", denied.Command)
+	}
 	for _, want := range []struct{ name, sub string }{
 		{"the role to grant is named, so the fix does not need looking up", "roles/logging.viewer"},
 		{"the command is pastable rather than described", "add-iam-policy-binding"},

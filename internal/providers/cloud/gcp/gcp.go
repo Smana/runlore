@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 
 	compute "google.golang.org/api/compute/v1"
 	container "google.golang.org/api/container/v1"
@@ -35,14 +34,13 @@ import (
 	logging "google.golang.org/api/logging/v2"
 	"google.golang.org/api/option"
 
+	"github.com/Smana/runlore/internal/gcplog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// defaultMaxEvents bounds how many entries a single lens returns. Deliberately the same
-// budget as the AWS client, so neither cloud floods a model's context where the other
-// would not — an investigation's conclusions should not depend on which cloud it ran
-// against.
-const defaultMaxEvents = 25
+// defaultMaxEvents is the shared cross-cloud budget; see providers.DefaultCloudMaxEvents
+// for why it is not a per-provider choice.
+const defaultMaxEvents = providers.DefaultCloudMaxEvents
 
 // Identity is the resolved GCP scope every call in this package is addressed to.
 //
@@ -63,6 +61,18 @@ type Identity struct {
 	// its absence degrades a hint, not a query.
 	ProjectNumber string
 
+	// PodNamespace and PodServiceAccount name the Kubernetes ServiceAccount this
+	// process runs as, used only to render the principal:// binding hint on a denial.
+	//
+	// Supplied rather than read from the environment here, for the reason the rest of
+	// this struct is supplied: internal/app already owns the question "who is this pod"
+	// and answers it better (PodNamespace falls back to the service-account mount, which
+	// exists in every pod even when the chart's downward-API value does not). A second
+	// copy inside the provider answered it worse and could not be injected by a test.
+	// Either may be empty; the renderer substitutes a visible placeholder.
+	PodNamespace      string
+	PodServiceAccount string
+
 	// Source names which tier resolved this triple, for the line logged at startup.
 	// Worth carrying because the tiers disagree silently: autodetection can land on a
 	// neighbouring cluster in the same project and every subsequent answer is then
@@ -71,38 +81,22 @@ type Identity struct {
 	Source string
 }
 
-// entriesAPI is the narrow slice of Cloud Logging this provider uses.
-//
-// One method, because that is genuinely all the audit lens needs, and because a
-// narrower interface is what lets a test assert on the request that was built rather
-// than on the response that came back — the filter string is the part of an audit
-// query that is easy to get wrong and impossible to see from the outside.
-type entriesAPI interface {
-	List(ctx context.Context, req *logging.ListLogEntriesRequest) (*logging.ListLogEntriesResponse, error)
-}
-
-// loggingEntries adapts the generated Logging service to entriesAPI. The generated
-// call is a builder chain (Entries.List(req).Context(ctx).Do()), which cannot be
-// satisfied by a fake; this collapses it to one ordinary method that can.
-type loggingEntries struct{ svc *logging.Service }
-
-func (l loggingEntries) List(ctx context.Context, req *logging.ListLogEntriesRequest) (*logging.ListLogEntriesResponse, error) {
-	return l.svc.Entries.List(req).Context(ctx).Do()
-}
-
 // Client is the GCP cloud provider.
 type Client struct {
-	entries   entriesAPI
+	entries   gcplog.EntriesAPI
 	container *container.Service
 	compute   *compute.Service
 
-	project     string
-	location    string
-	clusterName string
-	projectNum  string
-	identitySrc string
+	// id is held whole rather than copied out field by field. The flat copy meant
+	// adding an Identity field required editing the struct, this struct and New, with
+	// the compiler flagging none of them, and it renamed Source to identitySrc so a
+	// reader had to map two vocabularies for one value.
+	id Identity
 
-	maxEvents int64
+	// maxEvents is int, matching cloud/aws's field, so a reader moving between the two
+	// providers is not re-learning the type. The one place a wire type needs int64
+	// converts there.
+	maxEvents int
 }
 
 // New builds a Client from Application Default Credentials.
@@ -135,21 +129,18 @@ func New(ctx context.Context, id Identity, opts ...option.ClientOption) (*Client
 		return nil, fmt.Errorf("new compute service: %w", err)
 	}
 	return &Client{
-		entries:     loggingEntries{svc: lsvc},
-		container:   csvc,
-		compute:     msvc,
-		project:     id.Project,
-		location:    id.Location,
-		clusterName: id.ClusterName,
-		projectNum:  id.ProjectNumber,
-		identitySrc: id.Source,
-		maxEvents:   defaultMaxEvents,
+		entries:   gcplog.Entries(lsvc),
+		container: csvc,
+		compute:   msvc,
+		id:        id,
+		maxEvents: defaultMaxEvents,
 	}, nil
 }
 
 var (
-	_ providers.CloudProvider  = (*Client)(nil)
-	_ providers.CloudDescriber = (*Client)(nil)
+	_ providers.CloudProvider    = (*Client)(nil)
+	_ providers.CloudDescriber   = (*Client)(nil)
+	_ providers.CloudPreflighter = (*Client)(nil)
 )
 
 // CloudVocabulary describes Cloud Audit Logs and GKE, so the cloud tools never tell a
@@ -208,6 +199,12 @@ func (Client) CloudVocabulary() providers.CloudVocabulary {
 			"(stockouts, quota and IP exhaustion), and — when given a Compute Engine instance name — " +
 			"its instance status.",
 		InstanceArg: "optional Compute Engine instance name",
+		// GCP has no "scaling activities"; the skeleton used to say so anyway. What
+		// since_minutes actually scopes here is instance-group ERROR filtering
+		// (errorInWindow in resourcehealth.go).
+		HealthWindowNote: "scopes the instance-group-error lookback to the incident window " +
+			"(default: recent errors).",
+		HealthWindowArg: "scope instance-group-error lookback to the last N minutes",
 	}
 }
 
@@ -228,28 +225,56 @@ func (Client) CloudVocabulary() providers.CloudVocabulary {
 // calls for an answer that already arrives where it is needed.
 func (c *Client) Preflight(ctx context.Context) error {
 	_, err := c.entries.List(ctx, &logging.ListLogEntriesRequest{
-		ResourceNames: []string{"projects/" + c.project},
-		Filter:        fmt.Sprintf(`logName="projects/%s/logs/%s"`, c.project, activityLog),
+		ResourceNames: []string{"projects/" + c.id.Project},
+		Filter:        fmt.Sprintf(`logName="projects/%s/logs/%s"`, c.id.Project, activityLog),
 		PageSize:      1,
 	})
 	if err == nil {
 		return nil
 	}
 	if !deniedStatus(err) {
-		return fmt.Errorf("cloud logging read failed on project %s: %w", c.project, err)
+		// Deliberately NOT wrapped as denied. This is a 503, a DNS failure or a
+		// deadline, and the caller must keep the lens registered for it — wiring runs
+		// once per process, so treating a startup blip as permanent would leave the
+		// cloud tools absent until someone restarts the pod.
+		return fmt.Errorf("cloud logging read failed on project %s: %w", c.id.Project, err)
 	}
 	// Lowercase and no trailing period: staticcheck ST1005 and revive's error-strings
 	// are both in this repo's gate, and neither exempts "Cloud".
-	return fmt.Errorf("cloud logging read denied on project %s: "+
-		"RunLore authenticated as ServiceAccount %s/%s, which no GCP role is bound to\n\n"+
-		"  gcloud projects add-iam-policy-binding %s \\\n"+
-		"    --role=roles/logging.viewer \\\n"+
-		"    --member=%q\n\n"+
-		"repeat for roles/container.clusterViewer and roles/compute.viewer; "+
-		"note the project NUMBER in the member string — the project ID does not work there",
-		c.project, podNamespace(), podServiceAccount(),
-		c.project, c.principal())
+	return &DeniedError{
+		Summary: fmt.Sprintf("cloud logging read denied on project %s: RunLore authenticated as "+
+			"ServiceAccount %s/%s, which no GCP role is bound to",
+			c.id.Project, c.podNamespace(), c.podServiceAccount()),
+		Command: fmt.Sprintf("gcloud projects add-iam-policy-binding %s \\\n"+
+			"    --role=roles/logging.viewer \\\n"+
+			"    --member=%q\n\n"+
+			"repeat for roles/container.clusterViewer and roles/compute.viewer; "+
+			"note the project NUMBER in the member string — the project ID does not work there",
+			c.id.Project, c.principal()),
+	}
 }
+
+// DeniedError is a preflight authorization failure, with the human summary and the
+// pastable remediation command kept as SEPARATE fields.
+//
+// Separate because of how the two are consumed. The summary belongs in a structured log
+// line; the command must survive being read by a human, and the chart defaults to JSON
+// logging, where a multi-line value embedded in a message arrives as one
+// escape-sequence-laden string with "\n" and "\\" written out literally. That is
+// unpastable, which removes the only reason to print the command at all. Splitting them
+// lets the caller log the summary and write the command where it stays copyable.
+//
+// Error() still renders both, so a caller that only has %v loses nothing.
+type DeniedError struct {
+	Summary string
+	Command string
+}
+
+func (e *DeniedError) Error() string { return e.Summary + "\n\n  " + e.Command }
+
+// Unwrap reports this as the permanent, authorization kind of preflight failure, so
+// providers.CloudPreflightDenied answers true for it and only for it.
+func (e *DeniedError) Unwrap() error { return providers.ErrCloudPreflightDenied }
 
 // deniedStatus reports whether err is an authorization failure rather than any other
 // API error. 401 counts alongside 403 because a pod with no usable ADC at all fails
@@ -276,29 +301,31 @@ func (c *Client) principal() string {
 	// "projects//locations/…" — which gcloud accepts and which never matches. An
 	// obviously-a-template placeholder is the one thing worse than no command that is
 	// still better than a silently wrong one.
-	num := c.projectNum
-	if num == "" {
-		num = "<project-number>"
-	}
+	num := orPlaceholder(c.id.ProjectNumber, "<project-number>")
 	return fmt.Sprintf(
 		"principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/%s/sa/%s",
-		num, c.project, podNamespace(), podServiceAccount())
+		num, c.id.Project, c.podNamespace(), c.podServiceAccount())
 }
 
-// podNamespace and podServiceAccount read the downward-API values the Helm chart
-// injects. They fall back to a placeholder rather than an empty string so a command
-// printed outside a pod is visibly a template, instead of a subtly wrong binding that
-// looks complete.
-func podNamespace() string {
-	if v := os.Getenv("POD_NAMESPACE"); v != "" {
-		return v
-	}
-	return "<namespace>"
+// podNamespace and podServiceAccount render this pod's identity for the binding hint,
+// falling back to a placeholder rather than an empty string so a command printed
+// outside a pod is visibly a template instead of a subtly wrong binding that looks
+// complete.
+//
+// The values are resolved by the caller (see Identity); these only decide what an
+// absent one looks like.
+func (c *Client) podNamespace() string {
+	return orPlaceholder(c.id.PodNamespace, "<namespace>")
 }
 
-func podServiceAccount() string {
-	if v := os.Getenv("POD_SERVICE_ACCOUNT"); v != "" {
-		return v
+func (c *Client) podServiceAccount() string {
+	return orPlaceholder(c.id.PodServiceAccount, "<serviceaccount>")
+}
+
+// orPlaceholder returns v, or an obviously-a-template stand-in when v is empty.
+func orPlaceholder(v, placeholder string) string {
+	if v == "" {
+		return placeholder
 	}
-	return "<serviceaccount>"
+	return v
 }

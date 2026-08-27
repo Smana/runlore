@@ -185,7 +185,13 @@ func TestCloudChangesMapsAnAuditEntryOntoTheChangeModel(t *testing.T) {
 		{"the type is a cloud API call, not a GitOps sync", ch.Type, providers.ChangeCloudAPI},
 		{"ManagedBy carries the calling service", ch.ManagedBy, "container.googleapis.com"},
 		{"ToRev carries insertId as the model's change_ref handle", ch.ToRev, "ins-google.container.v1.ClusterManager.SetNodePoolSize-" + ts},
-		{"Workload.Kind carries the monitored resource type", ch.Workload.Kind, "gke_nodepool"},
+		// Engine-qualified, and that prefix is load-bearing rather than cosmetic. A bare
+		// "gke_nodepool" carries no character that distinguishes it from a Kubernetes
+		// kind, so notify could not tell whether a namespace was a fact about the object
+		// and dropped the resource identity from the card entirely. The ':' in the prefix
+		// is the one character no Kubernetes kind can contain.
+		{"Workload.Kind carries the monitored resource type, engine-qualified",
+			ch.Workload.Kind, "gcp::gke_nodepool"},
 		{"Workload.Name carries the full resource path", ch.Workload.Name,
 			"projects/my-proj/locations/europe-west1/clusters/prod/nodePools/default"},
 		{"Workload.Account carries the project the client is scoped to", ch.Workload.Account, "my-proj"},
