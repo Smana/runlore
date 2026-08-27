@@ -14,6 +14,38 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.16.0](https://github.com/Smana/runlore/compare/v0.15.0...v0.16.0) (2026-08-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **notify:** notify.silence.windows may now list more than 5 entries when notify.slack.silence_button is off. Nothing that validated before stops validating — the bound is only relaxed, so no working deployment breaks on upgrade. What to watch for: a Matrix-only deployment that adopts a longer preset list will fail validation at startup if notify.slack.silence_button is later enabled. The error names notify.silence.windows and the flag; trim the list to between 2 and 5 entries, or leave the flag off.
+
+### Features
+
+* **gcp:** add the GCP cloud provider — Cloud Audit Logs and GKE/MIG/Compute health ([#561](https://github.com/Smana/runlore/issues/561)) ([e0c75f2](https://github.com/Smana/runlore/commit/e0c75f20e4a7edcc5752a77d816fa25fd7e2ee58))
+* **investigate:** let cloud_what_changed ask for the failed calls only ([#551](https://github.com/Smana/runlore/issues/551)) ([1f5ece9](https://github.com/Smana/runlore/commit/1f5ece91d8764e82e66b0c8bc1a782d16009128b))
+* **notify:** silence an investigation from Slack or Matrix ([#556](https://github.com/Smana/runlore/issues/556)) ([e3a3ec0](https://github.com/Smana/runlore/commit/e3a3ec0977a226788f82bbb0bc7ce8fb6999c892))
+
+
+### Bug Fixes
+
+* **gcp:** allow the GKE metadata server by address, and warn when cloud config is inert ([#563](https://github.com/Smana/runlore/issues/563)) ([96688ac](https://github.com/Smana/runlore/commit/96688ac557e846655813fa4ceb1859e9d13197cd)), closes [#562](https://github.com/Smana/runlore/issues/562)
+* **investigate:** make a submitted finding account for its own verdict ([#550](https://github.com/Smana/runlore/issues/550)) ([741acae](https://github.com/Smana/runlore/commit/741acae0ab6612b1830c490a12631f6d3e3db48d))
+* **notify:** make the Slack silence control legible, public, and durable ([b68a503](https://github.com/Smana/runlore/commit/b68a5032b09549dbbc2f127bd1f4c010965aefdc))
+* **notify:** stop cutting "what changed" mid-word ([#552](https://github.com/Smana/runlore/issues/552)) ([621fe65](https://github.com/Smana/runlore/commit/621fe653445fb6c5093c46fc023d9d74e4f795fa))
+* **providers:** collapse a CronJob run suffix to its controller family ([#549](https://github.com/Smana/runlore/issues/549)) ([bb6a188](https://github.com/Smana/runlore/commit/bb6a188389c7f528aab0e0af31fe03f34962a68b))
+
+
+### Documentation
+
+* **silence:** correct stale references and document prune's clock assumption ([#557](https://github.com/Smana/runlore/issues/557)) ([6d6b7b8](https://github.com/Smana/runlore/commit/6d6b7b873aa633317ddd173929cac611523a5465))
+
+
+### Code Refactoring
+
+* **httpx:** one bounded drain idiom for every response body ([cfedfd4](https://github.com/Smana/runlore/commit/cfedfd4a431a8e0889fbde45adafdf2048523361))
+
 ## [0.15.0](https://github.com/Smana/runlore/compare/v0.14.0...v0.15.0) (2026-08-20)
 
 
