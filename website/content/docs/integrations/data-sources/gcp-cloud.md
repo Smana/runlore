@@ -32,10 +32,9 @@ cloud:
   provider: gcp
 ```
 
-This block parses today (`internal/config`'s decoder and validation both accept it — see
-`TestCloudGCPBlockIsFullyOptional`), but **has no effect yet**: nothing in `investigate.go` reads
-`cfg.Cloud.Provider == "gcp"`. Once wiring lands, nothing else will be needed on GKE: project,
-location and cluster name are all resolved from the metadata server. Set
+That is the whole configuration on GKE: `wireCloudProvider` in `internal/app/investigate.go`
+builds the provider and registers both cloud tools, and project, location and cluster name are all
+resolved from the metadata server. Set
 `cloud.gcp.{project,location,cluster_name}` only to override autodetection — off-cluster, or to
 scope reads to a project other than the one GKE runs in:
 
@@ -75,11 +74,15 @@ done
 
 **Use the project NUMBER, not the id, in the `principal://` string** — the `gcloud projects
 describe --format='value(projectNumber)'` call above resolves it. This is a classic footgun (every
-*other* field in that command takes the project id). By design, RunLore will generate this exact
-command from a denied preflight read rather than only documenting it — **that preflight does not
-exist yet**: `New()` in `internal/providers/cloud/gcp/gcp.go` makes no calls at construction time
-today. Get the number wrong before wiring lands and you won't hear about it until the lenses ship
-and you hit a bare 403 with nothing naming the principal that was presented.
+*other* field in that command takes the project id). You should not have to get this right from
+the documentation: RunLore's startup preflight makes one `entries.list` call and, on a denial,
+writes this exact command to stderr with the number already substituted. Get the number wrong and
+the pod tells you, at startup, instead of a bare 403 arriving mid-investigation with nothing
+naming the principal that was presented.
+
+The command goes to **stderr**, not the structured log. Under the chart's default JSON logging a
+multi-line value embedded in a log message arrives as one escaped string, backslash-continuations
+and all, which is not pastable — and being pastable is the only reason to generate it.
 
 **Roles required, in full — all read-only:**
 
@@ -88,27 +91,34 @@ and you hit a bare 403 with nothing naming the principal that was presented.
 - `roles/compute.viewer` — managed-instance-group errors and instance status, same tool
 
 Notably **not** `roles/logging.privateLogViewer` — that role is for Data Access audit logs, which
-this provider deliberately does not read (see Limitations below). This role list is a design
-decision, not something any code currently checks or enforces.
+this provider deliberately does not read (see Limitations below).
+
+Only the first of the three is checked at startup: `Preflight` makes one `entries.list` call and,
+on a 403/401, disables the cloud lens and writes a pastable `gcloud add-iam-policy-binding`
+command to stderr with the project **number** already substituted. The other two roles degrade
+per-sub-query at call time with a role-specific message in place, so a deployment granted one
+binding and not the other still gets the half that answered.
 
 ## Verify it locally
 
-**Not yet possible.** There is nothing to grep for today. `cloud.provider: gcp` registers no
-tools and `investigate.go` never reaches a branch that would log for it, so the natural instinct —
-tail the pod's logs after setting the config — finds nothing, and there's no error to explain why.
-Don't chase this until the wiring task lands.
-
-Once it does, expect the same shape AWS uses today:
+Two lines at startup, in the same shape AWS uses:
 
 ```bash
 kubectl -n runlore logs deploy/runlore | grep -E 'cloud provider enabled.*gcp'
+kubectl -n runlore logs deploy/runlore | grep 'resolved cloud identity'
 ```
 
-Per the design, that startup line will also carry an `identity_source` field naming which of the
-three identity-resolution tiers (explicit config, the GKE metadata server, the node's
-`providerID`) won — but neither the log field nor the resolver that would produce it
-(`internal/providers/cloud/gcp/identity.go`) resolves it. Treat both commands above
-as the interface it is today.
+The second carries a `source` field naming which of the three identity-resolution tiers won:
+`config`, `metadata-server`, or `node-provider-id`. That field is the point of the line — the
+resolved triple alone cannot be checked, because autodetection landing on a same-named cluster in
+a neighbouring region answers confidently about the wrong cluster and is indistinguishable from a
+quiet one.
+
+It also settles whether tier 3 is needed at all. `source=metadata-server` proves the GKE metadata
+server proxies `instance/attributes/cluster-location` to Pods on your cluster, which means the
+node fallback contributed nothing and can be removed along with the `nodes` RBAC rule it needs;
+`source=node-provider-id` proves it earned its place. If you run this on GKE, that one field is
+the most useful thing you can report back.
 
 ## Autopilot
 

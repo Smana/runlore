@@ -34,7 +34,7 @@ kubectl -n runlore logs deploy/runlore | grep -E 'tool=cloud_'
 ## Notes
 
 - **Opt-in** — `cloud.provider` is empty (disabled) by default; set it to `aws` to enable the cloud
-  tools. `aws` is the only supported value today.
+  tools. `aws` and `gcp` are the supported values; see [GCP Cloud](gcp-cloud.md) for the latter.
 - `region` defaults to `AWS_REGION` / IMDS when unset. `cluster_name` scopes nodegroup/ASG queries to
   your EKS cluster — set it, or those queries have nothing to filter on.
 - **Read-only IAM policy** — the Pod Identity / IRSA role needs: `cloudtrail:LookupEvents`,

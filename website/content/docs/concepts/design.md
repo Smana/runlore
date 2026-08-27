@@ -329,7 +329,8 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 > `CloudChanges` = Cloud Audit Logs `entries.list` over the `activity`/`system_event` streams,
 > `ResourceHealth` = GKE/MIG/Compute Engine describes, auth a Workload Identity **direct principal
 > binding** (no GSA, no ServiceAccount annotation) — but as of this writing only the client skeleton
-> and tool vocabulary exist; both lenses are stubs and nothing wires the provider into `serve` yet
+> and tool vocabulary exist; both lenses are implemented and `wireCloudProvider` wires the provider
+> into `serve`
 > (see the footnote above). Azure would follow the same shape too, once started. Steampipe and cloud
 > MCP servers remain available as optional MCP extensions.
 >
