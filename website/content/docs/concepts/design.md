@@ -325,13 +325,12 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 > cloud joins the same "what changed" timeline as Git diffs); `ResourceHealth` = EC2/ASG/EKS `Describe`.
 > Auth is **in-cluster identity** (EKS Pod Identity / IRSA via the default credential chain) — *not*
 > static keys, *not* Steampipe, *not* shelling out to cloud CLIs (both add heavy deps and break the
-> single-binary property). GCP (`internal/providers/cloud/gcp`) is being built to the same shape —
+> single-binary property). GCP (`internal/providers/cloud/gcp`) follows the same shape —
 > `CloudChanges` = Cloud Audit Logs `entries.list` over the `activity`/`system_event` streams,
 > `ResourceHealth` = GKE/MIG/Compute Engine describes, auth a Workload Identity **direct principal
-> binding** (no GSA, no ServiceAccount annotation) — but as of this writing only the client skeleton
-> and tool vocabulary exist; both lenses are implemented and `wireCloudProvider` wires the provider
-> into `serve`
-> (see the footnote above). Azure would follow the same shape too, once started. Steampipe and cloud
+> binding** (no GSA, no ServiceAccount annotation). Both lenses are implemented and
+> `wireCloudProvider` wires the provider into `serve`; what is missing is a run against a live
+> cluster (see the footnote above). Azure would follow the same shape too, once started. Steampipe and cloud
 > MCP servers remain available as optional MCP extensions.
 >
 > On Cilium clusters the Pod Identity credential endpoint is a host-network target (`169.254.170.23:80`),
