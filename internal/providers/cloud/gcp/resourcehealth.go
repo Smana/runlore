@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	compute "google.golang.org/api/compute/v1"
 	container "google.golang.org/api/container/v1"
 	"google.golang.org/api/googleapi"
 
@@ -38,24 +40,8 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, w p
 
 	migs, autopilot := c.describeCluster(ctx, add)
 
-	// On Autopilot the node layer is Google's, and the node-level sub-queries below
-	// answer questions the operator cannot act on. Skipping them silently would be the
-	// worse failure: an empty node-capacity section is indistinguishable from a healthy
-	// one, so a model investigating pending Pods would conclude capacity was fine on
-	// the evidence of a query that never ran. The skip is therefore stated.
-	//
-	// The skip is enforced here, at the call site, rather than inside each sub-query:
-	// one guard that is visible in the shape of the function cannot be half-honoured by
-	// a later change to either sub-query.
-	if autopilot {
-		add("NOTE: GKE Autopilot cluster — the node layer is Google-managed, so the " +
-			"instance-group error and instance-status lookups were SKIPPED. Their absence is " +
-			"not evidence that node capacity is healthy; it means this lens did not look.")
-		return lines, nil
-	}
-
-	c.describeMIGs(ctx, migs, w, add)
-	c.describeInstance(ctx, sel, add)
+	c.describeMIGs(ctx, migs, w, autopilot, add)
+	c.describeInstance(ctx, sel, autopilot, add)
 	return lines, nil
 }
 
@@ -299,13 +285,241 @@ func optional(format, v string) string {
 	return fmt.Sprintf(format, v)
 }
 
-// describeMIGs reports managed-instance-group errors — stockouts, quota and IP
-// exhaustion — and instance churn for the groups the node pools named. Not implemented
-// yet; it lands with the compute half of this lens.
-func (*Client) describeMIGs(context.Context, []string, providers.TimeWindow, func(string, ...any)) {
+// describeMIGs reports capacity failures and instance churn for the instance groups
+// describeCluster handed over. listErrors is the highest-value line this provider
+// emits: a stockout, an exhausted quota or an exhausted IP range stops a pool scaling
+// with no in-cluster symptom beyond Pods that stay Pending — the nodes simply never
+// arrive, and no Kubernetes object records why.
+//
+// It emits NOTHING when handed no groups. That case is reached two ways — a cluster
+// with no pools, and a cluster lookup that failed — and in the second the error line
+// above is already the answer. A "no instance-group errors" line under a cluster error
+// would answer a question nothing asked with a reassurance nothing established.
+//
+// autopilot only changes the wording of an EMPTY answer, never whether the lookup runs:
+// Autopilot node VMs and their groups live in the customer project and read with the
+// same roles/compute.viewer, so the finding is available and worth having. What
+// Autopilot does change is what silence means — Google manages that layer, so an empty
+// answer may be missing visibility rather than missing problems, and the two must not
+// render identically.
+func (c *Client) describeMIGs(ctx context.Context, migs []string, w providers.TimeWindow, autopilot bool, add func(string, ...any)) {
+	if len(migs) == 0 {
+		return
+	}
+	found := false
+	for _, self := range migs {
+		scope, name, zonal, ok := migName(self)
+		if !ok {
+			// Reported rather than skipped: an unparseable self-link means a group
+			// this lens cannot check, and silence would count as "checked, clean".
+			add("gke node group: cannot route a lookup for %q — unrecognised self-link shape", self)
+			found = true
+			continue
+		}
+		if c.migErrors(ctx, scope, name, zonal, w, add) {
+			found = true
+		}
+		if c.migChurn(ctx, scope, name, zonal, add) {
+			found = true
+		}
+	}
+	if found {
+		return
+	}
+	if autopilot {
+		add("gke node groups: no instance-group errors or instance churn reported — this is an " +
+			"Autopilot cluster, so the node layer is Google-managed and this may reflect limited " +
+			"visibility rather than an absence of problems")
+		return
+	}
+	add("gke node groups: no instance-group errors or instance churn in the window")
 }
 
-// describeInstance reports a single Compute Engine instance's status when the selector
-// names one. Not implemented yet; it lands with the compute half of this lens.
-func (*Client) describeInstance(context.Context, providers.Selector, func(string, ...any)) {
+// migErrors reads one group's recent failures, window-scoped. It reports whether it
+// wrote anything, so the caller can tell a quiet group from an unchecked one.
+func (c *Client) migErrors(ctx context.Context, scope, name string, zonal bool, w providers.TimeWindow, add func(string, ...any)) bool {
+	var (
+		errs []*compute.InstanceManagedByIgmError
+		err  error
+	)
+	if zonal {
+		var resp *compute.InstanceGroupManagersListErrorsResponse
+		resp, err = c.compute.InstanceGroupManagers.ListErrors(c.project, scope, name).Context(ctx).Do()
+		if resp != nil {
+			errs = resp.Items
+		}
+	} else {
+		var resp *compute.RegionInstanceGroupManagersListErrorsResponse
+		resp, err = c.compute.RegionInstanceGroupManagers.ListErrors(c.project, scope, name).Context(ctx).Do()
+		if resp != nil {
+			errs = resp.Items
+		}
+	}
+	if err != nil {
+		add("gke node group %s (%s): %s", name, scope, describeAPIError(err,
+			"the RunLore principal is missing roles/compute.viewer on project "+c.project+
+				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum),
+			fmt.Sprintf("no instance group %q in %q — a pool deleted mid-incident reads this way", name, scope)))
+		return true
+	}
+	wrote := false
+	for _, e := range errs {
+		if e == nil || e.Error == nil {
+			continue
+		}
+		if !errorInWindow(e.Timestamp, w) {
+			continue
+		}
+		add("gke node group %s (%s): %s%s%s", name, scope, e.Error.Code,
+			optional(" — %s", strings.TrimSpace(e.Error.Message)),
+			optional(" at %s", e.Timestamp))
+		wrote = true
+	}
+	return wrote
+}
+
+// errorInWindow keeps an error the window covers, and keeps one the API dated in a form
+// this lens cannot parse.
+//
+// Scoping mirrors activityBeforeWindow on the AWS side: a group retains its errors for
+// hours, so an unscoped read hands the model last night's stockout while today's
+// incident is a config change — a wrong cause that arrives looking well-evidenced.
+// Keeping the unparseable ones is the opposite trade: dropping a real capacity failure
+// over a timestamp format is the more expensive mistake, and the raw timestamp is
+// printed beside it so a reader can judge.
+func errorInWindow(ts string, w providers.TimeWindow) bool {
+	at, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return true
+	}
+	if !w.Start.IsZero() && at.Before(w.Start) {
+		return false
+	}
+	if !w.End.IsZero() && at.After(w.End) {
+		return false
+	}
+	return true
+}
+
+// migChurn reports instances mid-action, capped. A pool in a create-fail-recreate loop
+// can hold hundreds at once, and listing them all would spend the model's context on
+// one symptom while crowding out the listErrors line that says why they keep failing.
+// Only instances actually moving are listed: a steady instance is not churn, and
+// spending the budget on it would hide the ones that are.
+func (c *Client) migChurn(ctx context.Context, scope, name string, zonal bool, add func(string, ...any)) bool {
+	var (
+		insts []*compute.ManagedInstance
+		err   error
+	)
+	if zonal {
+		var resp *compute.InstanceGroupManagersListManagedInstancesResponse
+		resp, err = c.compute.InstanceGroupManagers.ListManagedInstances(c.project, scope, name).Context(ctx).Do()
+		if resp != nil {
+			insts = resp.ManagedInstances
+		}
+	} else {
+		var resp *compute.RegionInstanceGroupManagersListInstancesResponse
+		resp, err = c.compute.RegionInstanceGroupManagers.ListManagedInstances(c.project, scope, name).Context(ctx).Do()
+		if resp != nil {
+			insts = resp.ManagedInstances
+		}
+	}
+	if err != nil {
+		add("gke node group %s (%s) instances: %s", name, scope, describeAPIError(err,
+			"the RunLore principal is missing roles/compute.viewer on project "+c.project+
+				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum),
+			fmt.Sprintf("no instance group %q in %q", name, scope)))
+		return true
+	}
+	shown, moving := 0, 0
+	for _, mi := range insts {
+		if mi == nil || mi.CurrentAction == "" || mi.CurrentAction == "NONE" {
+			continue
+		}
+		moving++
+		if int64(shown) >= c.maxEvents {
+			continue
+		}
+		add("gke node group %s (%s): instance %s %s%s", name, scope, mi.Name, mi.CurrentAction,
+			optional(" (%s)", mi.InstanceStatus))
+		shown++
+	}
+	if over := moving - shown; over > 0 {
+		add("gke node group %s (%s): %d further instances mid-action, not listed", name, scope, over)
+	}
+	return shown > 0
+}
+
+// describeInstance answers the question a Node object cannot: a node NotReady because
+// its VM is TERMINATED and a node NotReady with a healthy VM under it are the same
+// symptom in Kubernetes and completely different incidents.
+//
+// aggregatedList rather than instances.get, because the selector carries a name and no
+// zone. get needs both, so reaching it would mean guessing a zone — and a wrong guess
+// 404s, which this lens renders as "that instance is gone": a false negative on exactly
+// the question being asked.
+func (c *Client) describeInstance(ctx context.Context, sel providers.Selector, autopilot bool, add func(string, ...any)) {
+	if sel.Name == "" {
+		return
+	}
+	resp, err := c.compute.Instances.AggregatedList(c.project).
+		Filter("name=" + sel.Name).Context(ctx).Do()
+	if err != nil {
+		add("compute instance %s: %s", sel.Name, describeAPIError(err,
+			"the RunLore principal is missing roles/compute.viewer on project "+c.project+
+				optional(" (project number %s — the form an IAM principal:// binding requires)", c.projectNum),
+			fmt.Sprintf("no instance %q in project %q", sel.Name, c.project)))
+		return
+	}
+	for scope, list := range resp.Items {
+		for _, in := range list.Instances {
+			if in == nil || in.Name != sel.Name {
+				continue
+			}
+			add("compute instance %s (%s): status=%s%s%s", in.Name,
+				strings.TrimPrefix(scope, "zones/"), in.Status,
+				optional(" (%s)", strings.TrimSpace(in.StatusMessage)),
+				optional(" last started %s", in.LastStartTimestamp))
+			return
+		}
+	}
+	if autopilot {
+		add("compute instance %s: not found in project %s — this is an Autopilot cluster, so the "+
+			"node layer is Google-managed and this may reflect limited visibility rather than a "+
+			"deleted instance", sel.Name, c.project)
+		return
+	}
+	add("compute instance %s: not found in project %s", sel.Name, c.project)
+}
+
+// migName splits a compute self-link into the scope its lookup must target, the group
+// name, and whether that scope is a zone.
+//
+// Routing is the whole point: a zonal group sent to the regional endpoint 404s, and a
+// 404 in this lens renders as "that group is gone" — a silent false negative on the
+// sub-query whose purpose is catching capacity failures.
+//
+// Both the instanceGroupManagers and instanceGroups spellings resolve, because the
+// container API has published both for the same field. A zonal instance group and the
+// manager owning it share a name, so the unmanaged spelling names the same manager
+// rather than being unparseable — and dropping it would silently skip the group.
+func migName(selfLink string) (scope, name string, zonal, ok bool) {
+	parts := strings.Split(selfLink, "/")
+	for i := len(parts) - 2; i > 0; i-- {
+		if parts[i] != "instanceGroupManagers" && parts[i] != "instanceGroups" {
+			continue
+		}
+		group := parts[i+1]
+		if group == "" || i < 2 {
+			return "", "", false, false
+		}
+		switch parts[i-2] {
+		case "zones":
+			return parts[i-1], group, true, true
+		case "regions":
+			return parts[i-1], group, false, true
+		}
+		return "", "", false, false
+	}
+	return "", "", false, false
 }
