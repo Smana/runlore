@@ -1098,11 +1098,25 @@ func wireCloudProvider(ctx context.Context, cfg *config.Config, tools *[]investi
 			"provider", cfg.Cloud.Provider, "err", err)
 		return nil
 	}
-	if !cloudPreflightOK(ctx, cfg.Cloud.Provider, cl, log) {
+	return enableCloudProvider(ctx, cfg.Cloud.Provider, cl, tools, log)
+}
+
+// enableCloudProvider probes an already-built provider and, if the verdict allows it,
+// registers the two cloud tools.
+//
+// Split from the construction above because everything here is provider-AGNOSTIC — it
+// reads nothing from config and knows nothing about any cloud — while construction is
+// the only part that reaches for credentials. Keeping them in one function meant the
+// only way to exercise this policy was to build a real provider first, and the GCP one
+// resolves Application Default Credentials: the test then passed or failed on whether
+// the machine running it happened to have `gcloud` configured. See
+// TestPreflightDistinguishesADenialFromABlip.
+func enableCloudProvider(ctx context.Context, provider string, cl providers.CloudProvider, tools *[]investigate.Tool, log *slog.Logger) providers.CloudProvider {
+	if !cloudPreflightOK(ctx, provider, cl, log) {
 		return nil
 	}
 	*tools = append(*tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
-	log.Info("cloud provider enabled", "provider", cfg.Cloud.Provider)
+	log.Info("cloud provider enabled", "provider", provider)
 	return cl
 }
 

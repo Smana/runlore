@@ -5,11 +5,17 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/providers"
+	gcpcloud "github.com/Smana/runlore/internal/providers/cloud/gcp"
 )
 
 // TestAnUnknownCloudProviderIsNotSilent pins the fix for a genuine silent failure.
@@ -66,6 +72,28 @@ func TestCloudContextOffStaysQuiet(t *testing.T) {
 	}
 }
 
+// stubCloud is a providers.CloudProvider whose only interesting behaviour is the verdict
+// its Preflight returns.
+//
+// A stub at the CloudProvider boundary, rather than a real GCP client, because
+// enableCloudProvider is provider-agnostic: it reads nothing from config and knows about
+// no cloud. Building a real provider to reach it made this an integration test of
+// Application Default Credentials by accident — see the comment on the test below.
+//
+// The lenses return nothing rather than panicking: registration must not call them, and a
+// nil answer says so without the failure mode being a stack trace in an unrelated test.
+type stubCloud struct{ preflight error }
+
+func (stubCloud) CloudChanges(context.Context, providers.Selector, providers.TimeWindow, providers.CloudChangeFilter) ([]providers.Change, error) {
+	return nil, nil
+}
+
+func (stubCloud) ResourceHealth(context.Context, providers.Selector, providers.TimeWindow) (providers.LogResult, error) {
+	return nil, nil
+}
+
+func (s stubCloud) Preflight(context.Context) error { return s.preflight }
+
 // TestPreflightDistinguishesADenialFromABlip pins the two-way contract, which is the
 // whole reason the preflight verdict is typed rather than a bare error.
 //
@@ -80,22 +108,28 @@ func TestCloudContextOffStaysQuiet(t *testing.T) {
 //
 // Neither case may kill the agent: one absent IAM binding must not become a total
 // outage of an agent that was working before the cloud lens was switched on.
+//
+// This drives enableCloudProvider with a stub rather than wireCloudProvider with a real
+// GCP client, and that is a correctness fix, not a convenience. The earlier version set
+// GCE_METADATA_HOST to a dead port intending "no credentials, so the probe fails at the
+// transport layer". On a machine with `gcloud` ADC configured — every developer laptop
+// that has ever touched GCP — ADC ignores the dead metadata host, the client builds on
+// the developer's own credentials, and the probe reaches the real Cloud Logging API and
+// earns a genuine 403 for a project they cannot read. That is correctly a DENIAL, so the
+// test failed locally and passed in CI, which is the worst way for a test to be wrong:
+// it read as a regression in the code under test. Whether a transport failure classifies
+// as inconclusive is now pinned where it belongs, against a fake Cloud Logging, in
+// gcp.TestPreflightReportsATransportFailureAsInconclusive.
 func TestPreflightDistinguishesADenialFromABlip(t *testing.T) {
-	// A credential/transport failure, not an authorization denial. Runs off-GCE against
-	// a port nothing listens on, so the token fetch fails fast rather than probing the
-	// real link-local address.
 	t.Run("an inconclusive preflight keeps the tools and says the lens is unverified", func(t *testing.T) {
-		t.Setenv("GCE_METADATA_HOST", "127.0.0.1:0")
 		var buf bytes.Buffer
 		var tools []investigate.Tool
 
-		cfg := &config.Config{}
-		cfg.Cloud.Provider = config.CloudGCP
-		cfg.Cloud.GCP.Project = "my-proj"
-		cfg.Cloud.GCP.Location = "europe-west1"
-		cfg.Cloud.GCP.ClusterName = "prod"
+		// Not wrapping ErrCloudPreflightDenied — the shape of a 503, a dropped packet or
+		// a deadline during a slow pod start.
+		cl := stubCloud{preflight: errors.New("cloud logging read failed on project my-proj: dial tcp: i/o timeout")}
 
-		got := wireCloudProvider(context.Background(), cfg, &tools, captureLog(&buf), nil)
+		got := enableCloudProvider(context.Background(), config.CloudGCP, cl, &tools, captureLog(&buf))
 
 		if got == nil {
 			t.Error("a non-authorization preflight failure disabled the lens for the process " +
@@ -113,6 +147,45 @@ func TestPreflightDistinguishesADenialFromABlip(t *testing.T) {
 		}
 	})
 
+	// The other direction. A denial is the one failure that genuinely cannot work until
+	// someone changes a binding, so it is the only one allowed to be permanent — and the
+	// pastable command is the entire reason the probe was worth adding.
+	t.Run("a denial drops the tools and prints a pastable binding", func(t *testing.T) {
+		var buf bytes.Buffer
+		var tools []investigate.Tool
+
+		cl := stubCloud{preflight: &gcpcloud.DeniedError{
+			Summary: "cloud logging read denied on project my-proj",
+			Command: "gcloud projects add-iam-policy-binding my-proj --role=roles/logging.viewer",
+		}}
+
+		stderr, restore := captureStderr(t)
+		got := enableCloudProvider(context.Background(), config.CloudGCP, cl, &tools, captureLog(&buf))
+		restore()
+
+		if got != nil {
+			t.Error("a denied preflight left the cloud lens enabled; every investigation that " +
+				"reaches for it now 403s mid-run instead")
+		}
+		if len(tools) != 0 {
+			t.Errorf("a denied preflight registered %d cloud tools", len(tools))
+		}
+		if out := buf.String(); !strings.Contains(out, "cloud tools disabled") {
+			t.Errorf("the log does not say the lens was disabled:\n%s", out)
+		}
+		// On stderr, NOT in the structured log: under the chart's default JSON logging a
+		// multi-line value arrives as one escaped string, and being pastable is the only
+		// reason to generate a command at all.
+		if e := stderr(); !strings.Contains(e, "add-iam-policy-binding") {
+			t.Errorf("the remediation command did not reach stderr, so the operator has "+
+				"nothing to paste:\n%s", e)
+		}
+		if strings.Contains(buf.String(), "add-iam-policy-binding") {
+			t.Error("the command was written to the structured log, where JSON escaping makes " +
+				"it unpastable")
+		}
+	})
+
 	// The startup probe must be deadlined. serve's context carries no deadline, and the
 	// chart's own network-policy comment documents that Cilium DROPS the metadata fetch
 	// rather than refusing it — a dropped packet hangs instead of erroring, and a pod
@@ -123,6 +196,39 @@ func TestPreflightDistinguishesADenialFromABlip(t *testing.T) {
 				"blocks serve indefinitely when egress is dropped rather than refused")
 		}
 	})
+}
+
+// captureStderr redirects os.Stderr to a pipe and returns a reader for what was written
+// plus the function that puts it back. Both are needed because the drain must happen
+// before the assertion and the restore before the next subtest.
+func captureStderr(t *testing.T) (func() string, func()) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+
+	done := make(chan string, 1)
+	go func() {
+		var b bytes.Buffer
+		_, _ = io.Copy(&b, r)
+		done <- b.String()
+	}()
+
+	var out string
+	var once sync.Once
+	restore := func() {
+		once.Do(func() {
+			os.Stderr = orig
+			_ = w.Close()
+			out = <-done
+			_ = r.Close()
+		})
+	}
+	t.Cleanup(restore)
+	return func() string { restore(); return out }, restore
 }
 
 // TestAnUnknownProviderNamesTheSupportedOnesFromTheFactoryTable pins that the "supported"

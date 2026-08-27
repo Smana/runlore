@@ -5,13 +5,17 @@ package gcp
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
+	logging "google.golang.org/api/logging/v2"
 	"google.golang.org/api/option"
 
+	"github.com/Smana/runlore/internal/gcplog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -138,5 +142,122 @@ func TestPreflightDoesNotBlameTheBindingForAnOutage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "backend unavailable") {
 		t.Errorf("the underlying error is not reported, leaving nothing to diagnose:\n%s", err)
+	}
+}
+
+// fakeEntries is a gcplog.EntriesAPI standing in for Cloud Logging, recording the
+// request it was handed and answering with a canned verdict.
+//
+// It exists alongside the httptest seam above rather than replacing it, because the two
+// stage different halves of the contract. httptest answers with an HTTP status, which is
+// what a 403 and a 503 are. A fake is the only way to stage the case where there is no
+// HTTP response AT ALL — a refused dial, a dropped packet, a deadline — and that case is
+// precisely the one the denial/blip split was written for: on Cilium the metadata fetch
+// is dropped rather than refused, which is a transport failure and never an HTTP status.
+// A test that reached the network to produce it would answer differently depending on
+// what credentials the machine running it happened to have.
+type fakeEntries struct {
+	got  *logging.ListLogEntriesRequest
+	resp *logging.ListLogEntriesResponse
+	err  error
+}
+
+func (f *fakeEntries) List(_ context.Context, req *logging.ListLogEntriesRequest) (*logging.ListLogEntriesResponse, error) {
+	f.got = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.resp != nil {
+		return f.resp, nil
+	}
+	return &logging.ListLogEntriesResponse{}, nil
+}
+
+// fakeEntriesClient wires a Client to e and nothing else. Preflight reads only the
+// logging seam, so the container/compute services stay nil here deliberately: a health
+// call on this Client must panic rather than quietly reach googleapis.com.
+func fakeEntriesClient(id Identity, e gcplog.EntriesAPI) *Client {
+	return &Client{entries: e, id: id, maxEvents: defaultMaxEvents}
+}
+
+// TestPreflightReportsATransportFailureAsInconclusive pins the half of the denial/blip
+// split that has no HTTP status behind it.
+//
+// deniedStatus answers from a *googleapi.Error's code, so anything that never produced a
+// response — a refused dial, a dropped packet, a deadline — must fall through to the
+// inconclusive branch. Getting this wrong is expensive and silent: wiring runs once per
+// process, so a dial failure classified as a denial disables the cloud lens for the whole
+// life of the pod and prints an IAM command for a binding that was already correct.
+func TestPreflightReportsATransportFailureAsInconclusive(t *testing.T) {
+	// The shape a dropped or refused connection actually arrives in — no googleapi.Error
+	// anywhere in the chain, because no HTTP exchange ever completed.
+	fake := &fakeEntries{err: &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Err: errors.New("connect: connection refused"),
+	}}
+	c := fakeEntriesClient(Identity{Project: "my-proj"}, fake)
+
+	err := c.Preflight(context.Background())
+	if err == nil {
+		t.Fatal("Preflight must report a failed read")
+	}
+	if providers.CloudPreflightDenied(err) {
+		t.Errorf("a dial failure was classified as an authorization denial; that disables the "+
+			"cloud lens until the pod is restarted, over a blip the provider would have "+
+			"survived with no probe at all:\n%s", err)
+	}
+	if strings.Contains(err.Error(), "add-iam-policy-binding") {
+		t.Errorf("a transport failure was diagnosed as a missing binding, sending the operator "+
+			"to fix IAM while the real fault goes unlooked-at:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("the underlying error is not reported, leaving nothing to diagnose:\n%s", err)
+	}
+}
+
+// TestPreflightDeadlineIsInconclusiveNotDenied covers the failure a dropped packet
+// produces once the caller's timeout fires, which is what internal/app bounds the probe
+// with. Same verdict as a refused dial, reached by a different path.
+func TestPreflightDeadlineIsInconclusiveNotDenied(t *testing.T) {
+	c := fakeEntriesClient(Identity{Project: "my-proj"}, &fakeEntries{err: context.DeadlineExceeded})
+
+	err := c.Preflight(context.Background())
+	if err == nil {
+		t.Fatal("Preflight must report a failed read")
+	}
+	if providers.CloudPreflightDenied(err) {
+		t.Errorf("a deadline was classified as an authorization denial:\n%s", err)
+	}
+}
+
+// TestPreflightProbesOneEntryOfTheActivityStream pins the request the probe actually
+// builds, which is the thing that decides whether it is cheap and whether it proves
+// anything.
+//
+// PageSize 1 because the probe is a permission check, not a read — a larger page bills
+// and delays startup for entries nobody looks at. The activity stream because that is
+// the one roles/logging.viewer has to cover for the changes lens to work; probing a
+// stream the lens does not read would pass while the lens still 403s. Neither is visible
+// from the outside, and the httptest tests above pass regardless of both.
+func TestPreflightProbesOneEntryOfTheActivityStream(t *testing.T) {
+	fake := &fakeEntries{}
+	c := fakeEntriesClient(Identity{Project: "my-proj"}, fake)
+
+	if err := c.Preflight(context.Background()); err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	if fake.got == nil {
+		t.Fatal("Preflight made no Cloud Logging call, so it proves nothing about the binding")
+	}
+	if got := fake.got.PageSize; got != 1 {
+		t.Errorf("the startup probe asks for %d entries; a permission check needs 1", got)
+	}
+	if want := []string{"projects/my-proj"}; !slices.Equal(fake.got.ResourceNames, want) {
+		t.Errorf("probe scoped to %v, want %v", fake.got.ResourceNames, want)
+	}
+	if !strings.Contains(fake.got.Filter, activityLog) {
+		t.Errorf("the probe does not read the activity stream, so it can pass while the "+
+			"changes lens still 403s: %q", fake.got.Filter)
 	}
 }
