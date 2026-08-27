@@ -126,4 +126,33 @@ spec:
             - port: "80"
               protocol: TCP
 {{- end }}
+{{- if .Values.networkPolicy.gcpWorkloadIdentity }}
+---
+# On Cilium clusters using GKE Workload Identity, ADC resolves its token from the GKE
+# metadata server on the node host network (link-local 169.254.169.254:80). Cilium
+# classifies it as the "host" entity, which a Kubernetes NetworkPolicy ipBlock cannot
+# match — so the token fetch is silently dropped.
+#
+# The failure does not look like a network failure. With no token, the Google client
+# reports a credentials error, and RunLore's preflight prints an IAM binding command
+# for it — so the operator adds a binding that is already correct, the symptom does not
+# move, and nothing anywhere mentions egress. Enable when cloud.provider is gcp AND the
+# cluster runs Cilium.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "runlore.fullname" . }}-gcp-workload-identity
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "runlore.selectorLabels" . | nindent 6 }}
+  egress:
+    - toEntities: [host]
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+{{- end }}
 {{- end }}

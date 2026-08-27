@@ -647,6 +647,22 @@ networkPolicy:
   # out of the box. true: DENY egress by default and allow ONLY the destinations declared
   # under `egress` below — you MUST then list your model/forge/observability endpoints, or
   # the agent cannot reach them. DNS is scoped to the cluster DNS service in BOTH modes.
+  # Cilium + GKE Workload Identity: ADC fetches its token from the GKE metadata server
+  # on the node host network (169.254.169.254:80), which Cilium classifies as the "host"
+  # entity — unmatchable by a NetworkPolicy ipBlock, so the fetch is silently dropped.
+  #
+  # Worth enabling deliberately rather than discovering: with no token the Google client
+  # reports a CREDENTIALS error, and RunLore's preflight answers that with an IAM binding
+  # command. So the operator adds a binding that was already right, the symptom does not
+  # move, and nothing in the chain mentions egress.
+  #
+  # Only needed on Cilium. Other CNIs match the link-local address with an ordinary
+  # ipBlock, which `strict: false` already permits.
+  gcpWorkloadIdentity: false
+  # In strict mode the three Google API hosts must also be reachable on 443 —
+  # logging.googleapis.com (the what-changed lens), container.googleapis.com and
+  # compute.googleapis.com (node health). Add them under `egress` below; the metadata
+  # toggle above covers only the token fetch, not the API calls it authenticates.
   strict: false
   egress:
     # DNS egress is scoped to the cluster DNS service by default — a safe, free hardening

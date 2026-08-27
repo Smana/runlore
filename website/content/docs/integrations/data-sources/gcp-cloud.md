@@ -146,6 +146,31 @@ reported plainly, with no hedge at all.
   `what_changed`: this is the layer for changes that happened **outside** your GitOps pipeline
   entirely.
 
+## Cilium clusters need one extra toggle
+
+ADC fetches its Workload Identity token from the GKE metadata server on the node host
+network (`169.254.169.254:80`). Cilium classifies that as the `host` entity, which a
+Kubernetes NetworkPolicy `ipBlock` cannot match — so on Cilium the token fetch is
+silently dropped:
+
+<!-- docsguard:ignore Helm chart values, not a runlore.yaml — networkPolicy is a chart key, outside .Values.config -->
+
+```yaml
+networkPolicy:
+  gcpWorkloadIdentity: true   # Cilium only
+```
+
+Worth setting deliberately rather than discovering, because the failure does not look
+like a network failure. With no token the Google client reports a *credentials* error,
+and RunLore's preflight answers a credentials error with an IAM binding command — so you
+add a binding that was already correct, the symptom does not move, and nothing in the
+chain mentions egress.
+
+Other CNIs match the link-local address with an ordinary `ipBlock`, which the default
+`strict: false` already permits. In strict mode you must additionally allow 443 to
+`logging.googleapis.com`, `container.googleapis.com` and `compute.googleapis.com` — the
+toggle above covers only the token fetch, not the API calls it authenticates.
+
 ## Live validation
 
 Not yet run. The unit tests use `httptest` fixtures hand-written from the API reference,
