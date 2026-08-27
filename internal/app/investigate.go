@@ -581,11 +581,40 @@ type Deps struct {
 // their read-only paths). Call it once; pass the result everywhere.
 func BuildDeps(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) *Deps {
 	if !ModelConfigured(cfg) {
+		warnDatasourcesWithoutModel(cfg, log)
 		return nil
 	}
 	model, tools, recall, cat := BuildModelAndTools(ctx, cfg, gp, metrics, log)
 	wireRecall(recall, metrics, ledger, log)
 	return &Deps{Model: model, Tools: tools, Recall: recall, Catalog: cat}
+}
+
+// warnDatasourcesWithoutModel warns when a datasource is configured but no model is, so
+// nothing that datasource feeds is ever registered.
+//
+// BuildDeps returns nil the moment ModelConfigured is false, and EVERY investigation
+// tool is wired inside BuildModelAndTools, below that line. The result was total
+// silence: a first install with `cloud: {provider: gcp}` and no model logged nothing
+// whatsoever about GCP — no resolved-identity line, no preflight verdict, not even
+// "cloud tools disabled" — and the operator reasonably read that as the cloud block
+// being ignored (#562). Every other outcome for that block, including outright failure,
+// says something; only the one that is nobody's fault says nothing.
+//
+// Scoped to keys an operator sets DELIBERATELY and then waits for a startup line from.
+// The broader "tell me which tools are unconfigured" signal is #467; this is its inverse
+// — configured, and inert for a reason nothing states.
+func warnDatasourcesWithoutModel(cfg *config.Config, log *slog.Logger) {
+	var configured []string
+	if cfg.Cloud.Provider != "" {
+		configured = append(configured, "cloud.provider="+cfg.Cloud.Provider)
+	}
+	if len(configured) == 0 {
+		return
+	}
+	log.Warn("datasource configured but no model is: none of its tools are registered, because "+
+		"every investigation tool is wired behind a configured model. Set model.provider "+
+		"(anthropic/gemini) or model.base_url to enable them.",
+		"configured", configured)
 }
 
 // recurrenceGateWanted reports whether the suppression gate must exist at all.

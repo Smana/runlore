@@ -165,11 +165,13 @@ networkPolicy:
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: monitoring }
   # Cilium only: the cloud credential endpoint (EKS Pod Identity 169.254.170.23:80, or
-  # the GKE metadata server 169.254.169.254:80) runs on the node host network, which a
-  # plain NetworkPolicy cannot match — the credential fetch is then silently dropped and
-  # the cloud tools never authenticate. Both toggles render the same policy; set the one
-  # matching config.cloud.provider. This is the CREDENTIAL fetch only; the cloud API
-  # calls it authorises need the 443 rule in extraEgress above.
+  # the GKE metadata server 169.254.169.254:80) is unreachable under a plain
+  # NetworkPolicy — the credential fetch is then silently dropped and the cloud tools
+  # never authenticate. Each toggle renders its OWN policy and the rules differ:
+  # toEntities:[host] for AWS, toCIDR:169.254.169.254/32 for GKE, where Cilium does NOT
+  # classify the metadata server as the host entity (#562). Set the one matching
+  # config.cloud.provider. This is the CREDENTIAL fetch only; the cloud API calls it
+  # authorises need the 443 rule in extraEgress above.
   awsPodIdentity: true
   gcpWorkloadIdentity: false
 

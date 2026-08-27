@@ -255,3 +255,57 @@ func TestAnUnknownProviderNamesTheSupportedOnesFromTheFactoryTable(t *testing.T)
 		}
 	}
 }
+
+// TestCloudProviderWithoutAModelIsNotSilent pins the fix for the silence a first live
+// GKE install hit (#562).
+//
+// Every investigation tool is wired inside BuildModelAndTools, and BuildDeps returns nil
+// before reaching it when no model is configured. So `cloud: {provider: gcp}` on an
+// install that had not yet configured a model produced NO GCP log line at all — not the
+// resolved-identity line, not a preflight verdict, not even "cloud tools disabled". The
+// operator's reasonable conclusion was that the cloud block had been ignored.
+//
+// The asymmetry is what makes it a defect rather than a missing nicety: every other
+// outcome for that block says something. A typo warns, an unreachable metadata server
+// warns, a denied binding warns and prints a command. Only the case that is nobody's
+// fault is silent.
+func TestCloudProviderWithoutAModelIsNotSilent(t *testing.T) {
+	var buf bytes.Buffer
+
+	cfg := &config.Config{}
+	cfg.Cloud.Provider = config.CloudGCP // deliberately set, and inert without a model
+
+	if deps := BuildDeps(context.Background(), cfg, nil, nil, nil, captureLog(&buf)); deps != nil {
+		t.Fatal("BuildDeps returned deps with no model configured")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"level":"WARN"`) {
+		t.Errorf("a deliberately-set cloud.provider was silently inert:\n%s", out)
+	}
+	// Naming the key is what separates this from a generic "no model" line: the operator
+	// is looking for the fate of the block they wrote, not for a model warning.
+	if !strings.Contains(out, "cloud.provider="+config.CloudGCP) {
+		t.Errorf("the warning does not name the key that was set, so it does not answer the "+
+			"question the operator actually has:\n%s", out)
+	}
+	// And the fix has to be in the line, or the operator has a symptom and no next move.
+	if !strings.Contains(out, "model.provider") {
+		t.Errorf("the warning does not name what to set to enable the tools:\n%s", out)
+	}
+}
+
+// TestNoDatasourceConfiguredStaysQuietWithoutAModel: running without a model is a
+// supported mode — the GitOps watch alone is useful, and the issue above reports it
+// flagging four real failures before any model existed. It must not warn about a
+// datasource nobody configured.
+func TestNoDatasourceConfiguredStaysQuietWithoutAModel(t *testing.T) {
+	var buf bytes.Buffer
+
+	if deps := BuildDeps(context.Background(), &config.Config{}, nil, nil, nil, captureLog(&buf)); deps != nil {
+		t.Fatal("BuildDeps returned deps with no model configured")
+	}
+	if out := buf.String(); strings.Contains(out, `"level":"WARN"`) {
+		t.Errorf("a model-less install with no cloud block warned about one:\n%s", out)
+	}
+}

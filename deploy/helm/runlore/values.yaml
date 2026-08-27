@@ -688,22 +688,28 @@ networkPolicy:
   #         matchLabels:
   #           kubernetes.io/metadata.name: monitoring
   ingressFrom: []
-  # Cloud in-cluster identity, Cilium only. Either toggle renders the SAME
-  # CiliumNetworkPolicy (…-cloud-identity-host-egress): egress to the node's host entity
-  # on :80, where both clouds' credential endpoints live — 169.254.170.23 for EKS Pod
-  # Identity, 169.254.169.254 for the GKE metadata server. Cilium classifies those as the
-  # "host" entity, which a plain NetworkPolicy ipBlock cannot match, so the credential
-  # fetch is silently dropped. Other CNIs match the link-local address with an ordinary
-  # ipBlock, which `strict: false` already permits.
+  # Cloud in-cluster identity, Cilium only. Each toggle renders its OWN
+  # CiliumNetworkPolicy, and the two rules are NOT interchangeable:
   #
-  # Worth enabling deliberately rather than discovering. With no token the cloud SDK
-  # reports a CREDENTIALS error, and RunLore's preflight answers a credentials error with
-  # an IAM binding command — so the operator adds a binding that was already right, the
-  # symptom does not move, and nothing in the chain mentions egress.
+  #   awsPodIdentity      -> toEntities: [host]           (169.254.170.23, EKS Pod Identity)
+  #   gcpWorkloadIdentity -> toCIDR: 169.254.169.254/32   (the GKE metadata server)
   #
-  # Kept as two keys because they document two different clouds; set the one that matches
-  # cloud.provider. This is the CREDENTIAL fetch only — the cloud API calls it authorises
-  # are ordinary 443 egress and need their own rule under `egress` in strict mode.
+  # Both endpoints are link-local addresses on :80, which is why these once shared a
+  # single `toEntities: [host]` rule. That was wrong: Cilium does NOT classify
+  # 169.254.169.254 as the host entity on GKE, so the shared rule matched nothing and
+  # every metadata call was dropped. Measured on GKE Standard 1.35.6 with self-managed
+  # Cilium — `toEntities: [host]` timed out, `toCIDR` returned the project id (#562).
+  # Set the one that matches cloud.provider; do not assume the other would also work.
+  #
+  # Worth enabling deliberately rather than discovering, because on neither cloud does
+  # the failure look like a network failure. With no token the cloud SDK reports a
+  # CREDENTIALS error, and on GCP autodetection then fails with "project is required
+  # (set cloud.gcp.project)" — which reads as a config problem, so the operator hardcodes
+  # the three values, "fixes" the symptom, and still has no token for the API calls that
+  # come later. Nothing in that chain mentions egress.
+  #
+  # This is the CREDENTIAL fetch only — the cloud API calls it authorises are ordinary
+  # 443 egress and need their own rule under `egress` in strict mode.
   awsPodIdentity: false
   gcpWorkloadIdentity: false
 
