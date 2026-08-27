@@ -33,6 +33,18 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
+  # nodes: LIST only, and only for cloud-identity resolution. A GKE node's
+  # spec.providerID names the project and zone the cluster runs in, which is RunLore's
+  # fallback when the GKE metadata server does not proxy the cluster attributes to Pods
+  # (internal/providers/cloud/gcp/identity.go, tier 3). One node answers, so the read is
+  # Limit(1) and happens once at startup.
+  #
+  # Node objects carry no secret material, but this is still a cluster-wide grant for a
+  # fallback: if a live GKE run reports identity_source=metadata-server, tier 3 is not
+  # needed on that cluster and this rule can go with it.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
   # Argo CD engine (config.gitops.engine: argocd).
   # applications: reactive watch (WatchFailures) + deep inspection (ResourceStatus/DependencyTree).
   # applicationsets: read-only during investigations — generator failures don't yet trigger

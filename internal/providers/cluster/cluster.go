@@ -326,3 +326,30 @@ func eventTime(e *corev1.Event) time.Time {
 	}
 	return e.EventTime.Time
 }
+
+// AnyNode returns the providerID and region label of one arbitrary Ready node.
+//
+// It exists for cloud-identity resolution: a GKE node's spec.providerID names the
+// project and zone the cluster runs in, which is the fallback for a metadata server
+// that does not proxy the cluster attributes to Pods. Nothing about it is
+// Kubernetes-specific beyond the two fields, and it deliberately returns them RAW
+// rather than a resolved (project, location) pair — parsing "gce://PROJECT/ZONE/INSTANCE"
+// is the cloud provider's knowledge, and putting it here would leave that knowledge
+// orphaned in this package when the provider-side fallback is eventually removed.
+//
+// Limit(1) because any node answers: every node of a cluster carries the same project,
+// and the region label is the same on every node of a regional cluster. Ready nodes are
+// preferred by filtering nothing and taking what the API returns — a NotReady node's
+// providerID is still accurate, and being selective here would trade a correct answer
+// for an empty one on a cluster in trouble, which is when this runs.
+func (r *Reader) AnyNode(ctx context.Context) (providerID, region string, err error) {
+	list, err := r.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil {
+		return "", "", err
+	}
+	if len(list.Items) == 0 {
+		return "", "", fmt.Errorf("cluster: no nodes visible")
+	}
+	n := list.Items[0]
+	return n.Spec.ProviderID, n.Labels["topology.kubernetes.io/region"], nil
+}
