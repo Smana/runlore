@@ -138,13 +138,11 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		return msg, nil
 	}
 	if note != "" {
-		// TODO: the engine should come from the wired provider, not be hardcoded — a
-		// GCP provider's truncation note is currently tagged as an AWS change. Not
-		// model-facing today (renderRows never prints Engine), so this is latent; the
-		// real fix belongs with the tool-to-datasource attribution in eval/coverage.go,
-		// which hardcodes the same assumption and is the place that decides what a
-		// cloud investigation is scored as having covered.
-		events = append(events, providers.ChangeNote(providers.EngineAWS, note))
+		// The engine comes from the wired provider's own vocabulary, so a GCP
+		// truncation note is not tagged as an AWS change. Absent a describer the
+		// vocabulary is the AWS one, which carries EngineAWS — so this is unchanged
+		// for AWS while no longer being a hardcoded assumption.
+		events = append(events, providers.ChangeNote(vocabularyFor(t.Cloud).Engine, note))
 	}
 	changes = events
 	var b strings.Builder

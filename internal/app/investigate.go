@@ -34,6 +34,7 @@ import (
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
+	gcpcloud "github.com/Smana/runlore/internal/providers/cloud/gcp"
 	"github.com/Smana/runlore/internal/providers/cluster"
 	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/sourcerepo"
@@ -278,17 +279,8 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if sr := BuildResourceSpecReader(log); sr != nil {
 		tools = append(tools, investigate.ResourceSpecTool{Reader: sr}, investigate.ResourceListTool{Lister: sr})
 	}
-	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
-	var cloudProvider providers.CloudProvider
-	if cfg.Cloud.Provider == "aws" {
-		if cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName); err != nil {
-			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
-		} else {
-			cloudProvider = cl
-			tools = append(tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
-			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
-		}
-	}
+	// Cloud context: the control-plane "what changed" and node-health lenses. Opt-in.
+	cloudProvider := wireCloudProvider(ctx, cfg, &tools, log)
 	// source_diff (source-repo whitelist): read the code change behind an image
 	// or module version bump. Registered only when the operator listed repos.
 	tools = appendSourceDiffTool(cfg, tools, log)
@@ -1010,4 +1002,74 @@ func BuildFailureDebouncer(cfg *config.Config, gp providers.GitOpsProvider, metr
 		}
 	}
 	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.DebounceWindow(), check, log).WithMetrics(metrics)
+}
+
+// wireGCPCloud resolves the GKE scope, builds the provider and registers its tools,
+// returning nil when any step fails.
+//
+// Preflight failure is NON-FATAL, matching the AWS branch: a deployment whose
+// Workload Identity binding is missing should still investigate everything else while
+// telling the operator exactly what to bind. The alternative — refusing to start —
+// turns one absent IAM binding into a total outage of an agent that was working fine
+// before the cloud lens was switched on.
+//
+// The preflight error is logged whole rather than summarised. It carries a pastable
+// gcloud command with the project NUMBER substituted, and truncating that to fit a log
+// line would remove the only part an operator cannot reconstruct from memory.
+func wireGCPCloud(ctx context.Context, cfg *config.Config, tools *[]investigate.Tool, log *slog.Logger) providers.CloudProvider {
+	id := gcpcloud.ResolveIdentity(ctx, gcpcloud.Identity{
+		Project:     cfg.Cloud.GCP.Project,
+		Location:    cfg.Cloud.GCP.Location,
+		ClusterName: cfg.Cloud.GCP.ClusterName,
+	}, nil)
+
+	cl, err := gcpcloud.New(ctx, id)
+	if err != nil {
+		log.Warn("gcp cloud provider unavailable; cloud tools disabled", "err", err)
+		return nil
+	}
+	if err := cl.Preflight(ctx); err != nil {
+		log.Warn("gcp cloud provider unavailable; cloud tools disabled\n"+err.Error(),
+			"project", id.Project, "identity_source", id.Source)
+		return nil
+	}
+	*tools = append(*tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
+	log.Info("cloud provider enabled", "provider", "gcp",
+		"project", id.Project, "location", id.Location,
+		"cluster", id.ClusterName, "identity_source", id.Source)
+	return cl
+}
+
+// wireCloudProvider selects and builds the cloud provider named in config, registering
+// its two tools and returning it, or nil when cloud context is off or unavailable.
+//
+// A switch with a default that WARNS, rather than the chain of ifs this replaced. The
+// earlier `if provider == "aws"` had no else, so any other value — a typo, or `gcp`
+// before it was implemented — registered nothing, logged nothing and returned no
+// error. The operator set a key, saw a clean startup, and got an agent with no cloud
+// lens and no way to discover why.
+//
+// Extracted from BuildInvestigator so this decision can be tested on its own: the
+// caller takes nine dependencies, and none of them bear on which cloud is wired.
+func wireCloudProvider(ctx context.Context, cfg *config.Config, tools *[]investigate.Tool, log *slog.Logger) providers.CloudProvider {
+	switch cfg.Cloud.Provider {
+	case "":
+		// Cloud context is opt-in; saying nothing is correct here.
+		return nil
+	case config.CloudAWS:
+		cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName)
+		if err != nil {
+			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
+			return nil
+		}
+		*tools = append(*tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
+		log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
+		return cl
+	case config.CloudGCP:
+		return wireGCPCloud(ctx, cfg, tools, log)
+	default:
+		log.Warn("unknown cloud.provider; cloud tools disabled",
+			"provider", cfg.Cloud.Provider, "supported", []string{config.CloudAWS, config.CloudGCP})
+		return nil
+	}
 }

@@ -178,6 +178,7 @@ var (
 // google.container.v1.ClusterManager.UpdateCluster and the like.
 func (Client) CloudVocabulary() providers.CloudVocabulary {
 	return providers.CloudVocabulary{
+		Engine:   providers.EngineGCP,
 		Cloud:    "GCP",
 		AuditLog: "Cloud Audit Logs",
 		ChangeExamples: "GKE/Compute/IAM/network changes, manual actions, Google-initiated host events " +

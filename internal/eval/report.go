@@ -42,7 +42,7 @@ func (rep LiveReport) JSON() []byte {
 }
 
 // allSources is the column order for the coverage heatmap.
-var allSources = []string{"gitops", "kubernetes", "metrics", "logs", "network", "aws", "kb"}
+var allSources = []string{"gitops", "kubernetes", "metrics", "logs", "network", "cloud", "kb"}
 
 // Markdown renders the human report: summary, per-scenario table, coverage heatmap.
 func (rep LiveReport) Markdown() string {

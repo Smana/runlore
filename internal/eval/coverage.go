@@ -23,9 +23,12 @@ var toolSource = map[string]string{
 	"query_metrics":          "metrics",
 	"query_logs":             "logs",
 	"network_drops":          "network",
-	"cloud_what_changed":     "aws",
-	"cloud_resource_health":  "aws",
-	"kb_search":              "kb",
+	// "cloud", not the vendor. These two tools are one lens whose backing provider is
+	// an operator's choice, and scoring a GCP investigation as having covered "aws"
+	// reported the wrong thing about what an investigation actually looked at.
+	"cloud_what_changed":    "cloud",
+	"cloud_resource_health": "cloud",
+	"kb_search":             "kb",
 }
 
 // Call is one recorded tool invocation during a live investigation.

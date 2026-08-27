@@ -1139,6 +1139,13 @@ type CloudVocabulary struct {
 	// for byte.
 	TimelineExamples string
 
+	// Engine tags changes and notes this cloud produces, so a note synthesised in the
+	// tool layer carries the same engine as the provider's own Change values. It is not
+	// rendered into any model-facing text, which is why Validate does not require it:
+	// every other field here is a text fragment, and a missing one is visible in the
+	// output, whereas a zero Engine is only visible to code.
+	Engine Engine
+
 	// FailureFilterNote explains cloud_what_changed's failed_only argument, or is ""
 	// for a cloud with nothing equivalent to filter for. It is its own field, rather
 	// than folded into ScopeGuidance, because cloud_what_changed's description has
@@ -1334,6 +1341,7 @@ type CloudDescriber interface {
 // tools render from here.
 func AWSCloudVocabulary() CloudVocabulary {
 	return CloudVocabulary{
+		Engine:           EngineAWS,
 		Cloud:            "AWS",
 		AuditLog:         "CloudTrail",
 		ChangeExamples:   "ASG/EC2/EKS/RDS/SG changes, manual actions",

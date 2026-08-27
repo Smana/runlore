@@ -141,8 +141,16 @@ func kindKey(kind string) string {
 // Reading '/' or whitespace as "not Kubernetes" would strip a true namespace off
 // every one of those — the one new failure this file must not introduce — and would
 // buy nothing, because both motivating examples above carry a ':' anyway.
+// An underscore joins the ':' test for GCP. A monitored-resource type is lowercase
+// with underscores — "gke_nodepool", "gce_instance" — and carries no colon, so the
+// colon test alone read them as Kubernetes kinds. The workload then fell through to
+// Workload.Ref(), which returns "" for an empty namespace, and the card dropped the
+// resource identity entirely where the AWS equivalent renders its name.
+//
+// Safe against the Kubernetes shapes above because no Kubernetes kind contains an
+// underscore: they are CamelCase, dotted, hyphenated or spaced, never snake_case.
 func notKubernetesShaped(kind string) bool {
-	return strings.Contains(kind, ":")
+	return strings.Contains(kind, ":") || strings.Contains(kind, "_")
 }
 
 // unnamespacedKind reports whether a namespace qualifier on this kind is not a fact
