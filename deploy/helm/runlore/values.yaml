@@ -647,18 +647,6 @@ networkPolicy:
   # out of the box. true: DENY egress by default and allow ONLY the destinations declared
   # under `egress` below — you MUST then list your model/forge/observability endpoints, or
   # the agent cannot reach them. DNS is scoped to the cluster DNS service in BOTH modes.
-  # Cilium + GKE Workload Identity: ADC fetches its token from the GKE metadata server
-  # on the node host network (169.254.169.254:80), which Cilium classifies as the "host"
-  # entity — unmatchable by a NetworkPolicy ipBlock, so the fetch is silently dropped.
-  #
-  # Worth enabling deliberately rather than discovering: with no token the Google client
-  # reports a CREDENTIALS error, and RunLore's preflight answers that with an IAM binding
-  # command. So the operator adds a binding that was already right, the symptom does not
-  # move, and nothing in the chain mentions egress.
-  #
-  # Only needed on Cilium. Other CNIs match the link-local address with an ordinary
-  # ipBlock, which `strict: false` already permits.
-  gcpWorkloadIdentity: false
   # In strict mode the three Google API hosts must also be reachable on 443 —
   # logging.googleapis.com (the what-changed lens), container.googleapis.com and
   # compute.googleapis.com (node health). Add them under `egress` below; the metadata
@@ -699,10 +687,24 @@ networkPolicy:
   #         matchLabels:
   #           kubernetes.io/metadata.name: monitoring
   ingressFrom: []
-  # Render a CiliumNetworkPolicy allowing egress to the EKS Pod Identity credential
-  # endpoint (host entity, 169.254.170.23:80). Required for the AWS cloud provider
-  # on Cilium clusters — a plain NetworkPolicy can't match the host-network target.
+  # Cloud in-cluster identity, Cilium only. Either toggle renders the SAME
+  # CiliumNetworkPolicy (…-cloud-identity-host-egress): egress to the node's host entity
+  # on :80, where both clouds' credential endpoints live — 169.254.170.23 for EKS Pod
+  # Identity, 169.254.169.254 for the GKE metadata server. Cilium classifies those as the
+  # "host" entity, which a plain NetworkPolicy ipBlock cannot match, so the credential
+  # fetch is silently dropped. Other CNIs match the link-local address with an ordinary
+  # ipBlock, which `strict: false` already permits.
+  #
+  # Worth enabling deliberately rather than discovering. With no token the cloud SDK
+  # reports a CREDENTIALS error, and RunLore's preflight answers a credentials error with
+  # an IAM binding command — so the operator adds a binding that was already right, the
+  # symptom does not move, and nothing in the chain mentions egress.
+  #
+  # Kept as two keys because they document two different clouds; set the one that matches
+  # cloud.provider. This is the CREDENTIAL fetch only — the cloud API calls it authorises
+  # are ordinary 443 egress and need their own rule under `egress` in strict mode.
   awsPodIdentity: false
+  gcpWorkloadIdentity: false
 
 # VictoriaMetrics VMServiceScrape: creates a scrape target for the /metrics endpoint.
 # Requires the VictoriaMetrics Operator CRD to be installed in the cluster.

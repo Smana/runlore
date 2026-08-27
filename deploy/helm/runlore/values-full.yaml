@@ -164,12 +164,14 @@ networkPolicy:
   ingressFrom:
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: monitoring }
-  # Cilium only: the EKS Pod Identity credential endpoint (169.254.170.23:80) runs on
-  # the node host network, which a plain NetworkPolicy cannot match — the credential
-  # fetch is then silently dropped and the AWS tools below never authenticate. This
-  # is the CREDENTIAL fetch only; the AWS API calls it authorises need the 443 rule
-  # in extraEgress above.
+  # Cilium only: the cloud credential endpoint (EKS Pod Identity 169.254.170.23:80, or
+  # the GKE metadata server 169.254.169.254:80) runs on the node host network, which a
+  # plain NetworkPolicy cannot match — the credential fetch is then silently dropped and
+  # the cloud tools never authenticate. Both toggles render the same policy; set the one
+  # matching config.cloud.provider. This is the CREDENTIAL fetch only; the cloud API
+  # calls it authorises need the 443 rule in extraEgress above.
   awsPodIdentity: true
+  gcpWorkloadIdentity: false
 
 vmServiceScrape:
   enabled: true
@@ -341,10 +343,22 @@ config:
     provider: aws
     region: eu-west-3
     cluster_name: your-eks-cluster
-  # On GKE this whole block becomes, with nothing else in this profile changing:
+  # On GKE this block becomes:
   #   cloud:
-  #     provider: gcp   # nothing else needed — project/location/cluster_name
-  #                     # autodetect from the GKE metadata server.
+  #     provider: gcp   # project/location/cluster_name autodetect from the GKE
+  #                     # metadata server; do NOT set region/cluster_name here —
+  #                     # those keys are AWS-only and config validation rejects them.
+  #
+  # THREE other things in this profile must change with it. This is a strict-mode
+  # profile, so the swap is not a one-key edit and getting it wrong leaves both cloud
+  # tools permanently empty — the "silently useless" outcome this file warns about above:
+  #   1. networkPolicy.gcpWorkloadIdentity: true (and awsPodIdentity: false) — without
+  #      it Cilium drops the 169.254.169.254:80 token fetch.
+  #   2. Replace the PrivateLink 443 egress rule below with one reaching
+  #      logging.googleapis.com, container.googleapis.com and compute.googleapis.com.
+  #      Google endpoint IPs are dynamic; Private Google Access (199.36.153.8/30) is the
+  #      pinnable equivalent of the PrivateLink rule.
+  #   3. Leave serviceAccount.annotations EMPTY (see below).
   # Auth is a Workload Identity DIRECT PRINCIPAL BINDING: leave serviceAccount.annotations
   # above EMPTY on GKE. See values.yaml's cloud: comment for the full IAM binding loop
   # (three read-only roles) and why annotating the ServiceAccount is the wrong move —
