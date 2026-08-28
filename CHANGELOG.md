@@ -14,6 +14,13 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.16.1](https://github.com/Smana/runlore/compare/v0.16.0...v0.16.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **chart:** grant list on resourceSpecRules, or list_resources ships denied ([#566](https://github.com/Smana/runlore/issues/566)) ([23ac825](https://github.com/Smana/runlore/commit/23ac8259837316d594e3386d51412afeca101dbc))
+
 ## [0.16.0](https://github.com/Smana/runlore/compare/v0.15.0...v0.16.0) (2026-08-27)
 
 
