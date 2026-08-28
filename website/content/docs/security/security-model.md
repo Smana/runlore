@@ -112,11 +112,19 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
   silent drift); leaving both at the defaults limits raw-log reads to the incident namespace plus
   `flux-system`. The app guard must stay a superset of the RBAC namespaces, or `pod_logs` is blocked at
   the app layer for namespaces RBAC would otherwise permit.
-- **`resource_spec`'s read-only kind allowlist:** `rbac.resourceSpecRules` grants `get` on the
-  spec-bearing kinds the tool reads (Services, workloads, NetworkPolicies, HPAs, PVCs, PVs, Nodes,
-  scrape CRs …). **It ships populated — this is a default grant, not an opt-in menu**: a stock
+- **`resource_spec` and `list_resources`' read-only kind allowlist:** `rbac.resourceSpecRules`
+  grants `get` **and `list`** on the spec-bearing kinds these tools read (Services, workloads,
+  NetworkPolicies, HPAs, PVCs, PVs, Nodes, scrape CRs …). Both verbs are needed because two tools
+  share the rules: `resource_spec` reads one object by name (`get`), while `list_resources`
+  enumerates a kind (`list`) and is registered automatically alongside it. Granting `get` alone
+  leaves `list_resources` permanently denied — and the agent reports that as a **data gap rather
+  than an error**, so it reasons around the missing evidence and nothing says why.
+  **Adding a rule REPLACES this list rather than merging into it** — a values overlay or Kustomize
+  patch that names one CRD leaves you with that one rule and silently drops the shipped ten, with
+  no install-time error. To extend, copy the whole list and append.
+  **It ships populated — this is a default grant, not an opt-in menu**: a stock
   install adds 10 rules — 28 resource types, 23 of them granted nowhere else — of cluster-wide
-  `get`, on top of the ClusterRole's 9 base rules. Set
+  `get` and `list`, on top of the ClusterRole's 9 base rules. Set
   `rbac.resourceSpecRules: []` to decline it in full (that costs you `resource_spec` and nothing
   else — `workload_ownership`'s owner-chain kinds are granted separately and unconditionally, so
   narrowing this list can never silently truncate an owner chain). Kinds with **neither `.spec` nor
