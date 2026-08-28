@@ -575,6 +575,34 @@ rbac:
   # on the ServiceAccount. Read it as "what you are about to grant", not as "examples you
   # may enable".
   #
+  # `get` AND `list`, because TWO tools read through these rules and they need
+  # different verbs. resource_spec reads one object BY NAME (`get`); list_resources
+  # ENUMERATES a kind (`list`), and it is registered automatically alongside
+  # resource_spec — pairing them is deliberate, see investigate.go.
+  #
+  # Granting `get` alone therefore ships list_resources permanently denied: the tool
+  # is offered to the model, the model calls it, and the answer is "forbidden" for
+  # every kind. The agent reports that as a DATA GAP rather than an error, so it
+  # reasons around the missing evidence and nothing in the logs says why. Observed on
+  # a real cluster in 2026-08: three separate investigations reported gaps that were
+  # all this one missing verb.
+  #
+  # ── ADDING A RULE REPLACES THIS LIST. IT DOES NOT MERGE. ────────────────────────
+  #
+  # This is a YAML list, so Helm `--set-file`/values overlays and Kustomize patches
+  # REPLACE it wholesale. Writing:
+  #
+  #   rbac:
+  #     resourceSpecRules:
+  #       - apiGroups: ["cloud.example.com"]      # <- your CRD
+  #         resources: ["widgets"]
+  #         verbs: ["get", "list"]
+  #
+  # does not add an eleventh rule; it leaves you with ONE, and silently drops the ten
+  # below. Everything the agent could previously read — Deployments, Services, PVCs,
+  # HPAs, the scrape CRs — becomes "forbidden", with no error at install time and no
+  # warning at runtime. To extend, COPY the whole list and append.
+  #
   # TO DECLINE THE WHOLE GRANT:
   #
   #   rbac:
@@ -603,40 +631,40 @@ rbac:
   resourceSpecRules:
     - apiGroups: [""]
       resources: ["services", "persistentvolumeclaims", "persistentvolumes", "nodes", "namespaces"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["apps"]
       resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["batch"]
       resources: ["jobs", "cronjobs"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["networking.k8s.io"]
       resources: ["ingresses", "networkpolicies", "ingressclasses"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["autoscaling"]
       resources: ["horizontalpodautoscalers"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["policy"]
       resources: ["poddisruptionbudgets"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     # storageclasses is NOT here on purpose: it has no .spec and no .status, so the read
     # comes back empty. "A PVC bound to a vanished storage class" is answered from the
     # PVC's own spec/status, which IS granted above.
     - apiGroups: ["storage.k8s.io"]
       resources: ["volumeattachments"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["apiextensions.k8s.io"]
       resources: ["customresourcedefinitions"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     # Scrape/alert CRs: the case this tool was built for was a VMServiceScrape whose
     # namespaceSelector named a namespace that did not exist. A rule naming an API group
     # the cluster does not serve is inert, so both operators are listed by default.
     - apiGroups: ["operator.victoriametrics.com"]
       resources: ["vmservicescrapes", "vmpodscrapes", "vmscrapeconfigs", "vmrules", "vmagents", "vmalerts"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
     - apiGroups: ["monitoring.coreos.com"]
       resources: ["servicemonitors", "podmonitors", "prometheusrules", "probes"]
-      verbs: ["get"]
+      verbs: ["get", "list"]
 
 # Default-deny NetworkPolicy: restrict ingress to the webhook/health port and egress
 # to DNS + HTTPS + the Kubernetes API. Tighten egress to your model/git/observability
