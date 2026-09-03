@@ -6,7 +6,7 @@ Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlo
 lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 ```
 
-**Latest run:** 2026-09-02T10:25:45Z · model `openai/glm-4.5-air` · **⚠️ ERRORED — no result** · n=5 runs/case
+**Latest run:** 2026-09-03T10:33:32Z · model `openai/glm-4.5-air` · **⚠️ ERRORED — no result** · n=5 runs/case
 
 Every case failed before the model returned an answer, so nothing was scored and nothing was spent. This run is published as **errored** rather than as 0% on purpose: a 0% would be a measurement of the model, and this run measured nothing. The errors are in the table below.
 
@@ -27,6 +27,7 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 
 | date | model | reached | pass-rate | est. cost |
 |---|---|---|---|---|
+| 2026-09-03T10:33:32Z | openai/glm-4.5-air | — | ⚠️ errored | — |
 | 2026-09-02T10:25:45Z | openai/glm-4.5-air | — | ⚠️ errored | — |
 | 2026-09-01T11:13:35Z | openai/glm-4.5-air | 2/6 | 33% | $0.35 |
 | 2026-08-31T12:45:35Z | openai/glm-4.5-air | 2/6 | 33% | $0.32 |
