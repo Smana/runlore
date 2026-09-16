@@ -6,18 +6,18 @@ Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlo
 lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 ```
 
-**Latest run:** 2026-09-15T11:08:25Z · model `openai/glm-4.5-air` · **2/6 scenarios reached (33%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.32 (1.3M in / 58.0k out tokens)
+**Latest run:** 2026-09-16T11:00:02Z · model `openai/glm-4.5-air` · **2/6 scenarios reached (33%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.31 (1.2M in / 64.1k out tokens)
 
 ## Scenarios (latest run)
 
 | scenario | result | pass-rate | median confidence | recall | notes |
 |---|---|---|---|---|---|
 | gitops-broken-kustomization | ✅ PASS | 100% (n=5) | 0.90 | — | — |
-| harbor-chart-bump | ⚠️ FLAKY | 40% (n=5) | 0.90 | — | harbor-db |
-| node-eviction-no-commons | ❌ MISS | 20% (n=5) | 0.75 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
+| harbor-chart-bump | ❌ MISS | 0% (n=5) | 0.90 | — | harbor-db |
+| node-eviction-no-commons | ❌ MISS | 20% (n=5) | 0.70 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
 | node-eviction-with-commons | ✅ PASS | 80% (n=5) | 0.90 | fired 0/5 · short-circuit 0/5 (expect: rejected) | report-worker, request |
-| poisoned-recall-rejected | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | v9.9.9 |
-| poisoned-recall-verify | ⚠️ FLAKY | 60% (n=5) | 0.95 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | pull, v9.9.9 |
+| poisoned-recall-rejected | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | eval-victim, pull, v9.9.9 |
+| poisoned-recall-verify | ⚠️ FLAKY | 40% (n=5) | 1.00 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | eval-victim, v9.9.9 |
 
 ## Cost per investigation
 
@@ -25,7 +25,7 @@ Median provider-reported tokens per case on `openai/glm-4.5-air`, priced at $0.2
 
 | path | cases | median in tok | median out tok | est. cost |
 |---|---|---|---|---|
-| full investigation | 6 | 33.3k | 1.9k | $0.009 |
+| full investigation | 6 | 32.7k | 1.9k | $0.009 |
 
 ## Confidence calibration
 
@@ -38,6 +38,7 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 
 | date | model | reached | pass-rate | est. cost |
 |---|---|---|---|---|
+| 2026-09-16T11:00:02Z | openai/glm-4.5-air | 2/6 | 33% | $0.31 |
 | 2026-09-15T11:08:25Z | openai/glm-4.5-air | 2/6 | 33% | $0.32 |
 | 2026-09-14T11:49:15Z | openai/glm-4.5-air | 3/6 | 50% | $0.27 |
 | 2026-09-13T11:13:48Z | openai/glm-4.5-air | 1/6 | 17% | $0.30 |
@@ -67,4 +68,3 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 | 2026-08-20T07:02:55Z | openai/glm-4.5-air | 1/6 | 17% | $0.28 |
 | 2026-08-19T06:58:02Z | openai/glm-4.5-air | 3/6 | 50% | $0.28 |
 | 2026-08-18T06:58:03Z | openai/glm-4.5-air | 2/6 | 33% | $0.31 |
-| 2026-08-17T07:09:28Z | openai/glm-4.5-air | 2/6 | 33% | $0.32 |
