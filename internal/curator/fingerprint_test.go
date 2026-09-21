@@ -198,7 +198,7 @@ func TestNormalizeResourceNameAlias(t *testing.T) {
 		"":                                             "",
 	}
 	for in, want := range cases {
-		if got := normalizeResourceName(in); got != want {
+		if got := normalizeResourceName(providers.Workload{Name: in}); got != want {
 			t.Errorf("normalizeResourceName(%q) = %q, want %q", in, got, want)
 		}
 	}

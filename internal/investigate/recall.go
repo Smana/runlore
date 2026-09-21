@@ -706,8 +706,10 @@ func refsAgree(reqW providers.Workload, b string) bool {
 		return true
 	}
 	// The request's name half is not re-cut out of the ref: reqW.ResourceID already
-	// holds it, resolved and qualified, and a namespace never contains a "/".
-	return reqW.ResourceID().Agrees(providers.ParseResourceID(bname))
+	// holds it, resolved and qualified, and a namespace never contains a "/". The
+	// entry's name is read the way the request's Kind licenses (#513: a pod-scoped
+	// request also agrees with an entry filed under a sibling StatefulSet replica).
+	return reqW.AgreesWithEntryName(bname)
 }
 
 func clampF(v, lo, hi float64) float64 {

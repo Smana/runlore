@@ -246,7 +246,9 @@ const minFamilyName = 2
 // pod of an Indexed one) all collapse to <name>. The rules run to a FIXED POINT, so
 // a CronJob's pod sheds both its hash and its run stamp. Names without
 // such a suffix are returned unchanged, so real trailing words (e.g. "redis-cache")
-// and short numeric tails (e.g. "vmagent-vmagent-0") are preserved. It is idempotent.
+// and short numeric tails (e.g. "vmagent-vmagent-0") are preserved — a StatefulSet
+// replica ordinal is folded only where the Kind is known to be a Pod's (see
+// NormalizePodName and Workload.IdentityName). It is idempotent.
 //
 // The CronJob case was the expensive omission. A CronJob that fails once emits a
 // Job named for THAT run, and the run number reaches four separate consumers — the
@@ -275,6 +277,56 @@ func NormalizeWorkloadName(name string) string {
 		}
 		name = next
 	}
+}
+
+// NormalizePodName is NormalizeWorkloadName for a name KNOWN to be a Pod's: after
+// the per-instance rules it also folds ONE StatefulSet replica ordinal
+// (<statefulset>-<ordinal>) into the StatefulSet family, so vmagent-vmagent-0, -1
+// and -2 are one workload the way three pods of a Deployment already are (#513).
+//
+// It is a separate function, not another rule in NormalizeWorkloadName, because
+// only the Kind licenses the fold: on a name of unknown kind a short numeric tail is
+// ordinary naming — aurora-serverless-postgres-old-1 and -2 are two databases, and
+// ip-10-20-0-144 is a node — and folding it would fuse distinct resources in the
+// dedup key and the suppression chain. Callers that hold a Workload should read
+// Workload.IdentityName, which consults the Kind; this is the string-level rule.
+//
+// ONE ordinal, not a fixed point: a StatefulSet named sts-0 has pods sts-0-N, and
+// folding to a fixed point would erase the StatefulSet's own name. So this is NOT
+// idempotent on such a family — Workload.AgreesWithEntryName reads a stored entry
+// both as written and folded once for exactly that reason.
+func NormalizePodName(name string) string {
+	return stripReplicaOrdinal(NormalizeWorkloadName(name))
+}
+
+// stripReplicaOrdinal removes ONE trailing -<digits> segment, or returns its input
+// unchanged. It runs after the per-instance rules, so the tail it sees on a real pod
+// name is a StatefulSet ordinal: a hash or run stamp has already been folded.
+func stripReplicaOrdinal(name string) string {
+	i := strings.LastIndexByte(name, '-')
+	if i < 0 || !isOrdinal(name[i+1:]) {
+		return name
+	}
+	// The same debris guard as stripInstanceSuffix: a strip that leaves too little to
+	// be a name is not a family.
+	family := strings.TrimRight(name[:i], "-")
+	if len(family) < minFamilyName {
+		return name
+	}
+	return family
+}
+
+// isOrdinal reports whether s is a non-empty run of ASCII digits.
+func isOrdinal(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // stripInstanceSuffix removes at most ONE trailing per-instance suffix, or returns
