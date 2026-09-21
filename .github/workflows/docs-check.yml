@@ -9,6 +9,7 @@ on:
       - 'website/**'
       - 'README.md'
       - 'CONTRIBUTING.md'
+      - 'AGENTS.md'
       - 'assets/**'
       # The rendered card, not the files that render it: what makes the shipped
       # screenshots wrong is a change a READER would notice, and this golden moves
@@ -33,6 +34,7 @@ on:
       - 'website/**'
       - 'README.md'
       - 'CONTRIBUTING.md'
+      - 'AGENTS.md'
       - 'assets/**'
       # The rendered card, not the files that render it: what makes the shipped
       # screenshots wrong is a change a READER would notice, and this golden moves
@@ -100,12 +102,14 @@ jobs:
         # scoped to two README files and to markdown-link syntax only, so it saw neither
         # SECURITY.md's two dead links nor the 24 bare `blob/main/docs/observability.md`
         # runbook_url annotations in the alert manifests. Both patterns, every published
-        # surface. dev/ and docs/superpowers/ are working notes, not published, and are
-        # deliberately out of scope.
+        # surface — AGENTS.md included: it is the first file every contributor and coding
+        # agent reads, and it carried a dead docs/design.md link for months because this
+        # guard did not look at it. dev/ and docs/superpowers/ are working notes, not
+        # published, and are deliberately out of scope.
         run: |
           set -uo pipefail
           if grep -rnE '\]\((\.?/)?docs/[a-z0-9/_-]+\.md|github\.com/Smana/runlore/blob/[^)"'"'"' ]*/docs/[a-z0-9/_-]+\.md' \
-               README.md CONTRIBUTING.md SECURITY.md ROADMAP.md website/content deploy; then
+               README.md CONTRIBUTING.md AGENTS.md SECURITY.md ROADMAP.md website/content deploy; then
             echo "::error::a published file still links to a raw docs/*.md path — that tree moved to website/content; repoint to https://runlore.io/docs/…"
             exit 1
           fi

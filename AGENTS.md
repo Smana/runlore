@@ -1,7 +1,9 @@
 # RunLore — contributor & agent guide
 
-RunLore is a self-improving, GitOps-native SRE agent written in Go. Start with
-[`docs/design.md`](docs/design.md) for the architecture and `dev/plans/` for the implementation plans.
+RunLore is a self-improving, GitOps-native SRE agent written in Go. Start with the design doc,
+[`website/content/docs/concepts/design.md`](website/content/docs/concepts/design.md)
+(published at <https://runlore.io/docs/concepts/design/>), for the architecture, and with
+`dev/plans/` for the implementation plans.
 
 ## Quality gate — run before every commit
 
@@ -46,10 +48,42 @@ Alertmanager/VMAlert POST.
 - **Small, focused files** — one clear responsibility each. Backends are pluggable interfaces in
   `internal/providers`, with concrete impls in sub-packages (`gitops/flux`, `metrics`, …).
 - **Autonomy ladder.** Cluster-mutating code lives behind `actions.mode` (`approve`/`auto`) — both
-  off by default, both fail-closed (approval token + audit log required). See `docs/design.md` §9.
+  off by default, both fail-closed (approval token + audit log required). See the design doc,
+  §9 "Safety & trust model".
 - Module path `github.com/Smana/runlore`; CLI binary `lore`.
 
 ## Layout
 
-`cmd/lore` (entrypoint) · `internal/{config,trigger,investigate,whatchanged,catalog,curator,audit,model,notify}`
-· `internal/providers` (the contracts) · `deploy/helm/runlore` · `examples/runbooks` (seed OKF catalog).
+One package per responsibility, grouped here by the stage of the loop it serves. Read a
+package's `// Package …` doc comment for its contract before changing it.
+
+- **Entry & wiring.** `cmd/lore` (entrypoint) · `internal/app` (dependency-injection
+  builders and config predicates, one file per subcommand or concern) · `internal/config`.
+- **Ingress.** `internal/server` (HTTP endpoints) ·
+  `internal/source/{alertmanager,pagerduty,grafana,custom,gitops}` (webhook and watcher
+  adapters) · `internal/trigger` (investigate-or-skip policy) · `internal/coalesce` (folds
+  correlated alerts into one incident) · `internal/ratelimit`.
+- **Investigation.** `internal/investigate` (the ReAct loop, its tools, recall, verify) ·
+  `internal/whatchanged` + `internal/gitrev` + `internal/sourcerepo` (the GitOps "what
+  changed" spine) · `internal/model/{anthropic,openai,gemini,replay}` over
+  `internal/model/clientcore` · `internal/mcp` (stdio MCP server and streamable-HTTP MCP
+  client) · `internal/redact` (secret masking at every boundary) · `internal/httpx`.
+- **Providers — the contracts.** `internal/providers` (interfaces, resource identity) with
+  `cloud/`, `cluster/`, `gitops/` implementations; further backends in
+  `internal/{metrics,logs/{loki,victorialogs,elasticsearch},network,gcplog}`.
+- **Knowledge.** `internal/okf` (OKF markdown serialisation) · `internal/catalog` (load and
+  search) · `internal/embed` · `internal/kbvalidate` · `internal/kbimport` · `internal/kbmcp`
+  · `internal/curator` (file-time learning gate) · `internal/curate` (backlog grooming) ·
+  `internal/forge/{github,gitlab}` · `internal/outcome` (append-only JSONL ledger).
+- **Delivery & chat.** `internal/notify` (Slack, Matrix, `webhook/`, `templated/`) ·
+  `internal/slackcard` · `internal/thread` (a human reply in a thread becomes a KB note).
+- **Safety & ops.** `internal/action` (autonomy-ladder gate) · `internal/executor`
+  (reversible Argo CD operations) · `internal/audit` (tamper-evident log) ·
+  `internal/telemetry` · `internal/logging`.
+- **Guards & eval.** `internal/eval` (replays recorded cases) · `internal/docsguard` (tests
+  that pin published docs to the code) · `internal/foldguard`.
+- **Outside Go.** `deploy/helm/runlore` (chart) · `deploy/observability` (alerts, Grafana) ·
+  `examples/runbooks` (seed OKF catalog) · `examples/{demo,eval,scenarios}` (recorded
+  transcripts and cases) · `eval/` (scorecard config, rubric, scenarios) ·
+  `plugins/kb-steward` · `hack/` (scripts) · `website/` (Hugo docs site) · `dev/plans/`
+  and `docs/superpowers/` (working notes, not published).
