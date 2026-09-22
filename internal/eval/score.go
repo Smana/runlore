@@ -7,6 +7,7 @@ import (
 
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // Result is the score for one case.
@@ -17,21 +18,14 @@ type Result struct {
 	Missing     []string // expected keywords/entities not found (or an error note); includes "over-claimed: <e>" markers
 	OverClaimed []string // distractor entities the investigation wrongly blamed (over-claim/FP)
 
-	// Claim is WHAT this run blamed: the claim text Score matched over, flattened to one
-	// line and secret-redacted. THE canonical rationale for this field and everything
-	// downstream of it (CaseAggregate.FailedClaims, ReportCase.FailedClaims, the eval's
-	// per-case log line) lives here, so it is stated once:
+	// Claim is WHAT this run blamed: the claim text Score matched over, flattened and
+	// secret-redacted. Missing names the absent term and never the answer given, which is
+	// what made six weeks of red nightlies unreadable — the canonical statement of that,
+	// referenced by the fold and the report rather than repeated there.
 	//
-	// Missing names the absent term and never the answer given. "missing: harbor-db"
-	// cannot distinguish a right cause phrased loosely from a wrong cause, so every
-	// gated nightly case failed unreadably from 2026-08-09 until this was recorded.
-	//
-	// Set only on a FAILING run — a right answer is not a finding, and the redaction
-	// pass is not worth paying on results nothing reads. Empty on a pass, and on a run
-	// that produced no findings at all.
-	//
-	// NOT truncated: callers dedup on the full text and cap at store time, so that two
-	// claims sharing a long prefix are not collapsed into one. See recordFailedClaim.
+	// Set only on a FAILING run: a right answer is not a finding, and nothing should carry
+	// model text it will never publish. NOT capped here — callers dedup on the full text
+	// and cap at store time (capClaim).
 	Claim string
 
 	// Recall telemetry (populated only for cases with a catalog fixture): whether
@@ -75,15 +69,14 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 		}
 	}
 
-	pass := len(missing) == 0 && inv.Confidence >= exp.MinConfidence
 	res := Result{
 		Name:        name,
-		Pass:        pass,
+		Pass:        len(missing) == 0 && inv.Confidence >= exp.MinConfidence,
 		Confidence:  inv.Confidence,
 		Missing:     missing,
 		OverClaimed: overClaimed,
 	}
-	if !pass {
+	if !res.Pass {
 		res.Claim = reportableClaim(blamed)
 	}
 	return res
@@ -143,36 +136,14 @@ func investigationText(inv providers.Investigation) string {
 	return b.String()
 }
 
-// maxClaimBytes caps one STORED claim. The report is a CI artifact read by hand, so a
-// claim is a few sentences of diagnostic, never a transcript.
-const maxClaimBytes = 600
-
-// maxFailedClaims bounds how many failing claims one case stores. A case whose repeats
-// all disagree is itself the finding; pasting every variant into the report buys
-// nothing a reader cannot get from the first few.
-const maxFailedClaims = 3
-
 // reportableClaim renders a claim for the log and the report: secret-redacted and
-// FLATTENED to a single line.
+// flattened to one line.
 //
-// Flattening is not cosmetic. The claim is free-form model text that reaches a
-// one-line-per-case log table and a markdown scorecard cell, and a raw newline in it
-// would not merely wrap — it would emit an unindented line that a reader (or a log
-// scraper) cannot tell from the harness's own verdict lines. The same hazard is already
-// handled by cellEscaper in scorecard.go and oneLineIndent in internal/app.
-//
-// redact.Secrets is idempotent, so re-applying it over already-redacted model text is
-// safe and guarantees the published artifact carries no secret-shaped value.
+// Flattening is a forgery guard. The claim is untrusted model text printed at the left
+// margin of a one-line-per-case table, so a break inside it emits a line a reader cannot
+// tell from the harness's own verdict lines. thread.SingleLine owns the break list, and
+// its doc records why that list lives in exactly one place; Fields collapses the runs it
+// leaves behind. A markdown sink would still owe cellEscaper its pipe escaping.
 func reportableClaim(s string) string {
-	return strings.Join(strings.Fields(redact.Secrets(s)), " ")
-}
-
-// capClaim caps a claim at maxClaimBytes, marking the cut so a reader can tell "the
-// model stopped here" from "we cut it here". ToValidUTF8 drops the partial rune a
-// byte-slice cap can leave behind.
-func capClaim(s string) string {
-	if len(s) <= maxClaimBytes {
-		return s
-	}
-	return strings.ToValidUTF8(s[:maxClaimBytes], "") + " […]"
+	return strings.Join(strings.Fields(thread.SingleLine(redact.Secrets(s))), " ")
 }

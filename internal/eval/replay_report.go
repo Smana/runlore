@@ -33,6 +33,10 @@ type Report struct {
 }
 
 // ReportCase is one case's k-of-n verdict in the report.
+//
+// Its fields track CaseAggregate exactly — Report() converts one to the other by struct
+// conversion, so a mismatch is a compile error rather than a silent drift; only the tags
+// differ.
 type ReportCase struct {
 	Name        string   `json:"name"`
 	Runs        int      `json:"runs"`
@@ -43,13 +47,8 @@ type ReportCase struct {
 	Missing     []string `json:"missing,omitempty"`
 	OverClaimed []string `json:"over_claimed,omitempty"`
 
-	// FailedClaims mirrors CaseAggregate.FailedClaims — what the failing repeats blamed;
-	// see Result.Claim for why it is recorded. omitempty drops it for a case whose every
-	// repeat passed, which is NOT the same as a case that reached the bar: a 4/5 case is
-	// Reached and still carries its loser's claim.
-	//
-	// The field order here must track CaseAggregate exactly: Report() converts one to
-	// the other by struct conversion, which requires identical fields in identical order.
+	// FailedClaims mirrors CaseAggregate.FailedClaims; omitempty drops it only for a case
+	// whose EVERY repeat passed, which is not the same as one that reached the bar.
 	FailedClaims []string `json:"failed_claims,omitempty"`
 
 	// Gated says whether this case voted on the nightly -fail-under threshold. NOT

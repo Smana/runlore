@@ -37,29 +37,18 @@ func runEvalOnCase(t *testing.T, caseYAML string) (stdoutText, stderrText string
 	return stdout(), stderr()
 }
 
-// The mock always blames "chart bump broke harbor-db migrations", so requiring an
-// unrelated term makes the case miss — the nightly's shape.
-const missingCaseYAML = `
-name: claim-miss
+// claimCaseYAML is one replay case whose required term is the knob: the mock always
+// blames "chart bump broke harbor-db migrations", so requiring harbor-db passes and
+// requiring anything else misses — the nightly's shape.
+const claimCaseYAML = `
+name: claim-case
 prompt: HarborProbeFailure in apps
 tools:
   what_changed: "chart 1.15 enabled DB migrations"
   query_metrics: "up{job=harbor-core}=0"
   query_logs: "harbor-db FATAL migration lock"
 expected:
-  must_contain: [network]
-  min_confidence: 0.5
-`
-
-const passingCaseYAML = `
-name: claim-pass
-prompt: HarborProbeFailure in apps
-tools:
-  what_changed: "chart 1.15 enabled DB migrations"
-  query_metrics: "up{job=harbor-core}=0"
-  query_logs: "harbor-db FATAL migration lock"
-expected:
-  must_contain: [harbor-db]
+  must_contain: [%s]
   min_confidence: 0.5
 `
 
@@ -67,35 +56,41 @@ expected:
 // in its own log: the missing TERM alone cannot distinguish a right cause phrased
 // loosely from a wrong one (see eval.Result.Claim).
 //
-// The claim goes to STDERR, on the per-case progress line, for two reasons. Stdout
-// carries the result table, and `timeout` in .github/workflows/eval.yaml kills a long
-// campaign before the summary is ever printed — which is the failure the workflow was
-// hardened against, so the diagnostic must not live only there.
+// The claim goes to STDERR, on the per-case progress line, because stdout carries the
+// result table and because the nightly is often killed by its own timeout before the
+// summary prints.
 func TestRunEvalReportsWhatAMissedCaseClaimed(t *testing.T) {
-	stdout, stderr := runEvalOnCase(t, missingCaseYAML)
+	for _, tc := range []struct {
+		name      string
+		term      string
+		wantClaim bool
+	}{
+		{"a miss reports what was blamed", "network", true},
+		{"every repeat passing reports nothing", "harbor-db", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr := runEvalOnCase(t, fmt.Sprintf(claimCaseYAML, tc.term))
 
-	if !strings.Contains(stdout, "missing: network") {
-		t.Fatalf("expected the case to miss on network:\n%s", stdout)
-	}
-	for _, want := range []string{"claimed:", "harbor-db migrations"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr must carry %q:\n%s", want, stderr)
-		}
-	}
-	if strings.Contains(stdout, "claimed:") {
-		t.Fatalf("the claim belongs on stderr, not in the stdout result table:\n%s", stdout)
-	}
-}
-
-// TestRunEvalPrintsNoClaimWhenEveryRepeatPassed keeps a green run terse: the claim line
-// is a failure diagnostic, not a transcript of every answer.
-func TestRunEvalPrintsNoClaimWhenEveryRepeatPassed(t *testing.T) {
-	stdout, stderr := runEvalOnCase(t, passingCaseYAML)
-
-	if !strings.Contains(stdout, "REACHED") {
-		t.Fatalf("expected the case to pass:\n%s", stdout)
-	}
-	if strings.Contains(stdout+stderr, "claimed:") {
-		t.Fatalf("an all-passing run must print no claim lines:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			if !tc.wantClaim {
+				if !strings.Contains(stdout, "REACHED") {
+					t.Fatalf("expected the case to pass:\n%s", stdout)
+				}
+				if strings.Contains(stdout+stderr, "claimed:") {
+					t.Fatalf("an all-passing run must print no claim lines:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+				}
+				return
+			}
+			if !strings.Contains(stdout, "missing: "+tc.term) {
+				t.Fatalf("expected the case to miss on %s:\n%s", tc.term, stdout)
+			}
+			for _, want := range []string{"claimed:", "harbor-db migrations"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr must carry %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stdout, "claimed:") {
+				t.Fatalf("the claim belongs on stderr, not in the stdout result table:\n%s", stdout)
+			}
+		})
 	}
 }
