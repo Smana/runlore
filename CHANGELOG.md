@@ -14,6 +14,20 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.16.2](https://github.com/Smana/runlore/compare/v0.16.1...v0.16.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* **providers:** key and match StatefulSet replicas as one workload ([#577](https://github.com/Smana/runlore/issues/577)) ([119f0f7](https://github.com/Smana/runlore/commit/119f0f7366b2026ac445480d242499747cd3f3ca)), closes [#513](https://github.com/Smana/runlore/issues/513)
+
+
+### Documentation
+
+* **agents:** fix the dead design-doc link, refresh the layout map, guard AGENTS.md ([#572](https://github.com/Smana/runlore/issues/572)) ([2479df0](https://github.com/Smana/runlore/commit/2479df0f65018481cd4e2fbd23457dbc3547bbd7))
+* **changelog:** state the raised token default the migration note announces ([#576](https://github.com/Smana/runlore/issues/576)) ([7c25bec](https://github.com/Smana/runlore/commit/7c25bec28fa195ba71dd0aafe62a911d6f4d6304))
+* **website:** add the cloud source to the homepage flow diagram ([#573](https://github.com/Smana/runlore/issues/573)) ([b1563e0](https://github.com/Smana/runlore/commit/b1563e0cbc7dc1793045e4451794443696919607))
+
 ## [0.16.1](https://github.com/Smana/runlore/compare/v0.16.0...v0.16.1) (2026-08-28)
 
 
