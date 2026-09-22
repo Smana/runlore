@@ -67,6 +67,12 @@ func scopeTools(tools []Tool, incidentNamespace string) []Tool {
 const submitFindingsName = "submit_findings"
 
 // submitFindingsSpec advertises the structured-output tool to the model.
+//
+// Any EXAMPLE written into a field description must be drawn from a fault no eval case
+// scores. The replay corpus grades the model's claim against terms like the failing
+// workload's name or a bad tag, so an example built from one of those would teach the
+// answer through the prompt and the nightly pass-rate would stop measuring anything.
+// The certificate example below is deliberately outside the corpus.
 func submitFindingsSpec() providers.ToolSpec {
 	return providers.ToolSpec{
 		Name:        submitFindingsName,
@@ -76,7 +82,7 @@ func submitFindingsSpec() providers.ToolSpec {
 "confidence":{"type":"number"},
 "affected_resource":{"type":"object","description":"the workload your investigation identified as the failing/affected resource","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},
 "root_causes":{"type":"array","items":{"type":"object","properties":{
-"summary":{"type":"string"},
+"summary":{"type":"string","description":"the cause in one or two sentences. Name the SPECIFIC resource the cause sits on and the identifier it turns on - the tag, revision, chart version, config key or field - not just the mechanism. A mechanism on its own is unactionable: 'a certificate problem broke the ingress' leaves the on-call searching, while 'the tls-frontend Secret certificate expired on 2026-05-02, so TLS handshakes are rejected' names what to fix. State them HERE, in the cause itself, even when the same identifiers also appear in your evidence"},
 "confidence":{"type":"number","description":"how strongly the evidence below supports THIS root cause, 0-1. It measures support for the cause you STATED, not how sure you are of the narrative around it. Required: an omitted confidence is delivered as 0%, which reads to the on-call as 'no confidence' and buries a sound finding under a red badge"},
 "change_ref":{"type":"string"},
 "evidence":{"type":"array","minItems":1,"items":{"type":"string"},"description":"REQUIRED, at least one: the specific tool results that support this cause - name the tool and quote the value, error or log line it returned. This is what lets a human check the cause and what the verify pass traces. A cause asserted with no evidence is delivered as a bare paragraph under a confidence badge nothing backs"},

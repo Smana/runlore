@@ -325,3 +325,44 @@ func TestDataGapsForbidsSpeculation(t *testing.T) {
 		}
 	}
 }
+
+// TestRequiredRootCauseFieldsCarryGuidance pins an invariant the schema quietly broke:
+// a field the model MUST fill has to say HOW to fill it.
+//
+// submit_findings is a forced tool, so its schema is the only instruction the model
+// gets about the shape of an answer. "confidence" and "evidence" each carry a
+// paragraph earned by a past failure; "summary" — the field that becomes the claim an
+// on-call reads, and the only text the eval scores — carried nothing at all. Every
+// gated nightly case then failed the same way for six weeks: the mechanism was named
+// ("migration", "image pull") and the specific resource or identifier was not, because
+// nothing ever asked for it.
+func TestRequiredRootCauseFieldsCarryGuidance(t *testing.T) {
+	var schema struct {
+		Properties struct {
+			RootCauses struct {
+				Items struct {
+					Properties map[string]struct {
+						Description string `json:"description"`
+					} `json:"properties"`
+					Required []string `json:"required"`
+				} `json:"items"`
+			} `json:"root_causes"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(submitFindingsSpec().Schema), &schema); err != nil {
+		t.Fatalf("submit_findings schema is not valid JSON: %v", err)
+	}
+	req := schema.Properties.RootCauses.Items.Required
+	if len(req) == 0 {
+		t.Fatal("root_causes items declare no required fields; the invariant has nothing to check")
+	}
+	for _, name := range req {
+		prop, ok := schema.Properties.RootCauses.Items.Properties[name]
+		if !ok {
+			t.Fatalf("required field %q is not declared in properties", name)
+		}
+		if strings.TrimSpace(prop.Description) == "" {
+			t.Errorf("required field %q carries no description: the model is told to fill it and never told how", name)
+		}
+	}
+}
