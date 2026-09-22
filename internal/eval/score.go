@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // Result is the score for one case.
@@ -15,6 +16,13 @@ type Result struct {
 	Confidence  float64
 	Missing     []string // expected keywords/entities not found (or an error note); includes "over-claimed: <e>" markers
 	OverClaimed []string // distractor entities the investigation wrongly blamed (over-claim/FP)
+
+	// Claim is WHAT this run blamed — the same claim text Score matched over, bounded
+	// to maxClaimBytes and secret-redacted. Recorded because Missing alone names the
+	// absent term and never the answer given, which left a red nightly unreadable:
+	// "missing: harbor-db" cannot distinguish a right cause in looser words from a
+	// wrong cause. Empty when the run produced no findings at all.
+	Claim string
 
 	// Recall telemetry (populated only for cases with a catalog fixture): whether
 	// instant recall fired, and whether its answer short-circuited the loop. Surfaced
@@ -38,7 +46,8 @@ type Result struct {
 // Entity scoring engages only when root_cause_entities is set. A case passes when
 // nothing is missing, no distractor was blamed, and confidence meets the floor.
 func Score(name string, inv providers.Investigation, exp Expected) Result {
-	claim := strings.ToLower(claimText(inv))
+	blamed := claimText(inv)
+	claim := strings.ToLower(blamed)
 	missing := notInClaim(claim, exp.MustContain)
 
 	var overClaimed []string
@@ -62,6 +71,7 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 		Confidence:  inv.Confidence,
 		Missing:     missing,
 		OverClaimed: overClaimed,
+		Claim:       boundedClaim(blamed),
 	}
 }
 
@@ -117,4 +127,27 @@ func investigationText(inv providers.Investigation) string {
 	b.WriteString(" " + strings.Join(inv.RuledOut, " "))
 	b.WriteString(" " + strings.Join(inv.DataGaps, " "))
 	return b.String()
+}
+
+// maxClaimBytes bounds one recorded claim. The report is published as a CI artifact
+// and read by hand, so a claim is a few sentences of diagnostic, never a transcript.
+const maxClaimBytes = 600
+
+// maxFailedClaims bounds how many DISTINCT failing claims one case records. A case
+// whose repeats all disagree is itself the finding; pasting every variant into the
+// report buys nothing a reader cannot get from the first few.
+const maxFailedClaims = 3
+
+// boundedClaim renders a claim for the report: secret-redacted and hard-capped to
+// maxClaimBytes. Unlike boundedTranscript it keeps the HEAD — a claim leads with the
+// title and the first (highest-ranked) cause, which is the part a reader needs.
+// redact.Secrets is idempotent, so re-applying it over already-redacted model text is
+// safe and guarantees the published artifact carries no secret-shaped value.
+// ToValidUTF8 drops the partial rune a byte-slice cap can leave behind.
+func boundedClaim(s string) string {
+	s = strings.TrimSpace(redact.Secrets(s))
+	if len(s) > maxClaimBytes {
+		s = strings.ToValidUTF8(s[:maxClaimBytes], "")
+	}
+	return s
 }

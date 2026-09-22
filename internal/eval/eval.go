@@ -208,6 +208,13 @@ type CaseAggregate struct {
 	Missing     []string // union of missing keywords/entities across repeats
 	OverClaimed []string // union of over-claimed distractors across repeats
 
+	// FailedClaims are the distinct claims the FAILING repeats made, in first-seen
+	// order and capped at maxFailedClaims. This is the diagnostic Missing cannot
+	// give: it says what the agent actually blamed when it missed. Passing repeats
+	// contribute nothing (a right answer is not a finding), and runs that produced
+	// no claim at all are skipped.
+	FailedClaims []string
+
 	// Gated echoes the case's `gate:` field: true (the default) means this case votes
 	// on the nightly -fail-under threshold. False marks a measurement case whose
 	// failure is a finding rather than a regression — it still runs, still scores and
@@ -366,10 +373,14 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 	outs := make([]float64, 0, len(results))
 	missSet := map[string]struct{}{}
 	ocSet := map[string]struct{}{}
+	seenClaim := map[string]struct{}{}
+	var failedClaims []string
 	passes, fired, shortCircuits := 0, 0, 0
 	for _, res := range results {
 		if res.Pass {
 			passes++
+		} else {
+			failedClaims = recordFailedClaim(failedClaims, seenClaim, res.Claim)
 		}
 		if res.RecallFired {
 			fired++
@@ -397,6 +408,7 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		Confidence:         medianFloat(confs),
 		Missing:            sortedSet(missSet),
 		OverClaimed:        sortedSet(ocSet),
+		FailedClaims:       failedClaims,
 		Gated:              c.gates(),
 		HasRecall:          c.hasCatalog(),
 		ExpectRecall:       c.ExpectRecall,
@@ -405,6 +417,21 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		InputTokens:        int(medianFloat(ins)),
 		OutputTokens:       int(medianFloat(outs)),
 	}
+}
+
+// recordFailedClaim appends a failing repeat's claim when it is new and the cap still
+// allows one, so a case reports a few DISTINCT wrong answers rather than one line per
+// repeat. An empty claim (an investigation error, or a loop that never submitted) is
+// not a diagnostic and is dropped; Missing already carries that note.
+func recordFailedClaim(claims []string, seen map[string]struct{}, claim string) []string {
+	if claim == "" || len(claims) >= maxFailedClaims {
+		return claims
+	}
+	if _, dup := seen[claim]; dup {
+		return claims
+	}
+	seen[claim] = struct{}{}
+	return append(claims, claim)
 }
 
 func sortedSet(m map[string]struct{}) []string {

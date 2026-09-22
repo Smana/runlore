@@ -970,3 +970,44 @@ func TestShippedCommonsControlArmReplaysAgainstAnEmptyIndex(t *testing.T) {
 		t.Fatalf("the control arm must still complete and score on the same finding: %+v", res)
 	}
 }
+
+// TestScoreCarriesTheClaimItScored records WHAT was blamed alongside the verdict.
+// Score already computes the claim to match over; keeping it is what turns "missing:
+// harbor-db" into a readable finding.
+func TestScoreCarriesTheClaimItScored(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "Harbor 503s",
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{
+			Summary:         "a schema migration stalled the database",
+			SuggestedAction: "roll back the chart",
+		}},
+	}
+	r := Score("harbor", inv, Expected{RootCauseEntities: []string{"harbor-db"}, MinConfidence: 0.5})
+	if r.Pass {
+		t.Fatalf("expected a miss on harbor-db, got %+v", r)
+	}
+	for _, want := range []string{"Harbor 503s", "schema migration stalled", "roll back the chart"} {
+		if !strings.Contains(r.Claim, want) {
+			t.Fatalf("claim %q missing %q", r.Claim, want)
+		}
+	}
+}
+
+// TestScoreClaimIsBoundedAndRedacted keeps the recorded claim publishable: the report
+// is uploaded as a CI artifact, and model text can quote tool output, so a
+// secret-shaped value must be masked and a runaway claim truncated.
+func TestScoreClaimIsBoundedAndRedacted(t *testing.T) {
+	long := strings.Repeat("x", maxClaimBytes*2)
+	inv := providers.Investigation{
+		Title:      "token is ghp_0123456789abcdefghij0123456789abcdefg",
+		RootCauses: []providers.Hypothesis{{Summary: long}},
+	}
+	r := Score("c", inv, Expected{MustContain: []string{"nope"}})
+	if len(r.Claim) > maxClaimBytes {
+		t.Fatalf("claim not bounded: %d bytes (cap %d)", len(r.Claim), maxClaimBytes)
+	}
+	if strings.Contains(r.Claim, "ghp_0123456789abcdefghij0123456789abcdefg") {
+		t.Fatalf("claim leaked a secret-shaped value: %q", r.Claim)
+	}
+}

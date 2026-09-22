@@ -43,6 +43,12 @@ type ReportCase struct {
 	Missing     []string `json:"missing,omitempty"`
 	OverClaimed []string `json:"over_claimed,omitempty"`
 
+	// FailedClaims mirrors CaseAggregate.FailedClaims — what the failing repeats
+	// blamed. omitempty so a green report stays terse. The field order here must
+	// track CaseAggregate exactly: Report() converts one to the other by struct
+	// conversion, which requires identical fields in identical order.
+	FailedClaims []string `json:"failed_claims,omitempty"`
+
 	// Gated says whether this case voted on the nightly -fail-under threshold. NOT
 	// omitempty: false is the informative value here (a measurement case, whose low
 	// score is a finding rather than a regression), and omitempty would drop exactly

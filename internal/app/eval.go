@@ -264,6 +264,14 @@ func RunEval(args []string) error {
 			fmt.Printf("  missing: %s", strings.Join(a.Missing, ", "))
 		}
 		fmt.Println()
+		// What the failing repeats actually blamed. Missing names the absent term and
+		// never the answer given, which is what left a red nightly undiagnosable: it
+		// cannot distinguish a correct cause phrased loosely from a wrong one. Printed
+		// here (not only in the report JSON) because the CI log is what a reader opens
+		// first. Indented to align under the case name; absent on a passing case.
+		for _, claim := range a.FailedClaims {
+			fmt.Printf("         claimed: %s\n", claim)
+		}
 	}
 	if len(camp.Aggregates) == 0 {
 		fmt.Print("\nno eval cases ran")
