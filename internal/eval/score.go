@@ -17,11 +17,21 @@ type Result struct {
 	Missing     []string // expected keywords/entities not found (or an error note); includes "over-claimed: <e>" markers
 	OverClaimed []string // distractor entities the investigation wrongly blamed (over-claim/FP)
 
-	// Claim is WHAT this run blamed — the same claim text Score matched over, bounded
-	// to maxClaimBytes and secret-redacted. Recorded because Missing alone names the
-	// absent term and never the answer given, which left a red nightly unreadable:
-	// "missing: harbor-db" cannot distinguish a right cause in looser words from a
-	// wrong cause. Empty when the run produced no findings at all.
+	// Claim is WHAT this run blamed: the claim text Score matched over, flattened to one
+	// line and secret-redacted. THE canonical rationale for this field and everything
+	// downstream of it (CaseAggregate.FailedClaims, ReportCase.FailedClaims, the eval's
+	// per-case log line) lives here, so it is stated once:
+	//
+	// Missing names the absent term and never the answer given. "missing: harbor-db"
+	// cannot distinguish a right cause phrased loosely from a wrong cause, so every
+	// gated nightly case failed unreadably from 2026-08-09 until this was recorded.
+	//
+	// Set only on a FAILING run — a right answer is not a finding, and the redaction
+	// pass is not worth paying on results nothing reads. Empty on a pass, and on a run
+	// that produced no findings at all.
+	//
+	// NOT truncated: callers dedup on the full text and cap at store time, so that two
+	// claims sharing a long prefix are not collapsed into one. See recordFailedClaim.
 	Claim string
 
 	// Recall telemetry (populated only for cases with a catalog fixture): whether
@@ -65,14 +75,18 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 		}
 	}
 
-	return Result{
+	pass := len(missing) == 0 && inv.Confidence >= exp.MinConfidence
+	res := Result{
 		Name:        name,
-		Pass:        len(missing) == 0 && inv.Confidence >= exp.MinConfidence,
+		Pass:        pass,
 		Confidence:  inv.Confidence,
 		Missing:     missing,
 		OverClaimed: overClaimed,
-		Claim:       boundedClaim(blamed),
 	}
+	if !pass {
+		res.Claim = reportableClaim(blamed)
+	}
+	return res
 }
 
 // notInClaim returns the terms absent from claim, which must already be lower-cased.
@@ -129,25 +143,36 @@ func investigationText(inv providers.Investigation) string {
 	return b.String()
 }
 
-// maxClaimBytes bounds one recorded claim. The report is published as a CI artifact
-// and read by hand, so a claim is a few sentences of diagnostic, never a transcript.
+// maxClaimBytes caps one STORED claim. The report is a CI artifact read by hand, so a
+// claim is a few sentences of diagnostic, never a transcript.
 const maxClaimBytes = 600
 
-// maxFailedClaims bounds how many DISTINCT failing claims one case records. A case
-// whose repeats all disagree is itself the finding; pasting every variant into the
-// report buys nothing a reader cannot get from the first few.
+// maxFailedClaims bounds how many failing claims one case stores. A case whose repeats
+// all disagree is itself the finding; pasting every variant into the report buys
+// nothing a reader cannot get from the first few.
 const maxFailedClaims = 3
 
-// boundedClaim renders a claim for the report: secret-redacted and hard-capped to
-// maxClaimBytes. Unlike boundedTranscript it keeps the HEAD — a claim leads with the
-// title and the first (highest-ranked) cause, which is the part a reader needs.
+// reportableClaim renders a claim for the log and the report: secret-redacted and
+// FLATTENED to a single line.
+//
+// Flattening is not cosmetic. The claim is free-form model text that reaches a
+// one-line-per-case log table and a markdown scorecard cell, and a raw newline in it
+// would not merely wrap — it would emit an unindented line that a reader (or a log
+// scraper) cannot tell from the harness's own verdict lines. The same hazard is already
+// handled by cellEscaper in scorecard.go and oneLineIndent in internal/app.
+//
 // redact.Secrets is idempotent, so re-applying it over already-redacted model text is
 // safe and guarantees the published artifact carries no secret-shaped value.
-// ToValidUTF8 drops the partial rune a byte-slice cap can leave behind.
-func boundedClaim(s string) string {
-	s = strings.TrimSpace(redact.Secrets(s))
-	if len(s) > maxClaimBytes {
-		s = strings.ToValidUTF8(s[:maxClaimBytes], "")
+func reportableClaim(s string) string {
+	return strings.Join(strings.Fields(redact.Secrets(s)), " ")
+}
+
+// capClaim caps a claim at maxClaimBytes, marking the cut so a reader can tell "the
+// model stopped here" from "we cut it here". ToValidUTF8 drops the partial rune a
+// byte-slice cap can leave behind.
+func capClaim(s string) string {
+	if len(s) <= maxClaimBytes {
+		return s
 	}
-	return s
+	return strings.ToValidUTF8(s[:maxClaimBytes], "") + " […]"
 }

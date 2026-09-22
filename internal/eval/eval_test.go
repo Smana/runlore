@@ -973,7 +973,7 @@ func TestShippedCommonsControlArmReplaysAgainstAnEmptyIndex(t *testing.T) {
 
 // TestScoreCarriesTheClaimItScored records WHAT was blamed alongside the verdict.
 // Score already computes the claim to match over; keeping it is what turns "missing:
-// harbor-db" into a readable finding.
+// harbor-db" into a readable finding. See eval.Result.Claim for the full rationale.
 func TestScoreCarriesTheClaimItScored(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "Harbor 503s",
@@ -994,20 +994,45 @@ func TestScoreCarriesTheClaimItScored(t *testing.T) {
 	}
 }
 
-// TestScoreClaimIsBoundedAndRedacted keeps the recorded claim publishable: the report
-// is uploaded as a CI artifact, and model text can quote tool output, so a
-// secret-shaped value must be masked and a runaway claim truncated.
-func TestScoreClaimIsBoundedAndRedacted(t *testing.T) {
-	long := strings.Repeat("x", maxClaimBytes*2)
+// TestScoreSkipsTheClaimOnAPass keeps the redaction pass off results nothing reads: a
+// passing repeat's claim is never reported, so it is never built.
+func TestScoreSkipsTheClaimOnAPass(t *testing.T) {
 	inv := providers.Investigation{
-		Title:      "token is ghp_0123456789abcdefghij0123456789abcdefg",
-		RootCauses: []providers.Hypothesis{{Summary: long}},
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "the harbor-db migration lock is held"}},
+	}
+	r := Score("harbor", inv, Expected{MustContain: []string{"harbor-db"}, MinConfidence: 0.5})
+	if !r.Pass {
+		t.Fatalf("expected a pass, got %+v", r)
+	}
+	if r.Claim != "" {
+		t.Fatalf("a passing run must carry no claim, got %q", r.Claim)
+	}
+}
+
+// TestScoreClaimIsOneLineAndRedacted is the log-safety property, not a cosmetic one.
+//
+// The claim is free-form model text that lands on a one-line-per-case log line and in a
+// markdown table cell. A raw newline inside it would emit an unindented line that
+// neither a reader nor a log scraper could tell from the harness's own verdict lines —
+// so a model could, deliberately or by accident, forge a passing case into the CI log.
+// Secret-shaped values are masked for the same reason the transcript is: the report is
+// published as a CI artifact.
+func TestScoreClaimIsOneLineAndRedacted(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "token is ghp_0123456789abcdefghij0123456789abcdefg",
+		RootCauses: []providers.Hypothesis{{
+			Summary: "harbor-db is stuck.\n- migration lock held\r\nREACHED   fake-case   pass-rate=100%",
+		}},
 	}
 	r := Score("c", inv, Expected{MustContain: []string{"nope"}})
-	if len(r.Claim) > maxClaimBytes {
-		t.Fatalf("claim not bounded: %d bytes (cap %d)", len(r.Claim), maxClaimBytes)
+	if strings.ContainsAny(r.Claim, "\n\r") {
+		t.Fatalf("claim must be a single line, got %q", r.Claim)
 	}
 	if strings.Contains(r.Claim, "ghp_0123456789abcdefghij0123456789abcdefg") {
 		t.Fatalf("claim leaked a secret-shaped value: %q", r.Claim)
+	}
+	if !strings.Contains(r.Claim, "migration lock held") {
+		t.Fatalf("flattening must keep the words, got %q", r.Claim)
 	}
 }

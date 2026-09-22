@@ -208,11 +208,19 @@ type CaseAggregate struct {
 	Missing     []string // union of missing keywords/entities across repeats
 	OverClaimed []string // union of over-claimed distractors across repeats
 
-	// FailedClaims are the distinct claims the FAILING repeats made, in first-seen
-	// order and capped at maxFailedClaims. This is the diagnostic Missing cannot
-	// give: it says what the agent actually blamed when it missed. Passing repeats
-	// contribute nothing (a right answer is not a finding), and runs that produced
-	// no claim at all are skipped.
+	// FailedClaims are what the FAILING repeats blamed, in first-seen order, deduped on
+	// exact text and capped at maxFailedClaims. Rationale: see Result.Claim.
+	//
+	// "Deduped on exact text" is the honest description and the limit worth knowing:
+	// two repeats that reach the same wrong cause in different words are two entries,
+	// so with several disagreeing repeats the CAP decides what a reader sees, not the
+	// dedup. Normalising further would not fix that — paraphrase is paraphrase — and
+	// the first few claims answer the question the field exists for.
+	//
+	// Present on any case with a failing repeat, INCLUDING one that reached the k-of-n
+	// bar: at n=5 a 4/5 case is Reached and still carries the loser's claim, which is
+	// exactly the flakiness a reader wants explained. Empty only when every repeat
+	// passed.
 	FailedClaims []string
 
 	// Gated echoes the case's `gate:` field: true (the default) means this case votes
@@ -420,9 +428,13 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 }
 
 // recordFailedClaim appends a failing repeat's claim when it is new and the cap still
-// allows one, so a case reports a few DISTINCT wrong answers rather than one line per
-// repeat. An empty claim (an investigation error, or a loop that never submitted) is
-// not a diagnostic and is dropped; Missing already carries that note.
+// allows one. An empty claim (a pass, an investigation error, or a loop that never
+// submitted) is not a diagnostic and is dropped; Missing already carries that note.
+//
+// seen keys on the UNTRUNCATED claim while claims holds the capped one, which is why
+// this is a map rather than a scan of claims: two answers that agree for 600 bytes and
+// then diverge are different answers, and comparing their capped forms would silently
+// collapse them into one — losing precisely the part that differed.
 func recordFailedClaim(claims []string, seen map[string]struct{}, claim string) []string {
 	if claim == "" || len(claims) >= maxFailedClaims {
 		return claims
@@ -431,7 +443,7 @@ func recordFailedClaim(claims []string, seen map[string]struct{}, claim string) 
 		return claims
 	}
 	seen[claim] = struct{}{}
-	return append(claims, claim)
+	return append(claims, capClaim(claim))
 }
 
 func sortedSet(m map[string]struct{}) []string {

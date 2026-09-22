@@ -81,7 +81,7 @@ func submitFindingsSpec() providers.ToolSpec {
 "title":{"type":"string"},
 "confidence":{"type":"number"},
 "affected_resource":{"type":"object","description":"the workload your investigation identified as the failing/affected resource","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},
-"root_causes":{"type":"array","items":{"type":"object","properties":{
+"root_causes":{"type":"array","description":"ranked, most likely first. One entry per distinct cause; do not split one cause across entries","items":{"type":"object","properties":{
 "summary":{"type":"string","description":"the cause in one or two sentences. Name the SPECIFIC resource the cause sits on - as it appears in the cluster, the string you would pass to kubectl, never a generic noun like 'the service' or 'the deployment' - and the identifier it turns on: the tag, revision, chart version, config key or field. The resource that FAILED is often not the one the cause sits on; name the latter. A mechanism on its own is unactionable: 'a certificate problem broke the ingress' leaves the on-call searching, while 'the tls-frontend Secret certificate expired on 2026-05-02, so TLS handshakes are rejected' names what to fix. State them HERE, in the cause itself, even when the same identifiers also appear in your evidence"},
 "confidence":{"type":"number","description":"how strongly the evidence below supports THIS root cause, 0-1. It measures support for the cause you STATED, not how sure you are of the narrative around it. Required: an omitted confidence is delivered as 0%, which reads to the on-call as 'no confidence' and buries a sound finding under a red badge"},
 "change_ref":{"type":"string"},

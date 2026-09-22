@@ -36,6 +36,7 @@ the model provider.
 | Reranker rollout | **`shadow` before `jev`** | The reranker sits in front of the recall short-circuit on every incident. Shadow mode measures agreement on live traffic while the LLM keeps deciding |
 | Reranker failure | **Fall through to a full investigation** | Identical to today's LLM-reranker failure path. One backend per call, no hidden second call, no circuit breaker to test |
 | Dedup verdict | **Three tiers: skip, annotate, file** | A confident duplicate is skipped and recorded as a confirmation; a middling one is filed *with the suspect named in the body* so the reviewer decides; a low one files as today |
+| Dedup knobs | **Extend `forge:`, do not invent `curation:`** | `dup_score`, `min_confidence` and `skip_verdicts` are already `forge.*`. A new block would leave an operator setting `forge.dup_score` and `curation.dedup_backend` to configure one gate, and the new band edges living apart from the threshold they replace — the same placement defect the row below argues against |
 | Config placement | **Top-level `decision_model:`, never under `model:`** | It is a different wire protocol from a different vendor answering a different question. Nesting it under `model:` would invite an operator to read it as another LLM endpoint and to expect `max_tokens`, `effort` or `thinking` to mean something there. `model.embeddings` is the counter-precedent, but that serves the model layer alone |
 | Switch | **An explicit `enabled` flag, not block presence** | `model.verify` and `model.chat` use presence as the switch, which is fine for a block an operator sets once. This one needs to be turnable **off in a hurry** without deleting the endpoint and key-env config, so it follows `sources.gitops` and `catalog.instant_recall` instead |
 | Credentials | **`api_key_env`, the env var NAME** | `configmap.yaml` renders the whole `config:` block verbatim (`toYaml`), so a literal key in config lands in a **ConfigMap** in plaintext rather than a Secret. Every existing provider takes `api_key_env` for exactly this reason |
@@ -85,7 +86,10 @@ type Decider interface {
 }
 ```
 
-`Question` carries an id, a kind (`choice`, `score`, `noul`), instructions and criteria. `Answers`
+`Question` carries an id, a kind (`choice`, `score`, `noul`), instructions and criteria.
+**`noul` is TypeSafe's own name for its boolean primitive** — it returns a probability in
+`[0,1]` that a statement is true — so it is spelled that way here deliberately and must be
+carried verbatim into the wire types. It is not a typo for `bool`. `Answers`
 maps each id to its chosen value, the full probability distribution, and a confidence in `[0,1]`.
 Questions in one request are evaluated independently against the same state, so a consumer that needs
 two judgements pays for one round trip.
@@ -153,7 +157,7 @@ catalog:
     rerank_backend: shadow            # llm (default) | jev | shadow
     # rerank_threshold_jev: omitted on purpose here. shadow does not read it;
     # it is required only once rerank_backend becomes jev.
-curation:
+forge:                                # dedup config already lives here, beside dup_score
   dedup_backend: bm25                 # bm25 (default) | jev
   # dedup_skip_above / dedup_annotate_above: required once dedup_backend is jev
 ```
@@ -211,6 +215,20 @@ The decider is never the reason an incident goes uninvestigated.
 | **A confident wrong match.** Calibration is not correctness | Unchanged downstream gates: live-state confirmation, then the adversarial verify pass. A withdrawn recall falls through to a full investigation |
 | **Vendor and protocol sprawl**, which the design doc explicitly rejects | One narrow interface, one implementation, off by default, with a deterministic fall-through on every path |
 | **Threshold with no defensible default** | Shadow mode exists to produce the number. `jev` refuses to start without it |
+
+## A caveat this spec inherits
+
+The `submit_findings` guidance that made the nightly green states the *shape* the eval
+scores: name the resource the cause sits on rather than the one that failed, and name the
+identifier it turns on. The corpus grades exactly that — a tag on the `poisoned-recall`
+cases, and `harbor-db` rather than the failing `harbor-core`. The comment guarding
+`submitFindingsSpec` restricts EXAMPLES to faults outside the corpus, which is the weaker
+protection; restating the rubric's categories is the stronger form of teaching the answer.
+
+The guidance stands on its own merit, because an on-call needs the identifier whatever the
+eval measures. The measurement is what is weakened. Anything this spec's shadow mode
+concludes from the same corpus inherits the caveat, which is a reason to hold out a case
+the prompt has never been tuned against before reading a shadow-agreement number as truth.
 
 ## Open questions
 

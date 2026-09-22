@@ -247,6 +247,16 @@ func RunEval(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "eval: [%d/%d] %-32s %-7s pass-rate=%.0f%%  elapsed=%s\n",
 			done, total, a.Name, status, a.PassRate*100, time.Since(start).Round(time.Second))
+		// What the failing repeats blamed (see eval.Result.Claim) goes HERE, per case,
+		// rather than only in the end-of-run summary below. `timeout` in
+		// .github/workflows/eval.yaml kills a long campaign mid-run — the workflow's own
+		// header records a week of nightlies that died exactly that way, with no report
+		// written — so a diagnostic that appears only after the last case is one the
+		// overrunning run never gets. Claims are single-line by construction
+		// (eval.reportableClaim), so they cannot break this table.
+		for _, claim := range a.FailedClaims {
+			fmt.Fprintf(os.Stderr, "eval:      claimed: %s\n", claim)
+		}
 	}
 	camp := runner.RunN(ctx, cases, *n)
 	reportCampaignHalt(budget, len(camp.Aggregates), len(cases))
@@ -264,14 +274,6 @@ func RunEval(args []string) error {
 			fmt.Printf("  missing: %s", strings.Join(a.Missing, ", "))
 		}
 		fmt.Println()
-		// What the failing repeats actually blamed. Missing names the absent term and
-		// never the answer given, which is what left a red nightly undiagnosable: it
-		// cannot distinguish a correct cause phrased loosely from a wrong one. Printed
-		// here (not only in the report JSON) because the CI log is what a reader opens
-		// first. Indented to align under the case name; absent on a passing case.
-		for _, claim := range a.FailedClaims {
-			fmt.Printf("         claimed: %s\n", claim)
-		}
 	}
 	if len(camp.Aggregates) == 0 {
 		fmt.Print("\nno eval cases ran")
