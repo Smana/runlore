@@ -38,21 +38,24 @@ func normalizeText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// normalizeResourceName reduces a resource name to the identity the curator groups
+// normalizeResourceName reduces a workload's name to the identity the curator groups
 // by: an AWS ARN collapses to the resource identifier its CloudWatch dimension
-// carries, and a trailing pod-name hash is stripped so a per-pod name reduces to its
-// controller family. It is a thin alias for providers.NormalizeResourceName, the
-// single source of truth shared with the instant-recall path (CORE-681) so the two
-// can never drift.
+// carries, and a trailing per-instance suffix is stripped so a per-pod name reduces
+// to its controller family — a pod hash, a CronJob run stamp and, when the Kind says
+// the name is a Pod's, a StatefulSet replica ordinal (#513). It is a thin alias for
+// providers.Workload.IdentityName, the single source of truth shared with the
+// instant-recall path (CORE-681) so the two can never drift.
 //
-// It is deliberately NOT named normalizeWorkloadName any more: providers also
-// exports a NormalizeWorkloadName that does only the per-instance-suffix half — pod
-// hashes and CronJob run stamps — and a local alias wearing that exact name would
-// read as a pass-through to it while meaning something wider. Read providers.NormalizeResourceName for the accepted consequence of the ARN
-// collapse — the account and region are dropped, and the surrounding key fields do
-// not reliably put them back.
-func normalizeResourceName(name string) string {
-	return providers.NormalizeResourceName(name)
+// It takes the Workload and not the bare name because the Kind is part of the rule:
+// on a kind-less name a trailing ordinal is the name, and no string-level normalizer
+// may fold it. It is deliberately NOT named normalizeWorkloadName: providers also
+// exports a NormalizeWorkloadName that does only the per-instance-suffix half, and a
+// local alias wearing that exact name would read as a pass-through to it while
+// meaning something wider. Read providers.NormalizeResourceName for the accepted
+// consequence of the ARN collapse — the account and region are dropped, and the
+// surrounding key fields do not reliably put them back.
+func normalizeResourceName(w providers.Workload) string {
+	return w.IdentityName()
 }
 
 // IncidentKey builds a host-invariant, per-class dedup key for an alert: the alert
@@ -88,12 +91,15 @@ func normalizeResourceName(name string) string {
 // The same one-time reset now also reaches CronJob-generated workloads:
 // NormalizeWorkloadName folds the <unix-minutes> run suffix into the CronJob family,
 // so github-teams-sync-29787720 and -29790030 key alike where they used to key apart.
+// StatefulSet replicas reach it the same way (#513): with Kind "Pod",
+// vmagent-vmagent-0 and -1 key alike where they used to key apart.
 func IncidentKey(alertname string, w providers.Workload, cluster string) string {
+	w.Name = strings.TrimSpace(w.Name)
 	parts := []string{
 		strings.TrimSpace(alertname),
 		strings.TrimSpace(w.Namespace),
 		strings.TrimSpace(w.Kind),
-		normalizeResourceName(strings.TrimSpace(w.Name)),
+		normalizeResourceName(w),
 		strings.TrimSpace(cluster),
 	}
 	if account := strings.TrimSpace(w.Account); account != "" {
@@ -123,7 +129,7 @@ func Fingerprint(inv providers.Investigation) string {
 	}
 	if len(inv.Changes) > 0 {
 		w := inv.Changes[0].Workload
-		b.WriteString(" " + w.Namespace + " " + normalizeResourceName(w.Name))
+		b.WriteString(" " + w.Namespace + " " + normalizeResourceName(w))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -174,7 +180,7 @@ func DupFingerprint(inv providers.Investigation) string {
 	// incident on a different pod/node keys alike (CORE-681). The TriggerKey is
 	// already a host-invariant per-class key for alert sources (see IncidentKey).
 	res := inv.Resource
-	res.Name = normalizeResourceName(res.Name)
+	res.Name = normalizeResourceName(res)
 	ref := strings.ToLower(res.Ref())
 	// The AWS account qualifies the ref, so one instance name in two accounts does not
 	// curate as one incident. Appended only when present, so a Kubernetes ref — and

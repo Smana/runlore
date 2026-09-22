@@ -168,7 +168,7 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // exact source; only the value the model happened to produce differed, so fixing
 // one path and not the other would leave the same defect armed here.
 func normalizeResource(w providers.Workload) string {
-	w.Name = normalizeResourceName(w.Name)
+	w.Name = normalizeResourceName(w)
 	ref, _ := kbvalidate.DraftResource(w.Ref())
 	return ref
 }

@@ -224,11 +224,56 @@ func labelValue(labels map[string]string, keys []string) string {
 // filed under a full ARN in another account.
 func (w Workload) ResourceID() ResourceID {
 	id := ParseResourceID(w.Name)
+	if w.foldsReplicaOrdinal() {
+		id.Name = stripReplicaOrdinal(id.Name)
+	}
 	return ResourceID{
 		Name:    id.Name,
 		Region:  cmp.Or(id.Region, w.Region),
 		Account: cmp.Or(id.Account, w.Account),
 	}
+}
+
+// IdentityName is the name half of the identity w is keyed and compared by: the
+// bare resource identifier (an ARN loses its scaffolding) with its per-instance
+// suffix folded — pod hash, CronJob run stamp and, when the Kind says the name is a
+// Pod's, ONE StatefulSet replica ordinal (#513). It is ResourceID().Name, spelled
+// as its own method so the key builders (curator.IncidentKey, DupFingerprint, the
+// drafted entry's resource) and the comparison (ResourceID.Agrees) read one rule.
+//
+// This is the seam where the Kind is consulted. NormalizeResourceName and
+// NormalizeWorkloadName take a bare string and cannot be: on a kind-less name a
+// trailing ordinal is the name, and they keep it.
+func (w Workload) IdentityName() string {
+	return w.ResourceID().Name
+}
+
+// foldsReplicaOrdinal reports whether w's Name is a Pod's, so that a trailing
+// -<digits> is a StatefulSet replica ordinal rather than part of the name. Only the
+// Kind can say so: a Kubernetes controller, a node or a cloud resource whose name
+// ends in a digit is named that way.
+func (w Workload) foldsReplicaOrdinal() bool {
+	return w.Kind == "Pod"
+}
+
+// AgreesWithEntryName reports whether w names the same resource as a catalog
+// entry's stored resource name. It is ResourceID.Agrees with one tolerance: a
+// pod-scoped workload has folded its StatefulSet replica ordinal, but an entry
+// filed before #513 still names the sibling replica it was written from, so the
+// entry is read both as written and folded once. Once, not to a fixed point, so an
+// entry filed under a StatefulSet whose own name ends in a digit still matches; and
+// only for a workload whose Kind licenses the fold — a kind-less request's numbered
+// name is the name, and it matches only itself.
+func (w Workload) AgreesWithEntryName(name string) bool {
+	req, entry := w.ResourceID(), ParseResourceID(name)
+	if req.Agrees(entry) {
+		return true
+	}
+	if !w.foldsReplicaOrdinal() {
+		return false
+	}
+	entry.Name = stripReplicaOrdinal(entry.Name)
+	return req.Agrees(entry)
 }
 
 // ARNResourceName reduces an AWS ARN to the resource identifier that the matching
