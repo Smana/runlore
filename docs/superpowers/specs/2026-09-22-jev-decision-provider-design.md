@@ -3,7 +3,8 @@
 - **Date:** 2026-09-22
 - **Status:** Approved (brainstorming)
 - **Owner:** Smaine Kahlouch
-- **Adds:** a `Decider` provider kind, one implementation (TypeSafe Jev), and two consumers
+- **Adds:** a `Decider` provider kind under a top-level `decision_model:` block, one implementation
+  (TypeSafe Jev), and two consumers
 - **Touches:** `internal/providers/providers.go`, `internal/decide/` (new), `internal/investigate/rerank.go`,
   `internal/curator/curator.go`, `internal/config/config.go`, `internal/telemetry/metrics.go`,
   `internal/eval/` (shadow reporting)
@@ -35,7 +36,9 @@ the model provider.
 | Reranker rollout | **`shadow` before `jev`** | The reranker sits in front of the recall short-circuit on every incident. Shadow mode measures agreement on live traffic while the LLM keeps deciding |
 | Reranker failure | **Fall through to a full investigation** | Identical to today's LLM-reranker failure path. One backend per call, no hidden second call, no circuit breaker to test |
 | Dedup verdict | **Three tiers: skip, annotate, file** | A confident duplicate is skipped and recorded as a confirmation; a middling one is filed *with the suspect named in the body* so the reviewer decides; a low one files as today |
-| Config placement | **Top-level `decider:`** | It is a new provider kind serving several subsystems, which is how every other provider kind is configured. `model.embeddings` is the counter-precedent, but that serves the model layer alone |
+| Config placement | **Top-level `decision_model:`, never under `model:`** | It is a different wire protocol from a different vendor answering a different question. Nesting it under `model:` would invite an operator to read it as another LLM endpoint and to expect `max_tokens`, `effort` or `thinking` to mean something there. `model.embeddings` is the counter-precedent, but that serves the model layer alone |
+| Switch | **An explicit `enabled` flag, not block presence** | `model.verify` and `model.chat` use presence as the switch, which is fine for a block an operator sets once. This one needs to be turnable **off in a hurry** without deleting the endpoint and key-env config, so it follows `sources.gitops` and `catalog.instant_recall` instead |
+| Credentials | **`api_key_env`, the env var NAME** | `configmap.yaml` renders the whole `config:` block verbatim (`toYaml`), so a literal key in config lands in a **ConfigMap** in plaintext rather than a Secret. Every existing provider takes `api_key_env` for exactly this reason |
 | Default | **Off** | Every consumer keeps its current backend as the default. Nothing changes until an operator opts in |
 
 ## Non-goals
@@ -58,7 +61,7 @@ flowchart TD
     C -->|below| F[full investigation]
     C -->|above| D[rerank decision]
     D -->|llm| D1[model: forced rerank_match]
-    D -->|jev| D2[decider: choice over candidates]
+    D -->|jev| D2[decision model: choice over candidates]
     D -->|shadow| D3[both; LLM decides, agreement recorded]
     D1 --> E{named candidate above threshold?}
     D2 --> E
@@ -112,8 +115,8 @@ Two new metrics, following the existing recall naming:
 
 | Metric | Shape |
 |---|---|
-| `runlore_decider_confidence` | Histogram of returned confidence, labelled by consumer. The distribution a threshold is read off |
-| `runlore_decider_shadow_total` | Counter labelled `consumer` and `agreement` (`agree`, `disagree`, `error`) |
+| `runlore_decision_model_confidence` | Histogram of returned confidence, labelled by consumer. The distribution a threshold is read off |
+| `runlore_decision_model_shadow_total` | Counter labelled `consumer` and `agreement` (`agree`, `disagree`, `error`) |
 
 ## Curation dedup
 
@@ -134,12 +137,17 @@ entry for a fault the catalog already held.
 
 ## Config
 
+A **decision model is not an LLM**, and the config has to say so at a glance. It gets its own
+top-level block, and it deliberately carries none of `model:`'s vocabulary: no `max_tokens`, no
+`effort`, no `thinking`. None of them mean anything to a model that emits no tokens.
+
 ```yaml
-decider:                              # absent ⇒ no decider is built; every consumer keeps its default
-  provider: typesafe
+decision_model:                       # a System One model: typed questions in, typed answers out.
+  enabled: true                       #   NOT an LLM, and deliberately not nested under model:
+  provider: typesafe                  # the only implementation for now
   base_url: https://api.typesafe.ai
   model: jev-latest
-  api_key_env: TYPESAFE_API_KEY
+  api_key_env: TYPESAFE_API_KEY       # the env var NAME. Never the key itself — see below
 catalog:
   instant_recall:
     rerank_backend: shadow            # llm (default) | jev | shadow
@@ -150,21 +158,31 @@ curation:
   # dedup_skip_above / dedup_annotate_above: required once dedup_backend is jev
 ```
 
-`config.Validate` fails fast at load, matching how the model knobs are validated against their
-provider:
+**Never a literal key.** `deploy/helm/runlore/templates/configmap.yaml` renders the whole `config:`
+block verbatim, so an `api_key` field would put the credential in a **ConfigMap** in plaintext,
+readable by anyone with `get configmaps` and absent from every Secret-handling path the chart has.
+`api_key_env` names the variable instead, which is what every other provider here takes. An empty
+value means keyless, for a gateway that injects the credential itself.
 
-| Rejected | Because |
+**`enabled: false` wins, and it does not error.** The obvious design is to reject a config whose
+consumer points at `jev` while the block is disabled. That is wrong: the flag exists so an operator
+can stop every decision call *during an incident* without also editing two consumer keys, and a
+validation error at startup would make the kill switch useless exactly when it is needed. So a
+disabled block makes every consumer fall back to its default backend, and the fallback is logged
+once per consumer at startup, naming each one.
+
+| Outcome at load | Case |
 |---|---|
-| A consumer on `jev` or `shadow` with no `decider:` block | Nothing to call |
-| `rerank_backend: jev` with no `rerank_threshold_jev` | The bar would be invented |
-| `dedup_backend: jev` missing either band edge | Same |
-| A band edge outside `(0,1]`, or skip below annotate | The tiers would be unorderable |
+| **Error** | `enabled: true` with no `provider`, `base_url` or `model` |
+| **Error** | `rerank_backend: jev` with no `rerank_threshold_jev` — the bar would be invented |
+| **Error** | `dedup_backend: jev` missing either band edge, a band outside `(0,1]`, or skip below annotate |
+| **Warn, fall back** | A consumer on `jev` or `shadow` while the block is absent or disabled |
 
 ## Error handling
 
 | Failure | Behaviour |
 |---|---|
-| Decider errors, times out, or is unreachable | Reranker: fall through to a full investigation. Dedup: fall back to the BM25 path |
+| The decision model errors, times out, or is unreachable | Reranker: fall through to a full investigation. Dedup: fall back to the BM25 path |
 | Answer names an id outside the candidate set | Treated as no match, as today |
 | Confidence below the backend's bar | No fire, counted under the existing `rerank_low_confidence` rejection reason |
 | Shadow call fails | The LLM verdict stands and the agreement metric records the failure; an investigation must never be affected by the shadow arm |
@@ -199,14 +217,15 @@ The decider is never the reason an incident goes uninvestigated.
 1. **TypeSafe's data retention and terms.** Unresolved, and gating for this audience. Must be
    answered before the feature is recommended anywhere in the published docs.
 2. **The semantic KB advisory.** A stretch item with a mechanical test: include it if it is two
-   `noul` questions over the existing client, reusing `decider:` with no new config key and no new
+   `noul` questions over the existing client, reusing `decision_model:` with no new config key and no new
    question kind. Anything more and it is deferred, not squeezed in.
 3. **Agreement bar for promoting `shadow` to `jev`.** Deliberately not fixed here. It is a reading of
    the first shadow run against the replay corpus, not a number to invent now.
 
 ## Acceptance criteria
 
-- `rerank_backend: llm` and an absent `decider:` block reproduce today's behaviour byte for byte,
+- `rerank_backend: llm` and an absent or disabled `decision_model:` block reproduce today's behaviour
+  byte for byte,
   proven by the existing recall tests passing unchanged.
 - With `shadow`, an investigation's outcome is independent of the decider arm, including when it
   fails, and agreement is visible in the metrics and the replay report.
