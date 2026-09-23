@@ -819,3 +819,118 @@ func TestBuildInvestigatorWiresTheCostCeiling(t *testing.T) {
 		t.Fatalf("max_cost_per_investigation not wired: got %v, want 4.25", li.MaxCostPerInvestigation)
 	}
 }
+
+// rerankBackendCfg builds a minimal config with a real (empty) catalog dir and
+// instant recall enabled, so BuildModelAndTools wires a Reranker — the shared setup
+// for the decision-model wiring tests below.
+func rerankBackendCfg(t *testing.T, backend string, dm config.DecisionModel) *config.Config {
+	t.Helper()
+	cfg := &config.Config{
+		Model:   config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"},
+		Catalog: config.Catalog{Dir: t.TempDir()},
+	}
+	cfg.Catalog.InstantRecall.Enabled = true
+	cfg.Catalog.InstantRecall.RerankBackend = backend
+	cfg.Catalog.InstantRecall.RerankThresholdJev = 0.3
+	cfg.DecisionModel = dm
+	return cfg
+}
+
+// TestRerankBackendFallsBackWithOneWarning pins the kill switch's observable
+// behaviour (carried question 2): a consumer pointing at "jev" with no usable
+// decision model falls back to the llm backend, logging exactly one warning that
+// names the configured backend — not silence, and not a wrong recall.
+func TestRerankBackendFallsBackWithOneWarning(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	cfg := rerankBackendCfg(t, "jev", config.DecisionModel{}) // absent
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	_, _, recall, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+	if recall == nil || recall.Rerank == nil {
+		t.Fatal("reranker not wired")
+	}
+	if recall.Rerank.Decider != nil {
+		t.Fatal("no decision model is usable: Decider must stay nil")
+	}
+	got := buf.String()
+	const want = "rerank_backend is set but no decision model is usable"
+	if n := strings.Count(got, want); n != 1 {
+		t.Fatalf("want exactly one fallback warning, got %d:\n%s", n, got)
+	}
+	if !strings.Contains(got, "jev") {
+		t.Fatalf("warning must name the configured backend:\n%s", got)
+	}
+
+	// "configured but disabled" must behave identically to "absent" — that's what
+	// makes enabled a kill switch rather than a second way to spell presence.
+	buf.Reset()
+	cfg = rerankBackendCfg(t, "jev", config.DecisionModel{Provider: "typesafe", BaseURL: "https://x", Model: "jev-latest"})
+	_, _, recall, _ = BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+	if recall.Rerank.Decider != nil {
+		t.Fatal("disabled decision model: Decider must stay nil")
+	}
+	if n := strings.Count(buf.String(), want); n != 1 {
+		t.Fatalf("disabled block must still warn exactly once, got %d:\n%s", n, buf.String())
+	}
+}
+
+// TestRerankBackendWiresDeciderWhenUsable pins the success path: an enabled, usable
+// decision_model reaches the Reranker's Decider/Backend/ThresholdJev, and no
+// fallback warning fires.
+func TestRerankBackendWiresDeciderWhenUsable(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	cfg := rerankBackendCfg(t, "jev", config.DecisionModel{
+		Enabled: true, Provider: "typesafe", BaseURL: "https://x", Model: "jev-latest",
+	})
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	_, _, recall, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+	if recall == nil || recall.Rerank == nil {
+		t.Fatal("reranker not wired")
+	}
+	if recall.Rerank.Decider == nil {
+		t.Fatal("a usable decision model must build a Decider")
+	}
+	if recall.Rerank.Backend != "jev" {
+		t.Fatalf("Backend = %q, want jev", recall.Rerank.Backend)
+	}
+	if recall.Rerank.ThresholdJev != 0.3 {
+		t.Fatalf("ThresholdJev = %v, want 0.3", recall.Rerank.ThresholdJev)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("a usable decision model must not warn:\n%s", buf.String())
+	}
+}
+
+// TestRerankBackendLLMIgnoresDecisionModel pins "off by default" (global
+// constraint): the llm backend must never build a decider or warn, even when
+// decision_model is fully configured and enabled — an absent or disabled
+// decision_model block is not the only way to leave the reranker unchanged; so is
+// simply not pointing a consumer at it.
+func TestRerankBackendLLMIgnoresDecisionModel(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	cfg := rerankBackendCfg(t, "llm", config.DecisionModel{
+		Enabled: true, Provider: "typesafe", BaseURL: "https://x", Model: "jev-latest",
+	})
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	_, _, recall, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+	if recall == nil || recall.Rerank == nil {
+		t.Fatal("reranker not wired")
+	}
+	if recall.Rerank.Decider != nil {
+		t.Fatal("llm backend must never build a Decider")
+	}
+	if recall.Rerank.Backend != "" {
+		t.Fatalf("Backend = %q, want untouched (empty)", recall.Rerank.Backend)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("llm backend must not warn:\n%s", buf.String())
+	}
+}
