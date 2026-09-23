@@ -2494,6 +2494,13 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("catalog.instant_recall.rerank_backend %q is not valid (llm|jev|shadow)", b)
 	}
+	// rerank_threshold_jev is read by `shadow` too — it decides whether a shadow
+	// comparison counts as a fire (see rerank.go's shadowFired), not only by `jev` — so
+	// an out-of-range value must fail loud regardless of backend. 0 (unset) is exempt
+	// here; the required-when-jev check above already covers that case for backend jev.
+	if t := c.Catalog.InstantRecall.RerankThresholdJev; t != 0 && (t < 0 || t > 1) {
+		return fmt.Errorf("catalog.instant_recall.rerank_threshold_jev must be in (0,1] when set, got %g", t)
+	}
 	switch b := c.Forge.DedupBackend; b {
 	case "", "bm25":
 	case "jev":

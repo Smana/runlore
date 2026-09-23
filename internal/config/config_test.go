@@ -2230,6 +2230,16 @@ func TestDecisionModelValidation(t *testing.T) {
 			wantErr: "rerank_threshold_jev",
 		},
 		{
+			name: "an out-of-range threshold is rejected under shadow too",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
+				c.Catalog.InstantRecall.Enabled = true
+				c.Catalog.InstantRecall.RerankBackend = "shadow"
+				c.Catalog.InstantRecall.RerankThresholdJev = 5
+			},
+			wantErr: "rerank_threshold_jev",
+		},
+		{
 			name: "jev dedup needs both band edges",
 			mutate: func(c *Config) {
 				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
