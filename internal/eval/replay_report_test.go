@@ -96,35 +96,3 @@ func TestReportCarriesFailedClaims(t *testing.T) {
 		t.Fatalf("green report must omit failed_claims:\n%s", cb)
 	}
 }
-
-func TestReportCarriesShadowAgreement(t *testing.T) {
-	a := aggregateResults(Case{Name: "c"}, []Result{
-		{Pass: true, ShadowRan: true, ShadowAgreed: true},
-		{Pass: true, ShadowRan: true, ShadowAgreed: true},
-		{Pass: true, ShadowRan: true},
-	})
-	if a.ShadowAgree != 2 || a.ShadowTotal != 3 {
-		t.Fatalf("want 2/3, got %d/%d", a.ShadowAgree, a.ShadowTotal)
-	}
-	b, err := (Campaign{N: 3, Aggregates: []CaseAggregate{a}}).Report("t", "m", providers.Usage{}, nil).JSON()
-	if err != nil {
-		t.Fatalf("JSON: %v", err)
-	}
-	var got Report
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got.Cases[0].ShadowAgree != 2 || got.Cases[0].ShadowTotal != 3 {
-		t.Fatalf("shadow agreement not carried: %+v", got.Cases[0])
-	}
-
-	// A run with no shadow arm must not ship the keys at all.
-	clean := aggregateResults(Case{Name: "c"}, []Result{{Pass: true}})
-	cb, err := (Campaign{N: 1, Aggregates: []CaseAggregate{clean}}).Report("t", "m", providers.Usage{}, nil).JSON()
-	if err != nil {
-		t.Fatalf("JSON: %v", err)
-	}
-	if strings.Contains(string(cb), "shadow_") {
-		t.Fatalf("a non-shadow run must omit the shadow keys:\n%s", cb)
-	}
-}

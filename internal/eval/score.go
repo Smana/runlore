@@ -34,11 +34,6 @@ type Result struct {
 	RecallFired        bool
 	RecallShortCircuit bool
 
-	// ShadowRan / ShadowAgreed mirror RecallDecision's, so the replay corpus measures
-	// shadow-mode agreement per case rather than only in a process-global metric.
-	ShadowRan    bool
-	ShadowAgreed bool
-
 	// Usage is the provider-reported token spend of THIS run, attributed by the
 	// runner differencing its cumulative counter. Zero means the provider reported
 	// nothing — treated downstream as unknown, never as free.

@@ -111,8 +111,6 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	res := Score(c.Name, got, c.Expected)
 	res.RecallFired = decision.Fired
 	res.RecallShortCircuit = decision.ShortCircuited
-	res.ShadowRan = decision.ShadowRan
-	res.ShadowAgreed = decision.ShadowAgreed
 	if miss := checkRecall(c.ExpectRecall, decision); miss != "" {
 		res.Pass = false
 		res.Missing = append(res.Missing, miss)
@@ -231,12 +229,6 @@ type CaseAggregate struct {
 	ExpectRecall       string
 	RecallFired        int
 	RecallShortCircuit int
-
-	// ShadowAgree / ShadowTotal count shadow-mode rerank comparisons over the repeats.
-	// Zero when no shadow arm ran, which is why the report omits them rather than
-	// publishing 0/0.
-	ShadowAgree int
-	ShadowTotal int
 
 	// InputTokens / OutputTokens are the MEDIAN provider-reported spend per run for
 	// this case — the basis of the published cost-per-investigation figure. Zero when
@@ -384,7 +376,6 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 	ocSet := map[string]struct{}{}
 	var failedClaims []string
 	passes, fired, shortCircuits := 0, 0, 0
-	shadowAgree, shadowTotal := 0, 0
 	for _, res := range results {
 		if res.Pass {
 			passes++
@@ -398,12 +389,6 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		}
 		if res.RecallShortCircuit {
 			shortCircuits++
-		}
-		if res.ShadowRan {
-			shadowTotal++
-			if res.ShadowAgreed {
-				shadowAgree++
-			}
 		}
 		confs = append(confs, res.Confidence)
 		ins = append(ins, float64(res.Usage.InputTokens))
@@ -434,8 +419,6 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		ExpectRecall:       c.ExpectRecall,
 		RecallFired:        fired,
 		RecallShortCircuit: shortCircuits,
-		ShadowAgree:        shadowAgree,
-		ShadowTotal:        shadowTotal,
 		InputTokens:        int(medianFloat(ins)),
 		OutputTokens:       int(medianFloat(outs)),
 	}
