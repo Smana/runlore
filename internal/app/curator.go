@@ -108,6 +108,21 @@ func BuildCurator(cfg *config.Config, cat *catalog.Catalog, metrics *telemetry.M
 	if cat != nil { // assign via concrete check to avoid a typed-nil interface
 		cur.Catalog = cat
 	}
+	// Decision-model dedup backend, when one is configured and switched on. The
+	// warning is the load-bearing part of the fallback: an operator who flipped
+	// decision_model.enabled off must see that the dedup gate degraded to bm25
+	// rather than wonder why nothing changed — the same fallback shape as the
+	// reranker's rerank_backend wiring.
+	if cfg.Forge.DedupBackend == "jev" {
+		if dec := BuildDecider(cfg); dec != nil {
+			cur.Decider = dec
+			cur.DedupSkipAbove = cfg.Forge.DedupSkipAbove
+			cur.DedupAnnotateAbove = cfg.Forge.DedupAnnotateAbove
+		} else {
+			log.Warn("forge.dedup_backend is set but no decision model is usable; falling back to the bm25 gate",
+				"dedup_backend", cfg.Forge.DedupBackend, "decision_model_enabled", cfg.DecisionModel.Enabled)
+		}
+	}
 	return cur
 }
 

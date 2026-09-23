@@ -477,6 +477,63 @@ func TestCurateRecordsDedupScore(t *testing.T) {
 	}
 }
 
+// fakeDecider answers one noul question with a canned probability.
+type fakeDecider struct {
+	noul float64
+	err  error
+}
+
+func (f fakeDecider) Decide(_ context.Context, _ string, qs []providers.Question) (providers.Answers, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return providers.Answers{qs[0].ID: {Noul: f.noul}}, nil
+}
+
+func TestDedupTiers(t *testing.T) {
+	// One catalog hit whose BM25 score is BELOW the legacy dup_score default, so the
+	// tiering can only come from the decider — the same regime the real 50-entry
+	// catalog is in, and the reason the BM25 gate was inert there.
+	hit := catalog.ScoredEntry{
+		Entry: catalog.Entry{Path: "incidents/harbor-db-migration-lock.md", Title: "harbor-db migration lock"},
+		Score: 0.49,
+	}
+	for _, tc := range []struct {
+		name         string
+		dec          providers.Decider
+		wantFiled    bool
+		wantNamesHit bool
+	}{
+		{"a confident duplicate is not filed", fakeDecider{noul: 0.95}, false, false},
+		{"a middling match is filed with the suspect named", fakeDecider{noul: 0.70}, true, true},
+		{"a weak match files as today", fakeDecider{noul: 0.20}, true, false},
+		{"a decider outage falls back to the BM25 path", fakeDecider{err: errors.New("down")}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeForge{}
+			c := newCurator(f, multiScored{hits: []catalog.ScoredEntry{hit}})
+			c.Decider = tc.dec
+			c.DedupSkipAbove = 0.85
+			c.DedupAnnotateAbove = 0.60
+
+			if _, err := c.Curate(context.Background(), goodFinding()); err != nil {
+				t.Fatalf("Curate: %v", err)
+			}
+			if filed := f.openedPR != nil; filed != tc.wantFiled {
+				t.Fatalf("want filed=%v, got %v", tc.wantFiled, filed)
+			}
+			if !tc.wantFiled {
+				return
+			}
+			names := strings.Contains(f.openedPR.Body, hit.Entry.Path)
+			if names != tc.wantNamesHit {
+				t.Fatalf("want the PR body to name the suspect=%v, got %v\nbody:\n%s",
+					tc.wantNamesHit, names, f.openedPR.Body)
+			}
+		})
+	}
+}
+
 // TestCurateLogsDedupScoreBothWays pins the property that makes dup_score tunable:
 // the top-hit BM25 score is logged on EVERY dedup decision, not only when the gate
 // fires.

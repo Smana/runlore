@@ -55,7 +55,14 @@ type Curator struct {
 	// pre-gate behaviour.
 	SkipVerdicts  map[providers.Verdict]bool
 	Confirmations ConfirmationSink // optional; nil-safe — dedup matches are recovery evidence
-	Log           *slog.Logger
+	// Decider optionally replaces the BM25 dup_score gate with a calibrated
+	// same-pattern judgement. Nil ⇒ the BM25 path, unchanged. The band edges are
+	// required when it is set (config validates that), because a default nobody
+	// measured would be invented rather than chosen.
+	Decider            providers.Decider
+	DedupSkipAbove     float64
+	DedupAnnotateAbove float64
+	Log                *slog.Logger
 }
 
 // Curate applies the three-step gate. It returns the created PR ref, or an empty
@@ -109,6 +116,10 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	}
 	nov := Novelty{Catalog: c.Catalog, DupScore: c.DupScore}
 	hits, herr := nov.Hits(ctx, inv, relatedK)
+	// dedupSuspect names the catalog entry the annotate tier flags, so the drafted
+	// PR body can surface it for a human to check. Empty unless the decider lands
+	// in the middle band below.
+	var dedupSuspect string
 	if herr != nil {
 		c.Log.Warn("dedup: catalog search failed", "err", herr)
 	} else if len(hits) > 0 {
@@ -133,15 +144,49 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		// Info rather than Debug: curation is infrequent (5 decisions in 30 days on that
 		// deployment), so this is a handful of lines, and it is the only way to answer
 		// "what should dup_score be?".
-		if hits[0].Score >= c.DupScore {
-			c.Log.Info("dedup: duplicates a catalog entry; not filing",
-				"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path,
-				"score", hits[0].Score, "dup_score", c.DupScore)
-			return providers.Ref{}, nil
+		//
+		// When a Decider is wired it REPLACES this BM25 comparison (tiered on a
+		// calibrated same-pattern probability, corpus-independent unlike dup_score) —
+		// unless the decider itself is unreachable, in which case sameIncidentPattern
+		// returns ok=false and curation falls back to the BM25 gate below, so a third
+		// party being down never blocks curation.
+		tiered := false
+		if c.Decider != nil {
+			if prob, ok := c.sameIncidentPattern(ctx, inv, hits[0]); ok {
+				tiered = true
+				switch {
+				case prob >= c.DedupSkipAbove:
+					c.Log.Info("dedup: decision model confirms a catalog duplicate; not filing",
+						"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path, "probability", prob)
+					// Same recovery evidence as the exact-fingerprint match above: a
+					// fresh, independent investigation reached this entry's conclusion.
+					if c.Confirmations != nil {
+						if err := c.Confirmations.Confirm(hits[0].Entry.Path, inv.TriggerKey, DupFingerprint(inv), time.Now()); err != nil {
+							c.Log.Warn("confirmation record failed", "entry", hits[0].Entry.Path, "err", err)
+						}
+					}
+					return providers.Ref{}, nil
+				case prob >= c.DedupAnnotateAbove:
+					c.Log.Info("dedup: decision model flags a possible duplicate; filing with the suspect named",
+						"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path, "probability", prob)
+					dedupSuspect = hits[0].Entry.Path
+				default:
+					c.Log.Info("dedup: decision model finds no duplicate; filing",
+						"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path, "probability", prob)
+				}
+			}
 		}
-		c.Log.Info("dedup: top hit below dup_score; filing",
-			"top_entry", hits[0].Entry.Title, "path", hits[0].Entry.Path,
-			"score", hits[0].Score, "dup_score", c.DupScore)
+		if !tiered {
+			if hits[0].Score >= c.DupScore {
+				c.Log.Info("dedup: duplicates a catalog entry; not filing",
+					"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path,
+					"score", hits[0].Score, "dup_score", c.DupScore)
+				return providers.Ref{}, nil
+			}
+			c.Log.Info("dedup: top hit below dup_score; filing",
+				"top_entry", hits[0].Entry.Title, "path", hits[0].Entry.Path,
+				"score", hits[0].Score, "dup_score", c.DupScore)
+		}
 	}
 	if n, ok, err := c.duplicateOpenPR(ctx, inv); err != nil {
 		c.Log.Warn("dedup: list open PRs failed", "err", err)
@@ -163,6 +208,13 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// Reviewer context: the finding is novel, so its BM25 neighborhood is
 	// precisely what the reviewer needs to double-check that call.
 	entry.Related = relatedEntries(hits)
+	// The annotate tier: the decider suspects a duplicate but isn't confident enough
+	// to skip filing, so the suspect goes straight into the drafted entry's body
+	// where the reviewer will see it, rather than only in the (separate,
+	// forge-rendered) Related section.
+	if dedupSuspect != "" {
+		entry.Body += dedupSuspectNote(dedupSuspect)
+	}
 	// The draft-time report the thread path also runs (kbvalidate.WarnDraft): it
 	// never blocks the PR, so it sits before OpenPR rather than gating it. Metrics
 	// travels with it (nil-safe) because the counter is what makes a defect
@@ -235,6 +287,47 @@ func meetsBar(inv providers.Investigation, minConf float64) bool {
 	// Provenance: actionable knowledge, not a symptom restatement — anchored to a
 	// causing change (ChangeRef) or a fixing action (SuggestedAction).
 	return top.ChangeRef != "" || top.SuggestedAction != ""
+}
+
+// dedupQuestionID names the single question the decider is asked.
+const dedupQuestionID = "same_pattern"
+
+// sameIncidentPattern asks whether a finding and a catalog hit describe the same
+// incident pattern. Returns the probability and whether it could be obtained at all;
+// false means the caller uses the BM25 path, so a decider outage degrades to today's
+// behaviour rather than blocking curation.
+func (c *Curator) sameIncidentPattern(ctx context.Context, inv providers.Investigation, hit catalog.ScoredEntry) (float64, bool) {
+	state := "PROPOSED FINDING\n" + Fingerprint(inv) +
+		"\n\nEXISTING CATALOG ENTRY\n" + hit.Entry.Title + "\n" + hit.Entry.Description
+	ans, err := c.Decider.Decide(ctx, state, []providers.Question{{
+		ID:   dedupQuestionID,
+		Kind: providers.KindNoul,
+		Instructions: "The proposed finding and the existing catalog entry describe the SAME incident pattern: " +
+			"the same resource failing the same way for the same reason. A different fault on the same workload is NOT the same pattern.",
+	}})
+	if err != nil {
+		c.Log.Warn("dedup decider failed; falling back to the BM25 gate", "err", err)
+		return 0, false
+	}
+	a, ok := ans[dedupQuestionID]
+	if !ok {
+		c.Log.Warn("dedup decider returned no answer; falling back to the BM25 gate")
+		return 0, false
+	}
+	if c.Metrics != nil {
+		c.Metrics.DecisionConfidence.Record(ctx, a.Noul,
+			metric.WithAttributes(attribute.String("consumer", "dedup")))
+	}
+	return a.Noul, true
+}
+
+// dedupSuspectNote is appended to a drafted entry's Body when the decider's
+// probability lands in the annotate band: not confident enough to skip filing, but
+// too high to ignore. It is written into Body (not just Related) because Related is
+// rendered into the PR description only by the forge client (github.go/gitlab.go),
+// one hop past where this decision is made.
+func dedupSuspectNote(path string) string {
+	return fmt.Sprintf("\n## Possible duplicate\n\nThe decision model flagged this finding as a probable duplicate of `%s` — please check before merging.\n", path)
 }
 
 // relatedEntries maps the draft-time search hits to the PR's reviewer-context
