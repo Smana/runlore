@@ -4,6 +4,7 @@ package eval
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -61,5 +62,37 @@ func TestEstimateCostUSD(t *testing.T) {
 	got := EstimateCostUSD(u, 1.0, 0.10, 5.0)
 	if got < 2.099 || got > 2.101 {
 		t.Fatalf("want $2.10, got %v", got)
+	}
+}
+
+// TestReportCarriesFailedClaims pins the claims surviving the trip through the
+// serialized report — the artifact a reader actually opens the morning after a red
+// nightly. CaseAggregate converts to ReportCase by struct conversion, so this also
+// guards that the two stay field-compatible.
+func TestReportCarriesFailedClaims(t *testing.T) {
+	camp := Campaign{N: 5, Aggregates: []CaseAggregate{
+		{Name: "harbor-chart-bump", Runs: 5, PassRate: 0.4, Missing: []string{"harbor-db"},
+			FailedClaims: []string{"a DB migration stalled the database"}},
+	}}
+	b, err := camp.Report("2026-09-22T11:06:41Z", "openai/glm-4.5-air", providers.Usage{}, nil).JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	var got Report
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Cases) != 1 || len(got.Cases[0].FailedClaims) != 1 ||
+		got.Cases[0].FailedClaims[0] != "a DB migration stalled the database" {
+		t.Fatalf("failed claims not carried into the report: %+v", got.Cases)
+	}
+	// A passing case must not carry the key at all, so a green report stays terse.
+	clean := Campaign{N: 1, Aggregates: []CaseAggregate{{Name: "ok", Runs: 1, PassRate: 1, Reached: true}}}
+	cb, err := clean.Report("t", "m", providers.Usage{}, nil).JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	if strings.Contains(string(cb), "failed_claims") {
+		t.Fatalf("green report must omit failed_claims:\n%s", cb)
 	}
 }

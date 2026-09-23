@@ -247,6 +247,12 @@ func RunEval(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "eval: [%d/%d] %-32s %-7s pass-rate=%.0f%%  elapsed=%s\n",
 			done, total, a.Name, status, a.PassRate*100, time.Since(start).Round(time.Second))
+		// Per case, not only in the end-of-run summary: the nightly is often killed by its
+		// own timeout before the summary prints. Single-line by construction, so a claim
+		// cannot break this table (eval.reportableClaim).
+		for _, claim := range a.FailedClaims {
+			fmt.Fprintf(os.Stderr, "eval:      claimed: %s\n", claim)
+		}
 	}
 	camp := runner.RunN(ctx, cases, *n)
 	reportCampaignHalt(budget, len(camp.Aggregates), len(cases))

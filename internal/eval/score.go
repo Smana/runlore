@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // Result is the score for one case.
@@ -15,6 +17,16 @@ type Result struct {
 	Confidence  float64
 	Missing     []string // expected keywords/entities not found (or an error note); includes "over-claimed: <e>" markers
 	OverClaimed []string // distractor entities the investigation wrongly blamed (over-claim/FP)
+
+	// Claim is WHAT this run blamed: the claim text Score matched over, flattened and
+	// secret-redacted. Missing names the absent term and never the answer given, which is
+	// what made six weeks of red nightlies unreadable — the canonical statement of that,
+	// referenced by the fold and the report rather than repeated there.
+	//
+	// Set only on a FAILING run: a right answer is not a finding, and nothing should carry
+	// model text it will never publish. NOT capped here — callers dedup on the full text
+	// and cap at store time (capClaim).
+	Claim string
 
 	// Recall telemetry (populated only for cases with a catalog fixture): whether
 	// instant recall fired, and whether its answer short-circuited the loop. Surfaced
@@ -38,7 +50,8 @@ type Result struct {
 // Entity scoring engages only when root_cause_entities is set. A case passes when
 // nothing is missing, no distractor was blamed, and confidence meets the floor.
 func Score(name string, inv providers.Investigation, exp Expected) Result {
-	claim := strings.ToLower(claimText(inv))
+	blamed := claimText(inv)
+	claim := strings.ToLower(blamed)
 	missing := notInClaim(claim, exp.MustContain)
 
 	var overClaimed []string
@@ -56,13 +69,17 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 		}
 	}
 
-	return Result{
+	res := Result{
 		Name:        name,
 		Pass:        len(missing) == 0 && inv.Confidence >= exp.MinConfidence,
 		Confidence:  inv.Confidence,
 		Missing:     missing,
 		OverClaimed: overClaimed,
 	}
+	if !res.Pass {
+		res.Claim = reportableClaim(blamed)
+	}
+	return res
 }
 
 // notInClaim returns the terms absent from claim, which must already be lower-cased.
@@ -117,4 +134,16 @@ func investigationText(inv providers.Investigation) string {
 	b.WriteString(" " + strings.Join(inv.RuledOut, " "))
 	b.WriteString(" " + strings.Join(inv.DataGaps, " "))
 	return b.String()
+}
+
+// reportableClaim renders a claim for the log and the report: secret-redacted and
+// flattened to one line.
+//
+// Flattening is a forgery guard. The claim is untrusted model text printed at the left
+// margin of a one-line-per-case table, so a break inside it emits a line a reader cannot
+// tell from the harness's own verdict lines. thread.SingleLine owns the break list, and
+// its doc records why that list lives in exactly one place; Fields collapses the runs it
+// leaves behind. A markdown sink would still owe cellEscaper its pipe escaping.
+func reportableClaim(s string) string {
+	return strings.Join(strings.Fields(thread.SingleLine(redact.Secrets(s))), " ")
 }

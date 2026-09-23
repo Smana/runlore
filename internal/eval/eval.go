@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 
@@ -208,6 +209,13 @@ type CaseAggregate struct {
 	Missing     []string // union of missing keywords/entities across repeats
 	OverClaimed []string // union of over-claimed distractors across repeats
 
+	// FailedClaims are what the FAILING repeats blamed, first-seen order, deduped on
+	// exact text and capped at maxFailedClaims; see Result.Claim. Exact-text dedup means
+	// the cap, not the dedup, decides what a reader sees when repeats disagree in
+	// wording. Empty only when EVERY repeat passed — a 4/5 case is Reached and still
+	// carries its loser's claim.
+	FailedClaims []string
+
 	// Gated echoes the case's `gate:` field: true (the default) means this case votes
 	// on the nightly -fail-under threshold. False marks a measurement case whose
 	// failure is a finding rather than a regression — it still runs, still scores and
@@ -366,10 +374,15 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 	outs := make([]float64, 0, len(results))
 	missSet := map[string]struct{}{}
 	ocSet := map[string]struct{}{}
+	var failedClaims []string
 	passes, fired, shortCircuits := 0, 0, 0
 	for _, res := range results {
 		if res.Pass {
 			passes++
+		} else if res.Claim != "" && len(failedClaims) < maxFailedClaims && !slices.Contains(failedClaims, res.Claim) {
+			// Compared on FULL text, so two answers that agree for maxClaimBytes and then
+			// diverge stay two answers; capClaim runs after the loop.
+			failedClaims = append(failedClaims, res.Claim)
 		}
 		if res.RecallFired {
 			fired++
@@ -387,6 +400,9 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 			ocSet[o] = struct{}{}
 		}
 	}
+	for i, c := range failedClaims {
+		failedClaims[i] = capClaim(c)
+	}
 	rate := float64(passes) / float64(len(results))
 	return CaseAggregate{
 		Name:               c.Name,
@@ -397,6 +413,7 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		Confidence:         medianFloat(confs),
 		Missing:            sortedSet(missSet),
 		OverClaimed:        sortedSet(ocSet),
+		FailedClaims:       failedClaims,
 		Gated:              c.gates(),
 		HasRecall:          c.hasCatalog(),
 		ExpectRecall:       c.ExpectRecall,
@@ -405,6 +422,24 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		InputTokens:        int(medianFloat(ins)),
 		OutputTokens:       int(medianFloat(outs)),
 	}
+}
+
+// maxClaimBytes caps one STORED claim and maxFailedClaims how many a case keeps: the
+// report is a CI artifact read by hand, and a case whose repeats all disagree is itself
+// the finding.
+const (
+	maxClaimBytes   = 600
+	maxFailedClaims = 3
+)
+
+// capClaim marks the cut, so a reader can tell "the model stopped here" from "we cut it
+// here". ToValidUTF8 drops the partial rune a byte cap leaves behind; the concatenation
+// copies the substring, which is what releases the full claim's backing array.
+func capClaim(s string) string {
+	if len(s) <= maxClaimBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxClaimBytes], "") + " […]"
 }
 
 func sortedSet(m map[string]struct{}) []string {

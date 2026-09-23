@@ -970,3 +970,164 @@ func TestShippedCommonsControlArmReplaysAgainstAnEmptyIndex(t *testing.T) {
 		t.Fatalf("the control arm must still complete and score on the same finding: %+v", res)
 	}
 }
+
+// TestScoreCarriesTheClaimItScored records WHAT was blamed alongside the verdict.
+// Score already computes the claim to match over; keeping it is what turns "missing:
+// harbor-db" into a readable finding. See eval.Result.Claim for the full rationale.
+func TestScoreCarriesTheClaimItScored(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "Harbor 503s",
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{
+			Summary:         "a schema migration stalled the database",
+			SuggestedAction: "roll back the chart",
+		}},
+	}
+	r := Score("harbor", inv, Expected{RootCauseEntities: []string{"harbor-db"}, MinConfidence: 0.5})
+	if r.Pass {
+		t.Fatalf("expected a miss on harbor-db, got %+v", r)
+	}
+	for _, want := range []string{"Harbor 503s", "schema migration stalled", "roll back the chart"} {
+		if !strings.Contains(r.Claim, want) {
+			t.Fatalf("claim %q missing %q", r.Claim, want)
+		}
+	}
+}
+
+// TestScoreSkipsTheClaimOnAPass keeps the redaction pass off results nothing reads: a
+// passing repeat's claim is never reported, so it is never built.
+func TestScoreSkipsTheClaimOnAPass(t *testing.T) {
+	inv := providers.Investigation{
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "the harbor-db migration lock is held"}},
+	}
+	r := Score("harbor", inv, Expected{MustContain: []string{"harbor-db"}, MinConfidence: 0.5})
+	if !r.Pass {
+		t.Fatalf("expected a pass, got %+v", r)
+	}
+	if r.Claim != "" {
+		t.Fatalf("a passing run must carry no claim, got %q", r.Claim)
+	}
+}
+
+// TestScoreClaimIsOneLineAndRedacted is the log-safety property, not a cosmetic one.
+//
+// The claim is free-form model text that lands on a one-line-per-case log line and in a
+// markdown table cell. A raw newline inside it would emit an unindented line that
+// neither a reader nor a log scraper could tell from the harness's own verdict lines —
+// so a model could, deliberately or by accident, forge a passing case into the CI log.
+// Secret-shaped values are masked for the same reason the transcript is: the report is
+// published as a CI artifact.
+func TestScoreClaimIsOneLineAndRedacted(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "token is ghp_0123456789abcdefghij0123456789abcdefg",
+		RootCauses: []providers.Hypothesis{{
+			Summary: "harbor-db is stuck.\n- migration lock held\r\nREACHED   fake-case   pass-rate=100%",
+		}},
+	}
+	r := Score("c", inv, Expected{MustContain: []string{"nope"}})
+	if strings.ContainsAny(r.Claim, "\n\r") {
+		t.Fatalf("claim must be a single line, got %q", r.Claim)
+	}
+	if strings.Contains(r.Claim, "ghp_0123456789abcdefghij0123456789abcdefg") {
+		t.Fatalf("claim leaked a secret-shaped value: %q", r.Claim)
+	}
+	if !strings.Contains(r.Claim, "migration lock held") {
+		t.Fatalf("flattening must keep the words, got %q", r.Claim)
+	}
+}
+
+// TestAggregateFailedClaims covers the fold in one table: which failing repeats' claims
+// a case keeps, in what order, and where the cap and the dedup bite.
+func TestAggregateFailedClaims(t *testing.T) {
+	shared := strings.Repeat("y", maxClaimBytes+50)
+	for _, tc := range []struct {
+		name    string
+		results []Result
+		want    []string
+	}{
+		{
+			name: "failing repeats only, first-seen order, exact-text dedup",
+			results: []Result{
+				{Pass: false, Claim: "a DB migration stalled the database"},
+				{Pass: true, Claim: "the harbor-db migration lock is held"},
+				{Pass: false, Claim: "a DB migration stalled the database"},
+				{Pass: false, Claim: "the network dropped connections"},
+			},
+			want: []string{"a DB migration stalled the database", "the network dropped connections"},
+		},
+		{
+			name: "a repeat that produced no claim contributes none",
+			results: []Result{
+				{Pass: false, Missing: []string{"no findings (loop did not submit)"}},
+				{Pass: false, Claim: "blamed the wrong workload"},
+			},
+			want: []string{"blamed the wrong workload"},
+		},
+		{
+			// Reached is not "every repeat passed": at n=5 a 4/5 case clears the bar and its
+			// loser's claim is the flakiness a reader wants explained.
+			name: "a reached case still reports its losing repeat",
+			results: []Result{
+				{Pass: true}, {Pass: true}, {Pass: true}, {Pass: true},
+				{Pass: false, Claim: "blamed the search index"},
+			},
+			want: []string{"blamed the search index"},
+		},
+		{
+			name:    "every repeat passing reports nothing",
+			results: []Result{{Pass: true}, {Pass: true}},
+			want:    nil,
+		},
+		{
+			// Dedup compares the FULL claim: capping first would collapse these two into
+			// one and discard the only part that differed.
+			name: "claims sharing a prefix longer than the cap stay distinct",
+			results: []Result{
+				{Pass: false, Claim: shared + " and it is the payments DB"},
+				{Pass: false, Claim: shared + " and it is the search index"},
+			},
+			want: []string{capClaim(shared + " and it is the payments DB"), capClaim(shared + " and it is the search index")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := aggregateResults(Case{Name: tc.name}, tc.results).FailedClaims
+			if len(got) != len(tc.want) {
+				t.Fatalf("want %d claims %q, got %d %q", len(tc.want), tc.want, len(got), got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("claim %d: want %q, got %q", i, tc.want[i], got[i])
+				}
+			}
+		})
+	}
+}
+
+// TestAggregateCapsAClaimAndMarksTheCut keeps the report bounded while telling a reader
+// the difference between "the model stopped here" and "we cut it here".
+func TestAggregateCapsAClaimAndMarksTheCut(t *testing.T) {
+	a := aggregateResults(Case{Name: "c"}, []Result{{Pass: false, Claim: strings.Repeat("x", maxClaimBytes*2)}})
+	if len(a.FailedClaims) != 1 {
+		t.Fatalf("want one claim, got %d", len(a.FailedClaims))
+	}
+	got := a.FailedClaims[0]
+	if len(got) > maxClaimBytes+len(" […]") {
+		t.Fatalf("claim not capped: %d bytes (cap %d)", len(got), maxClaimBytes)
+	}
+	if !strings.HasSuffix(got, "[…]") {
+		t.Fatalf("a cut claim must say so, got the tail %q", got[max(0, len(got)-16):])
+	}
+}
+
+// TestAggregateCapsTheNumberOfClaims keeps a case whose repeats all disagree from
+// pasting every variant into the report.
+func TestAggregateCapsTheNumberOfClaims(t *testing.T) {
+	results := make([]Result, 0, 10)
+	for i := range 10 {
+		results = append(results, Result{Pass: false, Claim: fmt.Sprintf("distinct claim %d", i)})
+	}
+	if got := aggregateResults(Case{Name: "noisy"}, results).FailedClaims; len(got) != maxFailedClaims {
+		t.Fatalf("want the cap of %d claims, got %d", maxFailedClaims, len(got))
+	}
+}

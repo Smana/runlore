@@ -33,6 +33,10 @@ type Report struct {
 }
 
 // ReportCase is one case's k-of-n verdict in the report.
+//
+// Its fields track CaseAggregate exactly — Report() converts one to the other by struct
+// conversion, so a mismatch is a compile error rather than a silent drift; only the tags
+// differ.
 type ReportCase struct {
 	Name        string   `json:"name"`
 	Runs        int      `json:"runs"`
@@ -42,6 +46,10 @@ type ReportCase struct {
 	Confidence  float64  `json:"confidence"`
 	Missing     []string `json:"missing,omitempty"`
 	OverClaimed []string `json:"over_claimed,omitempty"`
+
+	// FailedClaims mirrors CaseAggregate.FailedClaims; omitempty drops it only for a case
+	// whose EVERY repeat passed, which is not the same as one that reached the bar.
+	FailedClaims []string `json:"failed_claims,omitempty"`
 
 	// Gated says whether this case voted on the nightly -fail-under threshold. NOT
 	// omitempty: false is the informative value here (a measurement case, whose low
