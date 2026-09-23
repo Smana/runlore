@@ -2299,5 +2299,6 @@ func TestRerankBackendDefaultsToTheLLM(t *testing.T) {
 }
 
 func minimalValidConfig(t *testing.T) *Config {
+	t.Helper()
 	return &Config{Model: Model{Provider: "anthropic"}}
 }
