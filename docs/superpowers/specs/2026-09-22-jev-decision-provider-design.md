@@ -87,6 +87,8 @@ type Decider interface {
 ```
 
 `Question` carries an id, a kind (`choice`, `score`, `noul`), instructions and criteria.
+The request budget is 64k tokens, of which the state plus the longest question may use 32k
+— ample for every consumer here, whose largest state is a few kilobytes.
 **`noul` is TypeSafe's own name for its boolean primitive** — it returns a probability in
 `[0,1]` that a statement is true — so it is spelled that way here deliberately and must be
 carried verbatim into the wire types. It is not a typo for `bool`. `Answers`
@@ -232,8 +234,28 @@ the prompt has never been tuned against before reading a shadow-agreement number
 
 ## Open questions
 
-1. **TypeSafe's data retention and terms.** Unresolved, and gating for this audience. Must be
-   answered before the feature is recommended anywhere in the published docs.
+1. ~~**TypeSafe's data retention and terms.**~~ **Answered 2026-09-23, and the answer is
+   mixed.** It does not rule the design out, because every consumer is off by default, but it
+   does fix what the published docs must say.
+
+   | Question | Answer |
+   |---|---|
+   | Trained on submitted state? | **No.** The privacy policy commits twice: "We will not train or fine tune any artificial intelligence or machine learning models on your prompts or other Input" |
+   | Disclosed to third parties? | No, "other than our service providers", which are not named |
+   | Retention period | **Not stated.** "as long as reasonably necessary" — no number of days |
+   | Zero data retention | Offered, but **enterprise-gated**: by request to TypeSafe, not a config flag |
+   | Self-hosted or on-premises | **Not offered.** Cloud API only |
+
+   The no-training commitment is the strong part and is what makes this viable at all. The
+   unbounded retention window and the absence of any self-hosted option are the weak parts,
+   and they land squarely on the audience this project targets: a team that runs its model
+   in-cluster specifically so incident data does not leave, and that can currently do so for
+   every existing provider.
+
+   So: the feature stays off by default, and the docs must say plainly that enabling it sends
+   alert titles, labels and runbook excerpts to a hosted third party with no published
+   retention period, and that a deployment which requires zero retention has to arrange it
+   with TypeSafe directly. That is a disclosure, not a footnote.
 2. **The semantic KB advisory.** A stretch item with a mechanical test: include it if it is two
    `noul` questions over the existing client, reusing `decision_model:` with no new config key and no new
    question kind. Anything more and it is deferred, not squeezed in.
