@@ -111,11 +111,28 @@ through.
 
 **Thresholds are per backend and not comparable.** `rerank_threshold` (default 0.7) continues to
 govern the LLM backend. `rerank_threshold_jev` governs Jev and has **no default**; it is required when
-the backend is `jev`. Shadow mode does not need it: it records the confidence distribution in a
-histogram, which is how the value gets chosen in the first place.
+the backend is `jev`. **Shadow mode reads it too** — `shadowFired` (`internal/investigate/rerank.go`)
+gates the decider's side of the comparison on this same threshold, exactly as `jev` would. Leaving it
+unset (zero) does not exempt shadow from the gate; it measures agreement at a threshold of **zero**,
+where any non-`none` choice counts as a fire regardless of confidence — an operating point no live
+`jev` configuration will ever run at. `Validate` range-checks it whenever it is set, under any
+backend, so an out-of-range value fails at startup rather than silently producing a meaningless
+agreement number.
 
 Shadow mode makes both calls, keeps the LLM's verdict, and records agreement. It doubles the rerank
 cost while enabled, which is the point of it being a mode rather than the default.
+
+**Two-phase promotion from `shadow` to `jev`.** The threshold has no defensible default, so shadow
+mode exists to produce one from real traffic before `jev` ever decides anything:
+
+1. Run `shadow` with `rerank_threshold_jev` **unset** to fill `runlore_decision_model_confidence`'s
+   histogram — this is the only phase where "unset" is the right value, because the goal here is the
+   distribution itself, not a fire/no-fire count against it.
+2. Read a candidate bar off that distribution.
+3. Set `rerank_threshold_jev` to the candidate bar **while still in `shadow`**, and read
+   `runlore_decision_model_shadow_total`'s agreement at that operating point — the same bar `jev`
+   would actually run at, not zero.
+4. Only once that agreement is acceptable, switch `rerank_backend` to `jev`.
 
 Two new metrics, following the existing recall naming:
 
@@ -157,8 +174,10 @@ decision_model:                       # a System One model: typed questions in, 
 catalog:
   instant_recall:
     rerank_backend: shadow            # llm (default) | jev | shadow
-    # rerank_threshold_jev: omitted on purpose here. shadow does not read it;
-    # it is required only once rerank_backend becomes jev.
+    # rerank_threshold_jev: omitted on purpose here — this is PHASE 1 of the two-phase
+    # promotion (see "The reranker" above): shadow still reads the threshold to decide
+    # a fire, so leaving it unset measures agreement at zero. The point of phase 1 is
+    # the confidence histogram, not that number; set it once you have a candidate bar.
 forge:                                # dedup config already lives here, beside dup_score
   dedup_backend: bm25                 # bm25 (default) | jev
   # dedup_skip_above / dedup_annotate_above: required once dedup_backend is jev
@@ -204,8 +223,11 @@ The decider is never the reason an incident goes uninvestigated.
 - **Reranker:** table tests over the three backends with a fake `Decider`, asserting the fall-through
   on every failure mode and that the fire gate reads the right threshold per backend.
 - **Dedup:** the three tiers, plus the fingerprint check still short-circuiting first.
-- **Eval:** a shadow-agreement column in the replay report. The two `poisoned-recall` cases are the
-  precision testbed, since they already assert mechanically that recall fired and was withdrawn.
+- **Eval:** the replay harness builds recall with no reranker, so `rank()` never runs there and the
+  replay corpus cannot measure shadow agreement. That number is measured by
+  `runlore_decision_model_shadow_total` under `lore serve`, where shadow mode actually runs. The two
+  `poisoned-recall` cases remain the precision testbed for recall firing/withdrawal, which the replay
+  harness does exercise.
 - **Config:** both rejection paths.
 
 ## Risks
@@ -259,8 +281,17 @@ the prompt has never been tuned against before reading a shadow-agreement number
 2. **The semantic KB advisory.** A stretch item with a mechanical test: include it if it is two
    `noul` questions over the existing client, reusing `decision_model:` with no new config key and no new
    question kind. Anything more and it is deferred, not squeezed in.
-3. **Agreement bar for promoting `shadow` to `jev`.** Deliberately not fixed here. It is a reading of
-   the first shadow run against the replay corpus, not a number to invent now.
+3. **Agreement bar for promoting `shadow` to `jev`.** Deliberately not fixed here — it is a reading of
+   real traffic, not a number to invent now. **Not from the replay corpus:** that harness builds recall
+   with no reranker, so it cannot measure shadow agreement at all (see § Testing). The reading comes from
+   `runlore_decision_model_shadow_total` under `lore serve`, at the end of the two-phase procedure in
+   § The reranker.
+
+4. **Per-case shadow evidence would need a reranker in the replay harness.** Adding one changes the
+   replay fire gate for every catalog case and adds a paid model call per case, which invalidates the
+   existing baselines — its own change, deliberately not bundled here. Until someone makes it, a
+   recall-gate change cannot be measured by `lore eval` replay at all, which is a trap for the next
+   recall feature too.
 
 ## Acceptance criteria
 
