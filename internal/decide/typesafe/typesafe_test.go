@@ -14,12 +14,15 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// fixtureServer answers one POST with the given status and body, and captures the
-// request it received so a test can assert what went on the wire.
-func fixtureServer(t *testing.T, status int, body string) (*httptest.Server, *string) {
+// fixtureServer answers every POST with the given status and body, capturing the
+// last request body received and the total number of requests it has answered — the
+// latter is what lets a test tell "failed once" from "hit by a retry storm".
+func fixtureServer(t *testing.T, status int, body string) (*httptest.Server, *string, *int) {
 	t.Helper()
 	var got string
+	var count int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
 		b, _ := io.ReadAll(r.Body)
 		got = string(b)
 		w.Header().Set("Content-Type", "application/json")
@@ -27,11 +30,11 @@ func fixtureServer(t *testing.T, status int, body string) (*httptest.Server, *st
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &got
+	return srv, &got, &count
 }
 
 func TestDecideChoiceCarriesConfidenceAndProbabilities(t *testing.T) {
-	srv, sent := fixtureServer(t, http.StatusOK, `{
+	srv, sent, _ := fixtureServer(t, http.StatusOK, `{
 	  "model":"jev-1.13.0",
 	  "answers":{"pick":{"type":"choice","choice":"runbook-b","confidence":0.84,
 	    "probabilities":{"runbook-a":0.16,"runbook-b":0.84,"none":0.0}}},
@@ -80,7 +83,7 @@ func TestDecideChoiceCarriesConfidenceAndProbabilities(t *testing.T) {
 }
 
 func TestDecideNoulIsItsOwnProbability(t *testing.T) {
-	srv, _ := fixtureServer(t, http.StatusOK,
+	srv, _, _ := fixtureServer(t, http.StatusOK,
 		`{"model":"jev-1.13.0","answers":{"same":{"type":"noul","noul":0.93}}}`)
 	c := New(srv.URL, "jev-latest", "k")
 	ans, err := c.Decide(context.Background(), "two entries", []providers.Question{{
@@ -107,7 +110,7 @@ func TestDecideFailureShapes(t *testing.T) {
 		{"an empty answer set is an error", http.StatusOK, `{"model":"jev","answers":{}}`, "no answers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := fixtureServer(t, tc.status, tc.body)
+			srv, _, count := fixtureServer(t, tc.status, tc.body)
 			c := New(srv.URL, "jev-latest", "")
 			_, err := c.Decide(context.Background(), "s", []providers.Question{{
 				ID: "q", Kind: providers.KindNoul, Instructions: "i",
@@ -120,6 +123,9 @@ func TestDecideFailureShapes(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "slow down") {
 				t.Fatalf("the upstream body must not reach the error: %v", err)
+			}
+			if tc.status == http.StatusTooManyRequests && *count != 1 {
+				t.Fatalf("a rate limit must hit the server exactly once (no retry storm in front of a free fall-through), got %d", *count)
 			}
 		})
 	}
@@ -146,7 +152,7 @@ func TestDecideRejectsMalformedQuestionsBeforeTheWire(t *testing.T) {
 }
 
 func TestDecideRedactsTheStateAndGuardsItsSize(t *testing.T) {
-	srv, sent := fixtureServer(t, http.StatusOK,
+	srv, sent, _ := fixtureServer(t, http.StatusOK,
 		`{"model":"jev","answers":{"q":{"type":"noul","noul":0.1}}}`)
 	c := New(srv.URL, "jev-latest", "")
 	q := []providers.Question{{ID: "q", Kind: providers.KindNoul, Instructions: "i"}}

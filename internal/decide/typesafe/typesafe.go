@@ -124,7 +124,13 @@ func (c *Client) Decide(ctx context.Context, state string, qs []providers.Questi
 		}
 		return r, nil
 	}
-	resp, err := httpx.DoWithRetry(ctx, c.http, 3, newReq)
+	// attempts=1: no retry. The reranker sits on the recall critical path with a FREE
+	// fall-through (a rejected/failed decide just falls through to the full
+	// investigation it was going to run anyway), unlike internal/embed's retry, which
+	// guards a call with no such fall-through. Retrying a rate limit here would mean
+	// waiting up to 30s of backoff per hop before doing what a single failure already
+	// triggers for free — pure added latency in front of a gate that doesn't need it.
+	resp, err := httpx.DoWithRetry(ctx, c.http, 1, newReq)
 	if err != nil {
 		return nil, fmt.Errorf("decide request: %w", err)
 	}
