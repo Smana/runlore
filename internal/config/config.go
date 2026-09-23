@@ -2476,6 +2476,10 @@ func (c *Config) Validate() error {
 		if p := c.DecisionModel.Provider; p != "" && p != "typesafe" {
 			return fmt.Errorf("decision_model.provider %q is not supported (valid: typesafe)", p)
 		}
+		if err := checkSecureKeyEndpoint("decision_model.base_url", "decision_model.api_key_env",
+			c.DecisionModel.BaseURL, c.DecisionModel.APIKeyEnv); err != nil {
+			return err
+		}
 	}
 	switch b := c.Catalog.InstantRecall.RerankBackend; b {
 	case "", "llm", "shadow":

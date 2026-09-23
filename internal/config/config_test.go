@@ -2255,6 +2255,14 @@ func TestDecisionModelValidation(t *testing.T) {
 			},
 			wantErr: "rerank_backend",
 		},
+		{
+			name: "cleartext key over a public http base_url rejected",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe",
+					BaseURL: "http://api.public.example", Model: "jev-latest", APIKeyEnv: "TYPESAFE_KEY"}
+			},
+			wantErr: "decision_model.base_url",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := minimalValidConfig(t)
