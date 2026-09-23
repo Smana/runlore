@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/decide/typesafe"
 	anthropic "github.com/Smana/runlore/internal/model/anthropic"
 	gemini "github.com/Smana/runlore/internal/model/gemini"
 	openai "github.com/Smana/runlore/internal/model/openai"
@@ -114,6 +115,18 @@ func BuildChatModel(cfg *config.Config) providers.ModelProvider {
 	return NewModelClient(cmp.Or(c.Provider, cfg.Model.Provider),
 		cmp.Or(c.BaseURL, cfg.Model.BaseURL), c.Model, apiKey,
 		chatMaxTokens(cfg), cmp.Or(c.Effort, cfg.Model.Effort), cmp.Or(c.Thinking, cfg.Model.Thinking))
+}
+
+// BuildDecider builds the decision-model provider, or nil when the block is absent or
+// switched off. Nil is the fallback signal every consumer reads: "configured but
+// disabled" and "not configured" must behave identically, which is what makes
+// decision_model.enabled a usable kill switch.
+func BuildDecider(cfg *config.Config) providers.Decider {
+	if !cfg.DecisionModelUsable() {
+		return nil
+	}
+	return typesafe.New(cfg.DecisionModel.BaseURL, cfg.DecisionModel.Model,
+		os.Getenv(cfg.DecisionModel.APIKeyEnv))
 }
 
 // BuildJudgeModel builds the (stronger) grader model from --judge-* flags, falling

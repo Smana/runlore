@@ -2206,3 +2206,117 @@ func TestSilenceWindowBoundsDoNotBlameSlack(t *testing.T) {
 		})
 	}
 }
+
+func TestDecisionModelValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "enabled with no endpoint is a config error",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe"}
+			},
+			wantErr: "decision_model.base_url",
+		},
+		{
+			name: "the jev reranker needs its own threshold",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
+				c.Catalog.InstantRecall.Enabled = true
+				c.Catalog.InstantRecall.RerankBackend = "jev"
+			},
+			wantErr: "rerank_threshold_jev",
+		},
+		{
+			name: "an out-of-range threshold is rejected under shadow too",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
+				c.Catalog.InstantRecall.Enabled = true
+				c.Catalog.InstantRecall.RerankBackend = "shadow"
+				c.Catalog.InstantRecall.RerankThresholdJev = 5
+			},
+			wantErr: "rerank_threshold_jev",
+		},
+		{
+			name: "jev dedup needs both band edges",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
+				c.Forge.DedupBackend = "jev"
+			},
+			wantErr: "dedup_skip_above",
+		},
+		{
+			name: "an unorderable band is rejected",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
+				c.Forge.DedupBackend = "jev"
+				c.Forge.DedupSkipAbove = 0.5
+				c.Forge.DedupAnnotateAbove = 0.8
+			},
+			wantErr: "must be greater than",
+		},
+		{
+			name: "an unknown backend is rejected",
+			mutate: func(c *Config) {
+				c.Catalog.InstantRecall.Enabled = true
+				c.Catalog.InstantRecall.RerankBackend = "magic"
+			},
+			wantErr: "rerank_backend",
+		},
+		{
+			name: "cleartext key over a public http base_url rejected",
+			mutate: func(c *Config) {
+				c.DecisionModel = DecisionModel{Enabled: true, Provider: "typesafe",
+					BaseURL: "http://api.public.example", Model: "jev-latest", APIKeyEnv: "TYPESAFE_KEY"}
+			},
+			wantErr: "decision_model.base_url",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := minimalValidConfig(t)
+			tc.mutate(c)
+			ApplyDefaults(c)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want an error mentioning %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestDisabledDecisionModelFallsBackWithoutErroring pins the kill switch. An operator
+// turns enabled off DURING an incident; a startup error would make the switch useless
+// exactly when it is needed, so a consumer still pointing at jev must degrade.
+func TestDisabledDecisionModelFallsBackWithoutErroring(t *testing.T) {
+	c := minimalValidConfig(t)
+	c.DecisionModel = DecisionModel{Enabled: false, Provider: "typesafe", BaseURL: "https://api.typesafe.ai", Model: "jev-latest"}
+	c.Catalog.InstantRecall.Enabled = true
+	c.Catalog.InstantRecall.RerankBackend = "jev"
+	c.Forge.DedupBackend = "jev"
+	ApplyDefaults(c)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a disabled decision model must not fail validation: %v", err)
+	}
+	if c.DecisionModelUsable() {
+		t.Fatal("a disabled block must not be usable")
+	}
+}
+
+func TestRerankBackendDefaultsToTheLLM(t *testing.T) {
+	c := minimalValidConfig(t)
+	c.Catalog.InstantRecall.Enabled = true
+	ApplyDefaults(c)
+	if got := c.Catalog.InstantRecall.RerankBackend; got != "llm" {
+		t.Fatalf("want the llm backend by default, got %q", got)
+	}
+	if c.Forge.DedupBackend != "bm25" {
+		t.Fatalf("want bm25 dedup by default, got %q", c.Forge.DedupBackend)
+	}
+}
+
+func minimalValidConfig(t *testing.T) *Config {
+	t.Helper()
+	return &Config{Model: Model{Provider: "anthropic"}}
+}

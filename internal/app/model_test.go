@@ -128,3 +128,26 @@ func TestNewModelClient(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildDeciderIsNilUnlessUsable pins the kill-switch contract: "absent" and
+// "configured but disabled" must build the same nil, and only an enabled block with
+// an endpoint builds a real decider.
+func TestBuildDeciderIsNilUnlessUsable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dm   config.DecisionModel
+		want bool
+	}{
+		{"absent", config.DecisionModel{}, false},
+		{"configured but disabled", config.DecisionModel{Provider: "typesafe", BaseURL: "https://x", Model: "jev-latest"}, false},
+		{"enabled", config.DecisionModel{Enabled: true, Provider: "typesafe", BaseURL: "https://x", Model: "jev-latest"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{DecisionModel: tc.dm}
+			got := BuildDecider(cfg)
+			if (got != nil) != tc.want {
+				t.Fatalf("want built=%v, got %v", tc.want, got != nil)
+			}
+		})
+	}
+}

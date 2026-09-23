@@ -64,8 +64,38 @@ type Reranker struct {
 	// configuration lives in one place.
 	MinScore float64
 
+	// Decider is the optional decision-model backend. Backend selects which one
+	// decides: "llm" (default, today's forced-tool call), "jev" (the decider), or
+	// "shadow" (both run, the LLM decides, agreement is recorded). Nil Decider with a
+	// non-llm Backend falls back to the LLM — the kill switch's fallback path.
+	Decider providers.Decider
+	Backend string
+	// ThresholdJev is the decider's own fire bar. It is NOT Threshold: the two
+	// confidences are computed differently — the LLM asserts one, the decider derives
+	// one from probability spread — so a shared number would mean different things.
+	ThresholdJev float64
+
 	Metrics *telemetry.Metrics // optional; nil-safe
 	Log     *slog.Logger       // optional; nil-safe
+}
+
+// fireThreshold is the confidence bar for whichever backend actually decided. The two
+// confidences are not comparable — the LLM asserts its number, the decider derives one
+// from probability spread — so the caller must gate on the bar belonging to the backend
+// that produced the number, never on one shared field. In shadow mode the LLM decides,
+// so the LLM's bar applies.
+//
+// The Decider != nil check mirrors rank()'s own dispatch: rank falls back to rankLLM
+// whenever Decider is nil, REGARDLESS of Backend, so a verdict can carry Backend ==
+// "jev" while the LLM actually produced it. ThresholdJev must apply only when the
+// decider could actually have decided — the same condition rank dispatches on. Two
+// functions answering "which backend decided" with different predicates is how they
+// drift; checking Decider here too keeps them in sync.
+func (rr *Reranker) fireThreshold() float64 {
+	if rr.Decider != nil && rr.Backend == "jev" {
+		return rr.ThresholdJev
+	}
+	return rr.Threshold
 }
 
 // rerankToolName is the reserved structured-output tool the reranker must call — a
@@ -98,6 +128,23 @@ type recallSpend struct {
 	// proceed. It is li.budgetTrip over li.aggregateUsage — the same predicate against
 	// the same running total the loop's own guard uses, never a second opinion.
 	afford func(estTokens int) string
+	// shadow carries one shadow-mode comparison back to the loop. See shadowOutcome.
+	shadow shadowOutcome
+}
+
+// shadowOutcome records one shadow-mode comparison for the caller's telemetry.
+//
+// It rides recallSpend rather than sitting on the Reranker because ONE Reranker serves
+// every investigation: a field there would be a data race, and it would attribute one
+// incident's comparison to another. recallSpend is created per investigation by the
+// loop, which is therefore able to read the result back without any signature change.
+//
+// Agreed is false when the arm errored, which is deliberate: for the promotion decision
+// "the decider did not reach the same answer" and "the decider was unreachable" are the
+// same answer — not ready. The error/disagree split stays in the metric's label.
+type shadowOutcome struct {
+	Ran    bool
+	Agreed bool
 }
 
 // refuses reports which ceiling, if any, forbids a request of estTokens. Nil-safe: no
@@ -185,7 +232,174 @@ type rerankVerdict struct {
 	Reason     string  `json:"reason"`
 }
 
-// rank asks the reranker which of the (already structurally-agreeing) candidates is the
+// rerankQuestionID names the single question the decider is asked; the answer comes
+// back keyed by it.
+const rerankQuestionID = "runbook"
+
+// rerankNoneOption is the explicit "no candidate matches" option. A choice primitive
+// always returns one of the options it was given, so the fall-through case has to BE an
+// option — without it the decider would be forced to name a runbook it does not believe.
+const rerankNoneOption = "none"
+
+// decideRerank makes the raw call and returns the decider's answer. Split out from
+// rankJev so the shadow arm can tell an ERROR from a no-match: rankJev collapses both
+// into ok=false, which is right for a fire decision and useless for measuring agreement.
+func (rr *Reranker) decideRerank(ctx context.Context, req Request, cands []catalog.ScoredEntry) (providers.Answer, error) {
+	choices := make(map[string]string, len(cands)+1)
+	for _, c := range cands {
+		desc := c.Entry.Title
+		if c.Entry.Description != "" {
+			desc += " — " + c.Entry.Description
+		}
+		choices[c.Entry.Path] = desc
+	}
+	choices[rerankNoneOption] = "none of these covers this resource failing this way"
+
+	start := time.Now()
+	ans, err := rr.Decider.Decide(ctx, renderRerankCandidates(req, cands), []providers.Question{{
+		ID:           rerankQuestionID,
+		Kind:         providers.KindChoice,
+		Instructions: rerankQuestionInstructions,
+		Choices:      choices,
+	}})
+	if rr.Metrics != nil {
+		res := "ok"
+		if err != nil {
+			res = "error"
+		}
+		rr.Metrics.ModelRequests.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("provider", "decide"), attribute.String("result", res)))
+		rr.Metrics.ModelRequestDuration.Record(ctx, time.Since(start).Seconds(),
+			metric.WithAttributes(attribute.String("provider", "decide")))
+	}
+	if err != nil {
+		return providers.Answer{}, err
+	}
+	a, ok := ans[rerankQuestionID]
+	if !ok {
+		return providers.Answer{}, fmt.Errorf("no answer for question %q", rerankQuestionID)
+	}
+	if rr.Metrics != nil {
+		rr.Metrics.DecisionConfidence.Record(ctx, a.Confidence,
+			metric.WithAttributes(attribute.String("consumer", "rerank")))
+	}
+	return a, nil
+}
+
+// rankJev asks the decision model which candidate, if any, is the right runbook. It
+// fails SAFE exactly as rankLLM does: an error, a missing answer, the none option, a
+// confidence below ThresholdJev, or an id outside the candidate set all return
+// ok=false, and the caller falls through to a full investigation.
+//
+// The decider's call is deliberately UNACCOUNTED: spend is never read or added to here.
+// The same asymmetry already stands for embeddings (aggregateUsage in cost.go) — there
+// is no decider pricing to convert its tokens into dollars with, and folding them into a
+// bucket priced at the completion rate would put a fabricated figure on the notification
+// footer, which is worse than reporting nothing.
+func (rr *Reranker) rankJev(ctx context.Context, req Request, cands []catalog.ScoredEntry, _ *recallSpend) (catalog.Entry, float64, bool) {
+	a, err := rr.decideRerank(ctx, req, cands)
+	if err != nil {
+		if rr.Log != nil {
+			rr.Log.Warn("decision-model reranker failed; falling through to full investigation", "title", req.Title, "err", err)
+		}
+		return catalog.Entry{}, 0, false
+	}
+	if rr.Log != nil {
+		rr.Log.Info("decision-model rerank decision",
+			"title", req.Title, "choice", a.Choice, "confidence", a.Confidence)
+	}
+	if a.Choice == rerankNoneOption || a.Confidence < rr.ThresholdJev {
+		return catalog.Entry{}, 0, false
+	}
+	// Only ever an id it was offered: a backend that names something else must never
+	// fire a recall, the same false-recall guard the LLM path applies.
+	for _, c := range cands {
+		if c.Entry.Path == a.Choice {
+			return c.Entry, clampF(a.Confidence, 0, 1), true
+		}
+	}
+	if rr.Log != nil {
+		rr.Log.Warn("decision-model reranker named an id outside the candidate set; ignoring (no recall)",
+			"title", req.Title, "choice", a.Choice)
+	}
+	return catalog.Entry{}, 0, false
+}
+
+// rerankQuestionInstructions is the decider's instruction text. It carries the same
+// rule as rerankPrompt — canonical runbook for this resource + symptom, and a wrong
+// match is worse than no match — without the prose the LLM needs, because a decision
+// model is not being asked to reason in text.
+const rerankQuestionInstructions = "Which candidate runbook, if any, is the canonical one for THIS incident: " +
+	"the resource it covers and the failure it describes match this incident's resource and symptom. " +
+	"Pick the none option unless one candidate clearly matches — a wrong match is worse than no match. " +
+	"Do not require the alert to prove the runbook's exact root cause: that is re-confirmed against live state afterwards."
+
+// shadowAgreement labels one shadow comparison for the metric. Extracted as a pure
+// function because it is the operator-facing signal that decides whether the decider
+// is trusted to decide for real — it needs its own test, not coverage-by-accident
+// through a metrics scrape.
+//
+// An outage reads as "error" rather than "disagree": for the promotion decision
+// "reached a different answer" and "was unreachable" are both "not ready", but only
+// one of them is fixed by tuning a threshold, so they must stay separable here.
+func shadowAgreement(llmFired bool, llmPath string, shadowFired bool, shadowPath string, err error) string {
+	switch {
+	case err != nil:
+		return "error"
+	case llmFired == shadowFired && (!llmFired || llmPath == shadowPath):
+		return "agree"
+	default:
+		return "disagree"
+	}
+}
+
+// rank routes the decision to the configured backend. The LLM path is the default and
+// is unchanged; a decider that is configured but absent (the kill switch) falls back to
+// it rather than failing, so an investigation's outcome never depends on the decider
+// being reachable. An unrecognized Backend falls to the same default, not to shadow —
+// config validation rejects unknown values at load (internal/config/config.go), so this
+// is unreachable in production, but the safe default is the proven path, and a typo
+// must never silently double the decider's call volume.
+func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) (catalog.Entry, float64, bool) {
+	if rr.Decider == nil {
+		return rr.rankLLM(ctx, req, cands, spend)
+	}
+	switch rr.Backend {
+	case "jev":
+		return rr.rankJev(ctx, req, cands, spend)
+	case "shadow":
+		// the LLM decides, the decider is measured against it. The shadow arm must
+		// never change the outcome, including when it errors, so its answer is recorded
+		// and discarded. decideRerank rather than rankJev, because agreement needs to
+		// distinguish a genuine disagreement from an outage.
+		entry, conf, ok := rr.rankLLM(ctx, req, cands, spend)
+		a, err := rr.decideRerank(ctx, req, cands)
+		shadowFired := err == nil && a.Choice != rerankNoneOption && a.Confidence >= rr.ThresholdJev
+		shadowPath := ""
+		if shadowFired {
+			shadowPath = a.Choice
+		}
+		agreement := shadowAgreement(ok, entry.Path, shadowFired, shadowPath, err)
+		if spend != nil {
+			spend.shadow = shadowOutcome{Ran: true, Agreed: agreement == "agree"}
+		}
+		if rr.Metrics != nil {
+			rr.Metrics.DecisionShadow.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("consumer", "rerank"),
+				attribute.String("agreement", agreement)))
+		}
+		if rr.Log != nil {
+			rr.Log.Info("rerank shadow comparison",
+				"title", req.Title, "llm_fired", ok, "llm_entry", entry.Path,
+				"shadow_fired", shadowFired, "shadow_entry", shadowPath, "shadow_err", err)
+		}
+		return entry, conf, ok
+	default:
+		return rr.rankLLM(ctx, req, cands, spend)
+	}
+}
+
+// rankLLM asks the reranker which of the (already structurally-agreeing) candidates is the
 // correct runbook for this incident, returning the matched entry and a calibrated
 // confidence. ok is false — meaning DO NOT short-circuit, fall through to a full
 // investigation — whenever the model finds no match, errors, returns no/garbled tool
@@ -197,7 +411,7 @@ type rerankVerdict struct {
 // The caller MUST have cleared spend.refuses first — see Recall.affordRerank. This
 // function is the spending side of the rule, not the checking side: by the time it is
 // entered the decision to pay has already been made.
-func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) (catalog.Entry, float64, bool) {
+func (rr *Reranker) rankLLM(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) (catalog.Entry, float64, bool) {
 	start := time.Now()
 	resp, err := rr.Model.Complete(ctx, providers.CompletionRequest{
 		System:     rerankPrompt,

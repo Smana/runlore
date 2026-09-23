@@ -57,6 +57,16 @@ var scoreHistograms = []string{
 	"runlore_curation_dedup_score",
 }
 
+// probabilityBuckets fit a calibrated 0–1 confidence. The BM25 scoreBuckets above start
+// at 0.1 and run to 10, so a probability put through them collapses into the low buckets
+// and the distribution a threshold is read off would be unreadable.
+var probabilityBuckets = []float64{0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1}
+
+// probabilityHistograms are the instrument names that get probabilityBuckets.
+var probabilityHistograms = []string{
+	"runlore_decision_model_confidence",
+}
+
 // bucketViews builds one explicit-bucket-histogram view per named instrument.
 func bucketViews(names []string, boundaries []float64) []sdkmetric.View {
 	views := make([]sdkmetric.View, 0, len(names))
@@ -82,6 +92,7 @@ func Setup(_ context.Context) (http.Handler, func(context.Context) error, error)
 	}
 	views := bucketViews(latencyHistograms, latencyBuckets)
 	views = append(views, bucketViews(scoreHistograms, scoreBuckets)...)
+	views = append(views, bucketViews(probabilityHistograms, probabilityBuckets)...)
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(exporter),
 		sdkmetric.WithView(views...),

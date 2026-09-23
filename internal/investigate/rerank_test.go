@@ -5,6 +5,7 @@ package investigate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -232,5 +233,250 @@ func TestInstantRecallReranked(t *testing.T) {
 	}
 	if !got.Recalled || got.RecalledEntry != "known.md" {
 		t.Fatalf("must be flagged as a recall of known.md, got recalled=%v entry=%q", got.Recalled, got.RecalledEntry)
+	}
+}
+
+// stubRerankModel is a fake reranker ModelProvider, in the same style as
+// countingReranker/errReranker: it returns a canned rerank_match verdict built from its
+// fields via the existing rerankResp fixture, sparing a test from hand-writing JSON args.
+type stubRerankModel struct {
+	match      bool
+	entryID    string
+	confidence float64
+}
+
+func (m *stubRerankModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	return rerankResp(fmt.Sprintf(`{"match":%v,"entry_id":%q,"confidence":%v}`, m.match, m.entryID, m.confidence)), nil
+}
+
+// fakeDecider returns canned answers and records the state it was handed.
+type fakeDecider struct {
+	answers providers.Answers
+	err     error
+	state   string
+	calls   int
+}
+
+func (f *fakeDecider) Decide(_ context.Context, state string, _ []providers.Question) (providers.Answers, error) {
+	f.calls++
+	f.state = state
+	return f.answers, f.err
+}
+
+func TestRerankJevFiresOnItsOwnThreshold(t *testing.T) {
+	cands := []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1},
+		{Entry: catalog.Entry{Path: "b.md", Title: "B"}, Score: 0.5},
+	}
+	for _, tc := range []struct {
+		name     string
+		answers  providers.Answers
+		err      error
+		wantFire bool
+		wantPath string
+	}{
+		{
+			name:     "a named candidate above the bar fires",
+			answers:  providers.Answers{rerankQuestionID: {Choice: "b.md", Confidence: 0.9}},
+			wantFire: true, wantPath: "b.md",
+		},
+		{
+			name:    "below the bar falls through",
+			answers: providers.Answers{rerankQuestionID: {Choice: "b.md", Confidence: 0.4}},
+		},
+		{
+			name:    "the none option falls through",
+			answers: providers.Answers{rerankQuestionID: {Choice: rerankNoneOption, Confidence: 0.99}},
+		},
+		{
+			name:    "an id outside the candidate set can never fire",
+			answers: providers.Answers{rerankQuestionID: {Choice: "invented.md", Confidence: 0.99}},
+		},
+		{
+			name:    "a missing answer falls through",
+			answers: providers.Answers{},
+		},
+		{
+			name: "an error falls through",
+			err:  errors.New("upstream down"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &Reranker{
+				Decider: &fakeDecider{answers: tc.answers, err: tc.err},
+				Backend: "jev", ThresholdJev: 0.7, K: 5,
+			}
+			got, conf, ok := rr.rankJev(context.Background(), Request{Title: "t"}, cands, &recallSpend{})
+			if ok != tc.wantFire {
+				t.Fatalf("want fire=%v, got %v (conf %v)", tc.wantFire, ok, conf)
+			}
+			if tc.wantFire && got.Path != tc.wantPath {
+				t.Fatalf("want %s, got %s", tc.wantPath, got.Path)
+			}
+		})
+	}
+}
+
+// TestRerankShadowLetsTheLLMDecide pins the property that makes shadow safe to enable:
+// the investigation's outcome must not depend on the shadow arm, including when it fails.
+func TestRerankShadowLetsTheLLMDecide(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	fake := &fakeDecider{err: errors.New("shadow is down")}
+	rr := &Reranker{
+		Model:     &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+		Decider:   fake,
+		Backend:   "shadow",
+		Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+	}
+	got, conf, ok := rr.rank(context.Background(), Request{Title: "t"}, cands, &recallSpend{})
+	if !ok || got.Path != "a.md" || conf != 0.95 {
+		t.Fatalf("the LLM verdict must stand in shadow mode: ok=%v path=%s conf=%v", ok, got.Path, conf)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("the shadow arm must still be called once, got %d", fake.calls)
+	}
+}
+
+// TestRecallFiresOnTheDecidersOwnThreshold pins the threshold-crossover fix: the two
+// backends' confidences are not comparable (the LLM asserts one, the decider derives
+// one from probability spread), so the CALLER in recall.go must gate on the bar
+// belonging to whichever backend actually decided — never unconditionally on
+// Threshold (the LLM's bar). Threshold is set above the decider's confidence and
+// ThresholdJev below it: the old code (which re-gated on Threshold regardless of
+// backend) would suppress this fire; the fix must let it through.
+func TestRecallFiresOnTheDecidersOwnThreshold(t *testing.T) {
+	r := &Recall{
+		Catalog:  fakeScored{hits: []catalog.ScoredEntry{webHit("web.md", 6.0)}},
+		MinScore: 1.0, MarginGap: 1.0, SoloFloor: 4.0,
+		Rerank: &Reranker{
+			Decider:      &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "web.md", Confidence: 0.5}}},
+			Backend:      "jev",
+			Threshold:    0.9, // the LLM's bar — deliberately unreachable here
+			ThresholdJev: 0.3, // the decider's own bar — the verdict (0.5) clears it
+			K:            5,
+		},
+	}
+	entry, conf := r.lookup(context.Background(), okReq())
+	if entry == nil {
+		t.Fatalf("a decider verdict at/above ThresholdJev (0.3) but below Threshold (0.9) must still fire; conf=%v", conf)
+	}
+	if entry.Path != "web.md" {
+		t.Fatalf("got %s, want web.md", entry.Path)
+	}
+}
+
+// TestFireThresholdRequiresADeciderForTheJevBar pins the divergence guard: Backend
+// alone is not enough to pick ThresholdJev — rank() dispatches on Decider == nil
+// FIRST, so fireThreshold must check the same thing. With Backend left at "jev" but
+// no Decider configured, rank() falls back to the LLM path (rankLLM), so the verdict
+// it returns is the LLM's confidence and must be gated on Threshold, never
+// ThresholdJev — even though Backend still reads "jev". ThresholdJev is set low and
+// Threshold high with the verdict in between, so a fireThreshold that consults
+// Backend alone (the pre-fix code) lets this fire; the fix must not.
+func TestFireThresholdRequiresADeciderForTheJevBar(t *testing.T) {
+	r := &Recall{
+		Catalog:  fakeScored{hits: []catalog.ScoredEntry{webHit("web.md", 6.0)}},
+		MinScore: 1.0, MarginGap: 1.0, SoloFloor: 4.0,
+		Rerank: &Reranker{
+			Model:        &stubRerankModel{match: true, entryID: "web.md", confidence: 0.5},
+			Decider:      nil, // no decider ⇒ rank() dispatches to rankLLM regardless of Backend
+			Backend:      "jev",
+			Threshold:    0.9, // the LLM's bar — the verdict (0.5) does NOT clear it
+			ThresholdJev: 0.3, // the decider's bar — must NOT apply when there is no decider
+			K:            5,
+		},
+	}
+	entry, conf := r.lookup(context.Background(), okReq())
+	if entry != nil {
+		t.Fatalf("Backend=jev with no Decider must gate on Threshold (0.9), not ThresholdJev (0.3); "+
+			"a 0.5 verdict must not fire, got entry=%s conf=%v", entry.Path, conf)
+	}
+}
+
+// TestShadowAgreement pins the operator-facing label directly, since only the error
+// case is otherwise exercised end-to-end (TestRerankShadowLetsTheLLMDecide asserts a
+// different property: that the outcome never depends on the shadow arm).
+func TestShadowAgreement(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		llmFired, shadowFired bool
+		llmPath, shadowPath   string
+		err                   error
+		want                  string
+	}{
+		{name: "both fire the same entry", llmFired: true, llmPath: "a.md", shadowFired: true, shadowPath: "a.md", want: "agree"},
+		{name: "neither fires", llmFired: false, shadowFired: false, want: "agree"},
+		{name: "both fire different entries", llmFired: true, llmPath: "a.md", shadowFired: true, shadowPath: "b.md", want: "disagree"},
+		{name: "the LLM fires and the decider declines", llmFired: true, llmPath: "a.md", shadowFired: false, want: "disagree"},
+		{name: "the decider errors", llmFired: true, llmPath: "a.md", shadowFired: false, err: errors.New("upstream down"), want: "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shadowAgreement(tc.llmFired, tc.llmPath, tc.shadowFired, tc.shadowPath, tc.err)
+			if got != tc.want {
+				t.Fatalf("want %s, got %s", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestShadowOutcomeRidesTheSpendChannel pins the attribution: the comparison must
+// reach the caller through the per-investigation channel, never a field on the shared
+// Reranker, or one incident's shadow result would be reported against another.
+func TestShadowOutcomeRidesTheSpendChannel(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	for _, tc := range []struct {
+		name       string
+		dec        providers.Decider
+		wantRan    bool
+		wantAgreed bool
+	}{
+		{
+			name:    "agreement when both fire on the same entry",
+			dec:     &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "a.md", Confidence: 0.9}}},
+			wantRan: true, wantAgreed: true,
+		},
+		{
+			name:    "disagreement when the decider declines",
+			dec:     &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: rerankNoneOption, Confidence: 0.9}}},
+			wantRan: true, wantAgreed: false,
+		},
+		{
+			name:    "an outage counts as ran-but-not-agreed",
+			dec:     &fakeDecider{err: errors.New("down")},
+			wantRan: true, wantAgreed: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &Reranker{
+				Model:   &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+				Decider: tc.dec, Backend: "shadow", Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+			}
+			spend := &recallSpend{}
+			if _, _, ok := rr.rank(context.Background(), Request{Title: "t"}, cands, spend); !ok {
+				t.Fatal("the LLM verdict must still stand in shadow mode")
+			}
+			if spend.shadow.Ran != tc.wantRan || spend.shadow.Agreed != tc.wantAgreed {
+				t.Fatalf("want ran=%v agreed=%v, got %+v", tc.wantRan, tc.wantAgreed, spend.shadow)
+			}
+		})
+	}
+}
+
+// TestNonShadowBackendsRecordNoComparison keeps a normal run's report clean: with no
+// shadow arm there is nothing to compare, and ShadowTotal must stay zero rather than
+// publishing a 0/0.
+func TestNonShadowBackendsRecordNoComparison(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	for _, backend := range []string{"", "llm", "jev"} {
+		rr := &Reranker{
+			Model:   &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+			Decider: &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "a.md", Confidence: 0.9}}},
+			Backend: backend, Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+		}
+		spend := &recallSpend{}
+		_, _, _ = rr.rank(context.Background(), Request{Title: "t"}, cands, spend)
+		if spend.shadow.Ran {
+			t.Fatalf("backend %q must record no shadow comparison", backend)
+		}
 	}
 }

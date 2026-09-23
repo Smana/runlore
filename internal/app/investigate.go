@@ -116,6 +116,21 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 					Metrics:   metrics,
 					Log:       log,
 				}
+				// Decision-model backend, when one is configured and switched on. The
+				// warning is the load-bearing part of the fallback: an operator who
+				// flipped enabled off during an incident must see that the consumer
+				// still pointing here degraded, rather than wonder why nothing changed.
+				backend := cfg.Catalog.InstantRecall.RerankBackend
+				if backend != "llm" {
+					if dec := BuildDecider(cfg); dec != nil {
+						recall.Rerank.Decider = dec
+						recall.Rerank.Backend = backend
+						recall.Rerank.ThresholdJev = cfg.Catalog.InstantRecall.RerankThresholdJev
+					} else {
+						log.Warn("rerank_backend is set but no decision model is usable; falling back to the llm backend",
+							"rerank_backend", backend, "decision_model_enabled", cfg.DecisionModel.Enabled)
+					}
+				}
 				log.Info("instant-recall reranker enabled (calibrated-confidence gate replaces the BM25 solo_floor)",
 					"threshold", cfg.Catalog.InstantRecall.RerankThreshold,
 					"k", cfg.Catalog.InstantRecall.RerankK,

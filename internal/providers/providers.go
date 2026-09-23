@@ -1490,6 +1490,59 @@ type ModelProvider interface {
 	Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
 }
 
+// QuestionKind is the primitive a Question asks for. The names are the wire values
+// of TypeSafe's System One API, carried verbatim — "noul" is that vendor's own name
+// for its boolean primitive and is not a typo for "bool".
+type QuestionKind string
+
+// The three question kinds a Decider answers. Which Answer fields are meaningful
+// follows from the kind — see Answer.
+const (
+	KindChoice QuestionKind = "choice" // pick one option; returns Choice + Probabilities + Confidence
+	KindScore  QuestionKind = "score"  // place the state on an ordered rubric; returns Score + Confidence
+	KindNoul   QuestionKind = "noul"   // is this statement true; returns Noul, a probability in [0,1]
+)
+
+// Question is one bounded judgement to make about a state.
+type Question struct {
+	ID           string
+	Kind         QuestionKind
+	Instructions string
+	// Choices maps an option id to its criterion; KindChoice only. The option ids are
+	// what comes back in Answer.Choice, so a caller that needs "none of these" must
+	// offer it as an explicit option.
+	Choices map[string]string
+	// Levels are the ordered rubric descriptions, lowest first; KindScore only.
+	Levels []string
+}
+
+// Answer is one typed judgement. Which fields are meaningful follows the Question's
+// Kind: Choice and Confidence for KindChoice, Score and Confidence for KindScore,
+// Noul alone for KindNoul — a noul IS its own probability, so it carries no separate
+// confidence and a caller thresholds on Noul directly.
+type Answer struct {
+	Choice        string
+	Noul          float64
+	Score         float64
+	Probabilities map[string]float64
+	Confidence    float64
+}
+
+// Answers maps each Question's ID to its Answer.
+type Answers map[string]Answer
+
+// Decider answers bounded, typed questions about a state and returns calibrated
+// probabilities. It is deliberately NOT a ModelProvider: it generates no text, so
+// forcing it behind Complete would mean synthesising a tool call and discarding the
+// probabilities, which is the mismatch it exists to avoid. It also means content
+// embedded in the state cannot instruct it.
+//
+// Questions in one call are evaluated independently against the same state, so a
+// caller needing two judgements pays one round trip.
+type Decider interface {
+	Decide(ctx context.Context, state string, qs []Question) (Answers, error)
+}
+
 // Notifier delivers an investigation to a destination. Pluggable: Slack and
 // Matrix first; PagerDuty and incident.io later. Several notifiers can be wired
 // at once (e.g. chat for humans + an incident platform for the on-call record).
@@ -2205,6 +2258,13 @@ type KBEntry struct {
 	Related        []RelatedEntry
 	Occurrences    int
 	PrevCuratedURL string
+	// SuspectedDuplicate is the catalog entry a dedup decider flagged as a probable
+	// (but not confident-enough-to-skip) duplicate. Review metadata, rendered into
+	// the PR/MR description only — like Related, never into Body — because Body is
+	// committed into the catalog file (okf.Render) and a merged entry must not carry
+	// a stale review note a human already decided was a false positive. Nil unless
+	// the annotate tier fired.
+	SuspectedDuplicate *RelatedEntry
 }
 
 // RelatedEntry is a nearby catalog entry surfaced to the KB PR reviewer so

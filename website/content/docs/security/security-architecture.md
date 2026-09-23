@@ -218,8 +218,8 @@ attacker-influenceable. Each output surface neutralizes it for *its own* interpr
 
 - **`httpx.SecureClient` redirect guard** (`internal/httpx/client.go`): every outbound client to an
   operator- or externally-configurable endpoint (model, forge, notifiers, MCP, metrics/logs,
-  embeddings — including the SSE variant `SecureStreamingClient`) installs `DenyInternalRedirect`,
-  which:
+  embeddings, the `decision_model` decider — including the SSE variant `SecureStreamingClient`)
+  installs `DenyInternalRedirect`, which:
   - refuses a redirect from a **public-origin** chain to a loopback / private / link-local /
     unspecified address — closing the redirect → `169.254.169.254` cloud-metadata SSRF path — and
     **fails closed** when the target doesn't resolve;
@@ -235,8 +235,9 @@ attacker-influenceable. Each output surface neutralizes it for *its own* interpr
 - **Cleartext-key startup rejection** (`internal/config/config.go` `checkSecureKeyEndpoint`):
   config validation refuses to start when an API key would be sent over plain `http` to a
   **public** host — covering the model endpoint, a verify override (including one that *inherits*
-  an insecure parent `base_url`), embeddings, and every MCP server. Loopback and in-cluster hosts
-  are exempt; the check is pure (no DNS) so validation stays deterministic.
+  an insecure parent `base_url`), embeddings, every MCP server, `forge.gitlab`, and the
+  `decision_model` decider. Loopback and in-cluster hosts are exempt; the check is pure (no DNS) so
+  validation stays deterministic.
 
 > [!NOTE]
 > **Explicitly out of scope: dial-time DNS rebinding**
@@ -297,6 +298,14 @@ Honesty is part of the design (see [Security model → Honest limitations]({{< r
   findings and KB PRs is the load-bearing quality gate.
 - **Redaction is best-effort** (§2). The model provider sees redacted cluster data; if that is
   unacceptable, self-host the model.
+- **The `decision_model` decider is a hosted-only fourth vendor.** Off by default; enabling it (the
+  instant-recall reranker's `jev`/`shadow` backend, or the curator's dedup `jev` backend) sends
+  alert titles, labels and runbook excerpts to a hosted third party (TypeSafe) with **no published
+  retention window** — its policy commits to not training or fine-tuning on submitted input, but
+  states retention only as "as long as reasonably necessary". **Zero data retention is offered but
+  is enterprise-gated**: it must be arranged directly with the vendor, not set via a config flag.
+  **There is no self-hosted option** — unlike the model provider above, the in-cluster keyless
+  story does not extend to this decider.
 - **Configured endpoints are trusted** (§4). The network guards defend against redirects and
   response content, not against a hostile operator-supplied hostname.
 - **The audit chain can't detect tail-truncation** without an external anchor — see
