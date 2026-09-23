@@ -79,6 +79,18 @@ type Reranker struct {
 	Log     *slog.Logger       // optional; nil-safe
 }
 
+// fireThreshold is the confidence bar for whichever backend actually decided. The two
+// confidences are not comparable — the LLM asserts its number, the decider derives one
+// from probability spread — so the caller must gate on the bar belonging to the backend
+// that produced the number, never on one shared field. In shadow mode the LLM decides,
+// so the LLM's bar applies.
+func (rr *Reranker) fireThreshold() float64 {
+	if rr.Backend == "jev" {
+		return rr.ThresholdJev
+	}
+	return rr.Threshold
+}
+
 // rerankToolName is the reserved structured-output tool the reranker must call — a
 // prose reply is never a decision, so the request forces this tool (ToolChoice).
 const rerankToolName = "rerank_match"

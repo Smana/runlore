@@ -266,7 +266,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, spend *recall
 		// Fire ONLY on a calibrated confidence at or above the (corpus-independent)
 		// threshold. A no-match / low-confidence / hallucinated-id verdict falls through —
 		// the false-recall guard (a wrong or absent match is worse than no recall).
-		if !ok || mconf < r.Rerank.Threshold {
+		if !ok || mconf < r.Rerank.fireThreshold() {
 			r.reject(ctx, "rerank_low_confidence")
 			return nil, 0, nil
 		}
@@ -386,7 +386,7 @@ func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []ca
 			return nil, 0, rejected
 		}
 		matched, mconf, ok := r.Rerank.rank(ctx, req, remaining[:k], spend)
-		if !ok || mconf < r.Rerank.Threshold {
+		if !ok || mconf < r.Rerank.fireThreshold() {
 			r.reject(ctx, "rerank_low_confidence")
 			return nil, 0, rejected
 		}

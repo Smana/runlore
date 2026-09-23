@@ -337,6 +337,34 @@ func TestRerankShadowLetsTheLLMDecide(t *testing.T) {
 	}
 }
 
+// TestRecallFiresOnTheDecidersOwnThreshold pins the threshold-crossover fix: the two
+// backends' confidences are not comparable (the LLM asserts one, the decider derives
+// one from probability spread), so the CALLER in recall.go must gate on the bar
+// belonging to whichever backend actually decided — never unconditionally on
+// Threshold (the LLM's bar). Threshold is set above the decider's confidence and
+// ThresholdJev below it: the old code (which re-gated on Threshold regardless of
+// backend) would suppress this fire; the fix must let it through.
+func TestRecallFiresOnTheDecidersOwnThreshold(t *testing.T) {
+	r := &Recall{
+		Catalog:  fakeScored{hits: []catalog.ScoredEntry{webHit("web.md", 6.0)}},
+		MinScore: 1.0, MarginGap: 1.0, SoloFloor: 4.0,
+		Rerank: &Reranker{
+			Decider:      &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "web.md", Confidence: 0.5}}},
+			Backend:      "jev",
+			Threshold:    0.9, // the LLM's bar — deliberately unreachable here
+			ThresholdJev: 0.3, // the decider's own bar — the verdict (0.5) clears it
+			K:            5,
+		},
+	}
+	entry, conf := r.lookup(context.Background(), okReq())
+	if entry == nil {
+		t.Fatalf("a decider verdict at/above ThresholdJev (0.3) but below Threshold (0.9) must still fire; conf=%v", conf)
+	}
+	if entry.Path != "web.md" {
+		t.Fatalf("got %s, want web.md", entry.Path)
+	}
+}
+
 // TestShadowAgreement pins the operator-facing label directly, since only the error
 // case is otherwise exercised end-to-end (TestRerankShadowLetsTheLLMDecide asserts a
 // different property: that the outcome never depends on the shadow arm).
