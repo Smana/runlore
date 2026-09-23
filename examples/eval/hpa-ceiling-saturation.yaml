@@ -1,0 +1,110 @@
+# HELD OUT. Do not tune the prompt against this case.
+#
+# Every other gated case in this corpus scores something the submit_findings schema now
+# teaches: name the resource the cause sits on, name the identifier it turns on. That
+# guidance was written after reading which terms the corpus was missing, so a pass-rate
+# built on those cases partly measures the prompt rather than the agent. This case exists
+# to be the number nobody tuned for.
+#
+# What it measures is the skill no field description can teach: choosing the right cause.
+# Two properties make it discriminating, and neither is about naming.
+#
+#   1. The cause is a NO-CHANGE cause. Nothing about pricing-api changed. Load grew and
+#      the autoscaler had no headroom left, so the agent has to conclude "saturation
+#      against a configured ceiling" from metrics rather than reach for a diff.
+#   2. There IS a recent change in the same namespace, to an unrelated workload, and it
+#      is the distractor. "Blame the last change" is the single most available wrong
+#      answer in this whole product, and this is the only case in the corpus that
+#      penalises it.
+#
+# If the agent scores well here WITHOUT the prompt ever having been tuned against it,
+# that is evidence about the agent. If it scores badly, that is the honest baseline and
+# it belongs in the scorecard — it must NOT be fixed by editing a field description to
+# mention autoscaling, which would burn the one case that is still a measurement.
+#
+# Therefore `gate: false`. It is not withheld from the gate because it is unfair; it is
+# withheld because a case that gates gets tuned, and this one must not be.
+name: hpa-ceiling-saturation
+alert_title: HighRequestLatency
+workload:
+  namespace: commerce
+  name: pricing-api
+prompt: |
+  HighRequestLatency (critical, prod, namespace commerce): pricing-api p99 latency has
+  been above its 400ms SLO for 20 minutes and is still climbing. No error-rate alert.
+gate: false
+tools:
+  # The trap. A real, recent, same-namespace Flux change — to a workload that has nothing
+  # to do with pricing-api's latency. The diff is shown in full precisely so the agent can
+  # see for itself that it touches only promo-banner.
+  what_changed: |
+    flux Kustomization/commerce  a41f88..c70d19  (12 minutes before the alert)
+    --- commerce/promo-banner/values.yaml
+    -  image:
+    -    tag: 2.8.4
+    +  image:
+    +    tag: 2.8.5          # copy change: seasonal banner text
+    (no other files changed; no change to commerce/pricing-api/ in this or the preceding
+    6 revisions)
+  query_metrics: |
+    # pricing-api is pinned at its autoscaler's upper bound and saturated
+    kube_horizontalpodautoscaler_status_current_replicas{namespace="commerce",horizontalpodautoscaler="pricing-api"} = 4
+    kube_horizontalpodautoscaler_spec_max_replicas{namespace="commerce",horizontalpodautoscaler="pricing-api"}     = 4
+    kube_horizontalpodautoscaler_spec_min_replicas{namespace="commerce",horizontalpodautoscaler="pricing-api"}     = 2
+    kube_horizontalpodautoscaler_status_condition{namespace="commerce",horizontalpodautoscaler="pricing-api",condition="ScalingLimited",status="true"} = 1
+    kube_horizontalpodautoscaler_status_condition{namespace="commerce",horizontalpodautoscaler="pricing-api",condition="AbleToScale",status="true"}    = 1
+    # CPU is the scaling metric, and it is far above the 70% target
+    rate(container_cpu_usage_seconds_total{namespace="commerce",pod=~"pricing-api-.*"}[5m]) / on(pod) kube_pod_container_resource_requests{resource="cpu"} = 0.94
+    # demand, not a regression: steady organic growth, no step change at the deploy
+    sum(rate(http_requests_total{namespace="commerce",service="pricing-api"}[5m])) = 1840   # 7d ago: 910
+    histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{service="pricing-api"}[5m])) = 0.71
+    # the neighbour that DID change is healthy and unrelated
+    sum(rate(http_requests_total{namespace="commerce",service="promo-banner"}[5m])) = 22
+  pod_status: |
+    pricing-api-7d9f4c6b5-4q8wn   Running  ready=1/1  restarts=0  age=6d  cpu=940m/1000m
+    pricing-api-7d9f4c6b5-hk2vp   Running  ready=1/1  restarts=0  age=6d  cpu=931m/1000m
+    pricing-api-7d9f4c6b5-p4xzl   Running  ready=1/1  restarts=0  age=6d  cpu=948m/1000m
+    pricing-api-7d9f4c6b5-vb6mt   Running  ready=1/1  restarts=0  age=6d  cpu=927m/1000m
+    promo-banner-5c8b7d94f-9tzrq  Running  ready=1/1  restarts=0  age=12m cpu=11m/500m
+    # 4 replicas, all Ready, no restarts, none recreated at the deploy 12 minutes ago
+  query_logs: |
+    pricing-api  upstream quote-engine responded in 612ms (slow)
+    pricing-api  upstream quote-engine responded in 655ms (slow)
+    pricing-api  request queue depth 38, workers 8/8 busy
+    (no errors, no panics, no restarts, no OOM)
+  gitops_resource_status: |
+    HelmRelease commerce/pricing-api    Ready=True   lastAppliedRevision unchanged for 6d
+    HelmRelease commerce/promo-banner   Ready=True   reconciled 12m ago (2.8.5)
+expected:
+  # ONE mechanism term, chosen to survive wording rather than to score style:
+  # "autoscal" matches autoscaler, autoscaling and HorizontalPodAutoscaler, so a correct
+  # claim passes whichever it says. Deliberately NOT "maxReplicas" — a claim that says
+  # "the maximum replica count" is just as right, and scoring the spelling would measure
+  # quoting rather than reasoning.
+  must_contain: [autoscal]
+  min_confidence: 0.5
+  # pricing-api is both the alerting workload and the object the cause sits on, so naming
+  # it is not the discriminating part of this case. The distractor is.
+  root_cause_entities: [pricing-api]
+  # promo-banner is a VALID distractor by this corpus's own rule, which the other cases
+  # document failing to meet:
+  #   - it is in this case's evidence (what_changed, pod_status, query_metrics,
+  #     gitops_resource_status), so blaming it is a reasoning error rather than a
+  #     hallucination;
+  #   - a correct claim has no reason to name it, not even to dismiss it — claimText
+  #     excludes ruled_out, so an agent that rules it out properly puts it THERE and is
+  #     not penalised, while one that writes "not the promo-banner bump" into the summary
+  #     is. That asymmetry is intended: the honesty channels exist, and using them is the
+  #     behaviour under test.
+  distractors: [promo-banner]
+ground_truth:
+  root_cause: |
+    pricing-api's HorizontalPodAutoscaler is at its maxReplicas of 4 with ScalingLimited
+    true and CPU at 94% against a 70% target, while request volume has roughly doubled
+    over a week. Demand outgrew the configured autoscaling ceiling, so latency rises with
+    no scaling response available. Nothing about pricing-api changed; the promo-banner
+    image bump 12 minutes earlier is coincident and unrelated.
+  expected_sources: [metrics, gitops]
+  optional_sources: [kubernetes, logs]
+  expected_action: raise pricing-api's maxReplicas (and re-check the CPU request headroom)
+  must_reach_root: true
