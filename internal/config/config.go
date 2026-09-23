@@ -41,13 +41,14 @@ type Config struct {
 	// auth token stays server-level (server.webhook_token_env).
 	Sources map[string]yaml.Node `yaml:"sources"`
 
-	Actions ActionPolicy `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
-	Forge   Forge        `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
-	Curate  Curate       `yaml:"curate"`  // Phase-2 backlog groomer settings
-	Model   Model        `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
-	Notify  Notify       `yaml:"notify"`  // chat delivery for findings
-	Catalog Catalog      `yaml:"catalog"` // OKF knowledge catalog
-	Outcome Outcome      `yaml:"outcome"` // learning-loop outcome ledger
+	Actions       ActionPolicy  `yaml:"actions"`        // read-only by default; the upper rungs of the autonomy ladder
+	Forge         Forge         `yaml:"forge"`          // git-forge auth (GitHub App) for diff access + curation
+	Curate        Curate        `yaml:"curate"`         // Phase-2 backlog groomer settings
+	Model         Model         `yaml:"model"`          // optional; when BaseURL is set, serve uses the LLM investigator
+	DecisionModel DecisionModel `yaml:"decision_model"` // System One decision model (jev)
+	Notify        Notify        `yaml:"notify"`         // chat delivery for findings
+	Catalog       Catalog       `yaml:"catalog"`        // OKF knowledge catalog
+	Outcome       Outcome       `yaml:"outcome"`        // learning-loop outcome ledger
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
@@ -722,6 +723,15 @@ type InstantRecall struct {
 	// hybrid is on. Default on: persistence only ever helps, and every failure
 	// mode (corrupt/stale/missing file) degrades to a cold re-embed.
 	VectorCache VectorCache `yaml:"vector_cache"`
+
+	// RerankBackend selects the reranking backend: "llm" (default, the configured model)
+	// or "jev" (a decision model answers "same incident pattern?"). InstantRecall runs
+	// only when enabled; this field names which backend runs when it does. Empty defaults
+	// to llm in ApplyDefaults.
+	RerankBackend string `yaml:"rerank_backend"`
+	// RerankThresholdJev is the jev backend's calibrated confidence bar. Required when
+	// rerank_backend is jev and decision_model is enabled. Must be in (0,1].
+	RerankThresholdJev float64 `yaml:"rerank_threshold_jev"`
 }
 
 // RerankEnabled reports whether the instant-recall LLM reranker should run. It is
@@ -738,6 +748,24 @@ type CatalogGit struct {
 	Branch   string   `yaml:"branch"`    // default "main"
 	Interval Duration `yaml:"interval"`  // re-sync period (default 5m)
 	TokenEnv string   `yaml:"token_env"` // env var with a read token (empty = anonymous/public)
+}
+
+// DecisionModel configures a System One decision model — a backend that answers one
+// bounded, typed question and returns a calibrated probability. It is deliberately NOT
+// nested under `model:`: it is a different protocol from a different vendor answering a
+// different question, and none of model's vocabulary (max_tokens, effort, thinking)
+// means anything to a model that emits no tokens.
+//
+// Enabled is a kill switch rather than a presence check, unlike model.verify and
+// model.chat. An operator has to be able to stop every decision call during an incident
+// without also deleting the endpoint and key-env config, so a consumer still pointing
+// here falls back with a warning instead of failing validation. See Validate.
+type DecisionModel struct {
+	Enabled   bool   `yaml:"enabled"`
+	Provider  string `yaml:"provider"`    // "typesafe" is the only implementation
+	BaseURL   string `yaml:"base_url"`    // required when enabled
+	Model     string `yaml:"model"`       // e.g. jev-latest
+	APIKeyEnv string `yaml:"api_key_env"` // env var NAME; empty = keyless behind a gateway
 }
 
 // Model configures the LLM used for investigation. Provider selects the wire
@@ -1965,6 +1993,14 @@ func ChatWithoutCaptureWarning(cfg *Config) string {
 		"one, or this is dead config"
 }
 
+// DecisionModelUsable reports whether a decider can actually be built: the block is
+// enabled and carries an endpoint. Every consumer checks this rather than Enabled, so
+// "configured but switched off" and "not configured" behave identically.
+func (c *Config) DecisionModelUsable() bool {
+	d := c.DecisionModel
+	return d.Enabled && d.BaseURL != "" && d.Model != ""
+}
+
 // Validate enforces cross-field invariants after loading — fail-closed defaults
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
@@ -2426,6 +2462,52 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("catalog.instant_recall.rerank_min_score must be >= 0 (retrieval-score cost floor), got %g", ir.RerankMinScore)
 		}
 	}
+	// A decision model that is enabled must be reachable; an unknown backend name is a
+	// typo the operator needs told about. But a DISABLED block never errors, however a
+	// consumer is set — see DecisionModel's doc for why the kill switch outranks
+	// consistency here.
+	if c.DecisionModel.Enabled {
+		if c.DecisionModel.BaseURL == "" {
+			return fmt.Errorf("decision_model.base_url is required when decision_model.enabled is true")
+		}
+		if c.DecisionModel.Model == "" {
+			return fmt.Errorf("decision_model.model is required when decision_model.enabled is true")
+		}
+		if p := c.DecisionModel.Provider; p != "" && p != "typesafe" {
+			return fmt.Errorf("decision_model.provider %q is not supported (valid: typesafe)", p)
+		}
+	}
+	switch b := c.Catalog.InstantRecall.RerankBackend; b {
+	case "", "llm", "shadow":
+	case "jev":
+		// Only the live backend needs a bar. Shadow records the confidence distribution
+		// instead, which is how the value gets chosen in the first place.
+		if c.DecisionModelUsable() {
+			if t := c.Catalog.InstantRecall.RerankThresholdJev; t <= 0 || t > 1 {
+				return fmt.Errorf("catalog.instant_recall.rerank_threshold_jev must be in (0,1] and is required when rerank_backend is jev, got %g", t)
+			}
+		}
+	default:
+		return fmt.Errorf("catalog.instant_recall.rerank_backend %q is not valid (llm|jev|shadow)", b)
+	}
+	switch b := c.Forge.DedupBackend; b {
+	case "", "bm25":
+	case "jev":
+		if c.DecisionModelUsable() {
+			if c.Forge.DedupSkipAbove <= 0 || c.Forge.DedupSkipAbove > 1 {
+				return fmt.Errorf("forge.dedup_skip_above must be in (0,1] and is required when dedup_backend is jev, got %g", c.Forge.DedupSkipAbove)
+			}
+			if c.Forge.DedupAnnotateAbove <= 0 || c.Forge.DedupAnnotateAbove > 1 {
+				return fmt.Errorf("forge.dedup_annotate_above must be in (0,1] and is required when dedup_backend is jev, got %g", c.Forge.DedupAnnotateAbove)
+			}
+			if c.Forge.DedupSkipAbove <= c.Forge.DedupAnnotateAbove {
+				return fmt.Errorf("forge.dedup_skip_above (%g) must be greater than forge.dedup_annotate_above (%g), or the tiers are unorderable",
+					c.Forge.DedupSkipAbove, c.Forge.DedupAnnotateAbove)
+			}
+		}
+	default:
+		return fmt.Errorf("forge.dedup_backend %q is not valid (bm25|jev)", b)
+	}
 	// Retirement pass (opt-in): its knobs are only meaningful when enabled, and a
 	// disabled block is never validated. ApplyDefaults fills unset (0) values while
 	// enabled, so only an explicitly out-of-range setting reaches here. Floor is a
@@ -2687,6 +2769,16 @@ type Forge struct {
 	// git host, so the misconfiguration is loud at startup instead of silent
 	// forever. A bare host: no scheme, path, port, userinfo, and ASCII only.
 	GitHost string `yaml:"git_host"`
+
+	// DedupBackend selects the file-time dedup gate: "bm25" (default, the DupScore
+	// threshold below) or "jev" (a decision model answers "same incident pattern?").
+	DedupBackend string `yaml:"dedup_backend"`
+	// DedupSkipAbove / DedupAnnotateAbove are the jev backend's band edges. Above skip:
+	// do not file, record a confirmation. Between: file, naming the suspect in the body.
+	// Below annotate: file as today. Both are REQUIRED when DedupBackend is jev — a
+	// default nobody measured would be invented rather than chosen.
+	DedupSkipAbove     float64 `yaml:"dedup_skip_above"`
+	DedupAnnotateAbove float64 `yaml:"dedup_annotate_above"`
 }
 
 // GitLab holds GitLab forge credentials. Unlike GitHubApp (a short-lived,

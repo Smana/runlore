@@ -231,6 +231,12 @@ func ApplyDefaults(c *Config) {
 			}
 		}
 	}
+	if c.Catalog.InstantRecall.RerankBackend == "" {
+		c.Catalog.InstantRecall.RerankBackend = "llm"
+	}
+	if c.Forge.DedupBackend == "" {
+		c.Forge.DedupBackend = "bm25"
+	}
 	// Curation gates: the file-time dedup threshold and quality bar. Applied
 	// UNCONDITIONALLY — unlike the opt-in blocks above — because the point is that
 	// the resolved value is readable from the config alone, by `lore config show`,

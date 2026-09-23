@@ -261,6 +261,19 @@ config:
   #     base_url: https://vllm.svc/v1
   #     model: <embedding-model-name>
   #     api_key_env: OPENAI_API_KEY
+  # A System One decision model — NOT an LLM. It answers one bounded question and
+  # returns a calibrated probability, and it carries none of model:'s knobs because
+  # none of them mean anything to a model that emits no tokens.
+  #
+  # Enabling this sends alert titles, labels and runbook excerpts to a HOSTED third
+  # party with no published retention window; zero data retention exists but must be
+  # arranged with the vendor. There is no self-hosted option. Off by default.
+  # decision_model:
+  #   enabled: true
+  #   provider: typesafe
+  #   base_url: https://api.typesafe.ai
+  #   model: jev-latest
+  #   api_key_env: TYPESAFE_API_KEY   # the env var NAME, never the key
   # catalog:
   #   dir: /var/lib/runlore/catalog
   #   # A second, read-only root of generic playbooks so kb_search is useful before
