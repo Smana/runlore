@@ -365,6 +365,34 @@ func TestRecallFiresOnTheDecidersOwnThreshold(t *testing.T) {
 	}
 }
 
+// TestFireThresholdRequiresADeciderForTheJevBar pins the divergence guard: Backend
+// alone is not enough to pick ThresholdJev — rank() dispatches on Decider == nil
+// FIRST, so fireThreshold must check the same thing. With Backend left at "jev" but
+// no Decider configured, rank() falls back to the LLM path (rankLLM), so the verdict
+// it returns is the LLM's confidence and must be gated on Threshold, never
+// ThresholdJev — even though Backend still reads "jev". ThresholdJev is set low and
+// Threshold high with the verdict in between, so a fireThreshold that consults
+// Backend alone (the pre-fix code) lets this fire; the fix must not.
+func TestFireThresholdRequiresADeciderForTheJevBar(t *testing.T) {
+	r := &Recall{
+		Catalog:  fakeScored{hits: []catalog.ScoredEntry{webHit("web.md", 6.0)}},
+		MinScore: 1.0, MarginGap: 1.0, SoloFloor: 4.0,
+		Rerank: &Reranker{
+			Model:        &stubRerankModel{match: true, entryID: "web.md", confidence: 0.5},
+			Decider:      nil, // no decider ⇒ rank() dispatches to rankLLM regardless of Backend
+			Backend:      "jev",
+			Threshold:    0.9, // the LLM's bar — the verdict (0.5) does NOT clear it
+			ThresholdJev: 0.3, // the decider's bar — must NOT apply when there is no decider
+			K:            5,
+		},
+	}
+	entry, conf := r.lookup(context.Background(), okReq())
+	if entry != nil {
+		t.Fatalf("Backend=jev with no Decider must gate on Threshold (0.9), not ThresholdJev (0.3); "+
+			"a 0.5 verdict must not fire, got entry=%s conf=%v", entry.Path, conf)
+	}
+}
+
 // TestShadowAgreement pins the operator-facing label directly, since only the error
 // case is otherwise exercised end-to-end (TestRerankShadowLetsTheLLMDecide asserts a
 // different property: that the outcome never depends on the shadow arm).

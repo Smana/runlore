@@ -84,8 +84,15 @@ type Reranker struct {
 // from probability spread — so the caller must gate on the bar belonging to the backend
 // that produced the number, never on one shared field. In shadow mode the LLM decides,
 // so the LLM's bar applies.
+//
+// The Decider != nil check mirrors rank()'s own dispatch: rank falls back to rankLLM
+// whenever Decider is nil, REGARDLESS of Backend, so a verdict can carry Backend ==
+// "jev" while the LLM actually produced it. ThresholdJev must apply only when the
+// decider could actually have decided — the same condition rank dispatches on. Two
+// functions answering "which backend decided" with different predicates is how they
+// drift; checking Decider here too keeps them in sync.
 func (rr *Reranker) fireThreshold() float64 {
-	if rr.Backend == "jev" {
+	if rr.Decider != nil && rr.Backend == "jev" {
 		return rr.ThresholdJev
 	}
 	return rr.Threshold
