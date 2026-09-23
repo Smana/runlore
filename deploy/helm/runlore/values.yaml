@@ -309,6 +309,11 @@ config:
   #     rerank_threshold: 0.7          # calibrated match-confidence bar to short-circuit (probability; no per-corpus tuning)
   #     rerank_k: 5                    # candidates ranked in the one call (bounded for cost)
   #     rerank_min_score: 0.1          # trivial retrieval-score floor; below it the paid call is skipped (cost guard)
+  #     # Reranker backend: llm (default, the configured model) | jev (a decision model
+  #     # answers "same incident pattern?", off by default — requires decision_model.enabled)
+  #     # | shadow (jev runs alongside llm for comparison; llm's verdict still decides).
+  #     # rerank_backend: llm
+  #     # rerank_threshold_jev: 0.7      # jev's calibrated confidence bar (0,1]; REQUIRED when rerank_backend is jev. Shadow mode reads it too — see docs/configuration.md.
   #     # EXPERIMENTAL hybrid recall: fuse BM25 + embeddings, gate on cosine similarity.
   #     # Requires model.embeddings (above). TUNE the cosine thresholds against the
   #     # instant-recall eval before relying on it — defaults are conservative placeholders.
@@ -388,6 +393,12 @@ config:
   #   #   github_api_url: https://api.ghe.example.com   # API (subdomain isolation)
   #   #   git_host: ghe.example.com                     # git remotes / clone auth
   #   # Bare hostname only: no scheme, path, port or userinfo.
+  #   # File-time dedup gate backend: bm25 (default, the dup_score threshold) | jev (a
+  #   # decision model answers "same incident pattern?", off by default — requires
+  #   # decision_model.enabled).
+  #   # dedup_backend: bm25
+  #   # dedup_skip_above: 0.9      # jev: above this confidence, skip filing (record a confirmation). REQUIRED when dedup_backend is jev
+  #   # dedup_annotate_above: 0.7  # jev: between this and skip_above, file with the suspect named in the body. REQUIRED when dedup_backend is jev
   # Investigate signals (optional). metrics/logs enable query_metrics/query_logs.
   # metrics: { url: http://vmsingle.observability.svc:8429 }   # PromQL (VictoriaMetrics/Prometheus)
   # Logs backend (query_logs / logs_error_summary / discover_log_fields). The provider is

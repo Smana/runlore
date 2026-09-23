@@ -339,6 +339,20 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   being reached at all (see [Observability]({{< relref "/docs/operations/observability.md" >}})).
   If the ratio is bad, raise `rerank_min_score` toward your corpus's real score regime — that trades
   recall coverage for calls not made.
+- `instant_recall.rerank_backend` — which backend answers the reranker's "same incident pattern?"
+  question: `llm` (default, the configured `model`, described above) · `jev` (a `decision_model`
+  answers instead — off by default, requires `decision_model.enabled`) · `shadow` (both run; `jev`'s
+  verdict is recorded for comparison and discarded, `llm` still decides — see
+  [`decision_model`](#decision_model--a-non-generative-decider) below). An investigation's outcome
+  never depends on `jev`/`shadow` being reachable: either falls back to `llm` when `decision_model` is
+  absent or disabled.
+- `instant_recall.rerank_threshold_jev` — the `jev` backend's calibrated confidence bar (a probability,
+  `(0,1]`). **Required** when `rerank_backend` is `jev`; range-checked whenever it is set, regardless
+  of backend. **`shadow` reads it too** — it decides whether a shadow comparison counts as a fire, so
+  leaving it unset while shadowing measures agreement at a threshold of zero, not at the bar `jev`
+  would actually run at. Promotion path: run `shadow` with it unset to fill the confidence histogram,
+  read a candidate bar off that distribution, set it **while still in `shadow`**, read the agreement
+  counter at that bar, and only then switch `rerank_backend` to `jev`.
 - `instant_recall.hybrid` (**EXPERIMENTAL**, off by default; needs `model.embeddings`) — switches recall
   to fused **BM25 + embedding** retrieval, gated on **cosine** similarity (`hybrid_min_score` default
   **0.80**, `hybrid_margin_gap` default **0.05**) instead of the BM25 magnitude. *Provenance:* the hybrid
@@ -448,6 +462,32 @@ never fire and RunLore warns about it at startup. Rates are yours to supply and 
 is only as accurate as the numbers here: check them against your provider's price list when you change
 model or tier, or the ceiling drifts away from the bill it is meant to bound.
 
+### `decision_model` — a non-generative decider
+A **System One** model — not an LLM. It takes a state plus typed questions and returns typed answers
+with a calibrated confidence, generating no text, so content embedded in an alert or a runbook cannot
+instruct it. Off by default; top-level, never nested under `model:`, because it is a different wire
+protocol from a different vendor answering a different question, not another LLM endpoint.
+
+`enabled` (default `false`), `provider` (only `typesafe` is supported), `base_url`, `model` (e.g.
+`jev-latest`), `api_key_env` (the env var **name**, empty = keyless behind a gateway). `base_url` is
+subject to the same cleartext-key check as every other keyed provider (`model`, `model.embeddings`,
+`mcp.servers[*]`, `forge.gitlab`): an `http://` endpoint with `api_key_env` set fails config load
+unless the host is private/loopback.
+
+Today's two consumers, both off by default and both falling back to the LLM on any failure — a
+missing/disabled `decision_model` block, an unreachable endpoint, a rate limit, a malformed
+answer — so an investigation's outcome never depends on this block being reachable:
+- the instant-recall reranker's `rerank_backend` (`jev`/`shadow`; see above), and
+- the curator's file-time dedup gate's `forge.dedup_backend` (`jev`; see below).
+
+**Egress.** Enabling this sends alert titles, labels and runbook excerpts to a **hosted third party**
+with **no published retention window**. TypeSafe's privacy policy commits to not training or
+fine-tuning models on submitted input, but does not state a retention period beyond "as long as
+reasonably necessary". Zero data retention is offered but is **enterprise-gated** — it must be
+arranged directly with TypeSafe, not set via a config flag — and there is **no self-hosted option**.
+See [Security architecture]({{< relref "/docs/security/security-architecture.md" >}}) for the full
+disclosure.
+
 ### `forge` — the Git host for curation
 `provider` (`github` — the default — or `gitlab`), `kb_repo` (GitHub: `owner/name`; GitLab: the
 project path, e.g. `group/project`, nested groups allowed), `base_branch` (default `main`),
@@ -492,6 +532,17 @@ value fails fast. Empty (the default) preserves the original behaviour: every ve
 Recommended production value is `skip_verdicts: ["no_action"]`, which keeps benign / self-healed /
 synthetic findings out of the review queue while still notifying chat (see
 [reviewing-knowledge.md]({{< relref "reviewing-knowledge.md#expected-triage-volume" >}})).
+
+`dedup_backend` selects the **file-time** dedup gate — the check that runs on every drafted KB
+entry, upstream of the fingerprint check, which still short-circuits first: `bm25` (default, the
+`dup_score` threshold above) or `jev` (a [`decision_model`](#decision_model--a-non-generative-decider)
+answers "same incident pattern?" — off by default, requires `decision_model.enabled`). `jev` scores
+into **three tiers** via two required band edges, `dedup_skip_above` and `dedup_annotate_above` (both
+probabilities in `(0,1]`, and `dedup_skip_above` must exceed `dedup_annotate_above`): above
+`dedup_skip_above` the candidate is a confident duplicate — skipped, recorded as a confirmation, no
+PR; between the two edges it still files, but **with the suspect named in the body** so the reviewer
+decides; below `dedup_annotate_above` it files as today. No tier can close or skip a
+human-labelled artifact.
 
 ### `notify` — where findings go
 `slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`,
