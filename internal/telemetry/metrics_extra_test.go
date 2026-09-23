@@ -76,3 +76,45 @@ func TestNewInstrumentsExposeContractNames(t *testing.T) {
 		t.Errorf("runlore_build_info missing version label\n%s", body)
 	}
 }
+
+// TestDecisionModelInstrumentsAreExported asserts the decision-model confidence
+// histogram and shadow-comparison counter reach /metrics under their contract
+// names, and that confidence is bucketed for a 0-1 probability rather than the
+// BM25 score buckets (which start at 0.1 and run to 10, and would put almost
+// every confidence in one bucket).
+func TestDecisionModelInstrumentsAreExported(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := Setup(context.Background())
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	m := NewMetrics()
+	ctx := context.Background()
+	m.DecisionConfidence.Record(ctx, 0.84, metric.WithAttributes(attribute.String("consumer", "rerank")))
+	m.DecisionShadow.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("consumer", "rerank"), attribute.String("agreement", "agree")))
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		"runlore_decision_model_confidence_bucket",
+		"runlore_decision_model_shadow_total",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metric %q missing from the scrape", want)
+		}
+	}
+	// A probability belongs in probability buckets: the BM25 score buckets start at 0.1
+	// and run to 10, which would put almost every confidence in one bucket. Matched via
+	// bucketHasBoundary (buckets_test.go), not a literal substring: the exporter emits
+	// otel_scope_* labels ahead of le, so consumer and le are not adjacent in the output.
+	if !bucketHasBoundary(body, "runlore_decision_model_confidence_bucket", "0.9") {
+		t.Errorf("confidence is not on probability buckets:\n%s", body)
+	}
+}

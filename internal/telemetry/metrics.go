@@ -128,6 +128,14 @@ type Metrics struct {
 	// (unmatched_alert: this one incident's alertname has no rule here, which is
 	// normal and must never page).
 	AlertRuleDegraded metric.Int64Counter
+
+	// DecisionConfidence is the calibrated confidence a decision model returned, by
+	// consumer. It is the distribution a threshold is read OFF: shadow mode exists to
+	// fill this histogram so the live bar is chosen from data rather than invented.
+	DecisionConfidence metric.Float64Histogram
+	// DecisionShadow counts shadow-mode comparisons (labels: consumer, agreement =
+	// agree|disagree|error), which is what says whether a backend is ready to go live.
+	DecisionShadow metric.Int64Counter
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -202,6 +210,9 @@ func NewMetrics() *Metrics {
 		CatalogInvalidEntries: ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
 		CatalogEmbedDegraded:  ctr("catalog_embed_degraded_total", "catalog reloads that left hybrid recall without vectors (embed failure)"),
 		AlertRuleDegraded:     ctr("alert_rule_degraded_total", "alert_rule tool calls that answered with an \"unavailable\" note instead of the firing rule's expression (label: reason=no_capability|backend_error|no_rules|unmatched_alert, class=systemic|routine)"),
+
+		DecisionConfidence: histF("decision_model_confidence", "calibrated confidence returned by the decision model (label: consumer)"),
+		DecisionShadow:     ctr("decision_model_shadow_total", "shadow-mode comparisons against the live backend (labels: consumer, agreement)"),
 	}
 }
 
