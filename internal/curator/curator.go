@@ -116,10 +116,10 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	}
 	nov := Novelty{Catalog: c.Catalog, DupScore: c.DupScore}
 	hits, herr := nov.Hits(ctx, inv, relatedK)
-	// dedupSuspect names the catalog entry the annotate tier flags, so the drafted
-	// PR body can surface it for a human to check. Empty unless the decider lands
-	// in the middle band below.
-	var dedupSuspect string
+	// dedupSuspect is the catalog entry the annotate tier flags, threaded onto the
+	// drafted entry's SuspectedDuplicate so the PR description can surface it. Nil
+	// unless the decider lands in the middle band below.
+	var dedupSuspect *providers.RelatedEntry
 	if herr != nil {
 		c.Log.Warn("dedup: catalog search failed", "err", herr)
 	} else if len(hits) > 0 {
@@ -158,8 +158,14 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 				case prob >= c.DedupSkipAbove:
 					c.Log.Info("dedup: decision model confirms a catalog duplicate; not filing",
 						"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path, "probability", prob)
-					// Same recovery evidence as the exact-fingerprint match above: a
-					// fresh, independent investigation reached this entry's conclusion.
+					// Recovery evidence, but NOT the same guarantee as the exact-fingerprint
+					// match above: that one is deterministic identity with no false-positive
+					// rate, while this fires on a threshold-calibrated but fallible
+					// probability — config only requires dedup_skip_above to sit in (0,1]
+					// above dedup_annotate_above, so an operator could set it to (say) 0.61
+					// and let "confirmation" fire on barely-better-than-a-coinflip confidence.
+					// Confirm is what lets a contested, down-voted entry regain trust, so
+					// tuning dedup_skip_above also tunes how easily that trust is restored.
 					if c.Confirmations != nil {
 						if err := c.Confirmations.Confirm(hits[0].Entry.Path, inv.TriggerKey, DupFingerprint(inv), time.Now()); err != nil {
 							c.Log.Warn("confirmation record failed", "entry", hits[0].Entry.Path, "err", err)
@@ -169,7 +175,8 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 				case prob >= c.DedupAnnotateAbove:
 					c.Log.Info("dedup: decision model flags a possible duplicate; filing with the suspect named",
 						"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path, "probability", prob)
-					dedupSuspect = hits[0].Entry.Path
+					re := toRelatedEntry(hits[0])
+					dedupSuspect = &re
 				default:
 					c.Log.Info("dedup: decision model finds no duplicate; filing",
 						"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path, "probability", prob)
@@ -209,12 +216,10 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// precisely what the reviewer needs to double-check that call.
 	entry.Related = relatedEntries(hits)
 	// The annotate tier: the decider suspects a duplicate but isn't confident enough
-	// to skip filing, so the suspect goes straight into the drafted entry's body
-	// where the reviewer will see it, rather than only in the (separate,
-	// forge-rendered) Related section.
-	if dedupSuspect != "" {
-		entry.Body += dedupSuspectNote(dedupSuspect)
-	}
+	// to skip filing. SuspectedDuplicate is review metadata for the PR description
+	// only — never Body, which is committed into the catalog file, so a merged
+	// entry never carries a stale review note.
+	entry.SuspectedDuplicate = dedupSuspect
 	// The draft-time report the thread path also runs (kbvalidate.WarnDraft): it
 	// never blocks the PR, so it sits before OpenPR rather than gating it. Metrics
 	// travels with it (nil-safe) because the counter is what makes a defect
@@ -321,13 +326,10 @@ func (c *Curator) sameIncidentPattern(ctx context.Context, inv providers.Investi
 	return a.Noul, true
 }
 
-// dedupSuspectNote is appended to a drafted entry's Body when the decider's
-// probability lands in the annotate band: not confident enough to skip filing, but
-// too high to ignore. It is written into Body (not just Related) because Related is
-// rendered into the PR description only by the forge client (github.go/gitlab.go),
-// one hop past where this decision is made.
-func dedupSuspectNote(path string) string {
-	return fmt.Sprintf("\n## Possible duplicate\n\nThe decision model flagged this finding as a probable duplicate of `%s` — please check before merging.\n", path)
+// toRelatedEntry maps one scored catalog hit to the reviewer-context shape shared
+// by the Related list and SuspectedDuplicate.
+func toRelatedEntry(h catalog.ScoredEntry) providers.RelatedEntry {
+	return providers.RelatedEntry{Path: h.Entry.Path, Title: h.Entry.Title, Resource: h.Entry.Resource, Score: h.Score}
 }
 
 // relatedEntries maps the draft-time search hits to the PR's reviewer-context
@@ -338,9 +340,7 @@ func relatedEntries(hits []catalog.ScoredEntry) []providers.RelatedEntry {
 		if h.Score < relatedFloor {
 			continue
 		}
-		out = append(out, providers.RelatedEntry{
-			Path: h.Entry.Path, Title: h.Entry.Title, Resource: h.Entry.Resource, Score: h.Score,
-		})
+		out = append(out, toRelatedEntry(h))
 	}
 	return out
 }

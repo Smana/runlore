@@ -525,12 +525,44 @@ func TestDedupTiers(t *testing.T) {
 			if !tc.wantFiled {
 				return
 			}
-			names := strings.Contains(f.openedPR.Body, hit.Entry.Path)
+			suspect := f.openedPR.SuspectedDuplicate
+			names := suspect != nil && suspect.Path == hit.Entry.Path
 			if names != tc.wantNamesHit {
-				t.Fatalf("want the PR body to name the suspect=%v, got %v\nbody:\n%s",
-					tc.wantNamesHit, names, f.openedPR.Body)
+				t.Fatalf("want SuspectedDuplicate to name the suspect=%v, got %+v", tc.wantNamesHit, suspect)
 			}
 		})
+	}
+}
+
+// TestDedupSkipTierRecordsConfirmation mirrors
+// TestFingerprintDedupRecordsConfirmation's rigor (exact Confirm arguments) for the
+// decider skip tier: it is recovery evidence too, and deserves the same coverage as
+// the exact-fingerprint path.
+func TestDedupSkipTierRecordsConfirmation(t *testing.T) {
+	hit := catalog.ScoredEntry{
+		Entry: catalog.Entry{Path: "incidents/harbor-db-migration-lock.md", Title: "harbor-db migration lock"},
+		Score: 0.49,
+	}
+	sink := &recordingSink{}
+	f := &fakeForge{}
+	c := newCurator(f, multiScored{hits: []catalog.ScoredEntry{hit}})
+	c.Decider = fakeDecider{noul: 0.95}
+	c.DedupSkipAbove = 0.85
+	c.DedupAnnotateAbove = 0.60
+	c.Confirmations = sink
+
+	inv := goodFinding()
+	inv.TriggerKey = "trig-1"
+	want := hit.Entry.Path + "|" + inv.TriggerKey + "|" + DupFingerprint(inv)
+
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	if f.openedPR != nil {
+		t.Fatal("the skip tier must not file a PR")
+	}
+	if len(sink.calls) != 1 || sink.calls[0] != want {
+		t.Fatalf("Confirm calls = %v, want [%q]", sink.calls, want)
 	}
 }
 

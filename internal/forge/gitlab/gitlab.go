@@ -461,6 +461,9 @@ func (c *Client) mrBody(e providers.KBEntry) string {
 		desc = e.Title
 	}
 	body := fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
+	if s := c.suspectedDuplicateSection(e); s != "" {
+		body += "\n\n" + s
+	}
 	if s := c.relatedSection(e); s != "" {
 		body += "\n\n" + s
 	}
@@ -468,6 +471,24 @@ func (c *Client) mrBody(e providers.KBEntry) string {
 		body += "\n\n" + m
 	}
 	return neutralizeImages(body)
+}
+
+// suspectedDuplicateSection renders the dedup decider's possible-duplicate flag
+// under its own heading, ahead of Related knowledge. Identical logic to
+// github.Client.suspectedDuplicateSection; only blobURL's shape differs.
+func (c *Client) suspectedDuplicateSection(e providers.KBEntry) string {
+	if e.SuspectedDuplicate == nil {
+		return ""
+	}
+	r := e.SuspectedDuplicate
+	var b strings.Builder
+	b.WriteString("## Possible duplicate\n\n")
+	fmt.Fprintf(&b, "The decision model flagged this finding as a probable duplicate of [%s](%s)", r.Title, c.blobURL(r.Path))
+	if r.Resource != "" {
+		fmt.Fprintf(&b, " · resource %s", r.Resource)
+	}
+	b.WriteString(" — please check before merging.")
+	return b.String()
 }
 
 // relatedSection renders the reviewer context: the draft-time BM25 neighborhood

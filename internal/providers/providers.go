@@ -2256,6 +2256,13 @@ type KBEntry struct {
 	Related        []RelatedEntry
 	Occurrences    int
 	PrevCuratedURL string
+	// SuspectedDuplicate is the catalog entry a dedup decider flagged as a probable
+	// (but not confident-enough-to-skip) duplicate. Review metadata, rendered into
+	// the PR/MR description only — like Related, never into Body — because Body is
+	// committed into the catalog file (okf.Render) and a merged entry must not carry
+	// a stale review note a human already decided was a false positive. Nil unless
+	// the annotate tier fired.
+	SuspectedDuplicate *RelatedEntry
 }
 
 // RelatedEntry is a nearby catalog entry surfaced to the KB PR reviewer so
