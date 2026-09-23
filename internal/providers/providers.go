@@ -1495,6 +1495,8 @@ type ModelProvider interface {
 // for its boolean primitive and is not a typo for "bool".
 type QuestionKind string
 
+// The three question kinds a Decider answers. Which Answer fields are meaningful
+// follows from the kind — see Answer.
 const (
 	KindChoice QuestionKind = "choice" // pick one option; returns Choice + Probabilities + Confidence
 	KindScore  QuestionKind = "score"  // place the state on an ordered rubric; returns Score + Confidence
