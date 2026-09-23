@@ -299,7 +299,9 @@ the prompt has never been tuned against before reading a shadow-agreement number
   byte for byte,
   proven by the existing recall tests passing unchanged.
 - With `shadow`, an investigation's outcome is independent of the decider arm, including when it
-  fails, and agreement is visible in the metrics and the replay report.
+  fails, and agreement is visible in `runlore_decision_model_shadow_total` under `lore serve`. NOT in
+  the replay report: that harness builds recall with no reranker, so it cannot produce the number at
+  all (§ Testing, and open question 4).
 - With `jev`, every failure mode falls through to a full investigation, and no path can fire a recall
   on an id the reranker was not offered.
 - Dedup's three tiers are observable, and no tier can close or skip a human-labelled artifact.
