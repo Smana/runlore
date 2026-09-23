@@ -5,6 +5,7 @@ package investigate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -232,5 +233,106 @@ func TestInstantRecallReranked(t *testing.T) {
 	}
 	if !got.Recalled || got.RecalledEntry != "known.md" {
 		t.Fatalf("must be flagged as a recall of known.md, got recalled=%v entry=%q", got.Recalled, got.RecalledEntry)
+	}
+}
+
+// stubRerankModel is a fake reranker ModelProvider, in the same style as
+// countingReranker/errReranker: it returns a canned rerank_match verdict built from its
+// fields via the existing rerankResp fixture, sparing a test from hand-writing JSON args.
+type stubRerankModel struct {
+	match      bool
+	entryID    string
+	confidence float64
+}
+
+func (m *stubRerankModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	return rerankResp(fmt.Sprintf(`{"match":%v,"entry_id":%q,"confidence":%v}`, m.match, m.entryID, m.confidence)), nil
+}
+
+// fakeDecider returns canned answers and records the state it was handed.
+type fakeDecider struct {
+	answers providers.Answers
+	err     error
+	state   string
+	calls   int
+}
+
+func (f *fakeDecider) Decide(_ context.Context, state string, _ []providers.Question) (providers.Answers, error) {
+	f.calls++
+	f.state = state
+	return f.answers, f.err
+}
+
+func TestRerankJevFiresOnItsOwnThreshold(t *testing.T) {
+	cands := []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1},
+		{Entry: catalog.Entry{Path: "b.md", Title: "B"}, Score: 0.5},
+	}
+	for _, tc := range []struct {
+		name     string
+		answers  providers.Answers
+		err      error
+		wantFire bool
+		wantPath string
+	}{
+		{
+			name:     "a named candidate above the bar fires",
+			answers:  providers.Answers{rerankQuestionID: {Choice: "b.md", Confidence: 0.9}},
+			wantFire: true, wantPath: "b.md",
+		},
+		{
+			name:    "below the bar falls through",
+			answers: providers.Answers{rerankQuestionID: {Choice: "b.md", Confidence: 0.4}},
+		},
+		{
+			name:    "the none option falls through",
+			answers: providers.Answers{rerankQuestionID: {Choice: rerankNoneOption, Confidence: 0.99}},
+		},
+		{
+			name:    "an id outside the candidate set can never fire",
+			answers: providers.Answers{rerankQuestionID: {Choice: "invented.md", Confidence: 0.99}},
+		},
+		{
+			name:    "a missing answer falls through",
+			answers: providers.Answers{},
+		},
+		{
+			name: "an error falls through",
+			err:  errors.New("upstream down"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &Reranker{
+				Decider: &fakeDecider{answers: tc.answers, err: tc.err},
+				Backend: "jev", ThresholdJev: 0.7, K: 5,
+			}
+			got, conf, ok := rr.rankJev(context.Background(), Request{Title: "t"}, cands, &recallSpend{})
+			if ok != tc.wantFire {
+				t.Fatalf("want fire=%v, got %v (conf %v)", tc.wantFire, ok, conf)
+			}
+			if tc.wantFire && got.Path != tc.wantPath {
+				t.Fatalf("want %s, got %s", tc.wantPath, got.Path)
+			}
+		})
+	}
+}
+
+// TestRerankShadowLetsTheLLMDecide pins the property that makes shadow safe to enable:
+// the investigation's outcome must not depend on the shadow arm, including when it fails.
+func TestRerankShadowLetsTheLLMDecide(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	fake := &fakeDecider{err: errors.New("shadow is down")}
+	rr := &Reranker{
+		Model:     &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+		Decider:   fake,
+		Backend:   "shadow",
+		Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+	}
+	got, conf, ok := rr.rank(context.Background(), Request{Title: "t"}, cands, &recallSpend{})
+	if !ok || got.Path != "a.md" || conf != 0.95 {
+		t.Fatalf("the LLM verdict must stand in shadow mode: ok=%v path=%s conf=%v", ok, got.Path, conf)
+	}
+	if fake.calls != 1 {
+		t.Fatalf("the shadow arm must still be called once, got %d", fake.calls)
 	}
 }
