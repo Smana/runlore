@@ -128,6 +128,23 @@ type recallSpend struct {
 	// proceed. It is li.budgetTrip over li.aggregateUsage — the same predicate against
 	// the same running total the loop's own guard uses, never a second opinion.
 	afford func(estTokens int) string
+	// shadow carries one shadow-mode comparison back to the loop. See shadowOutcome.
+	shadow shadowOutcome
+}
+
+// shadowOutcome records one shadow-mode comparison for the caller's telemetry.
+//
+// It rides recallSpend rather than sitting on the Reranker because ONE Reranker serves
+// every investigation: a field there would be a data race, and it would attribute one
+// incident's comparison to another. recallSpend is created per investigation by the
+// loop, which is therefore able to read the result back without any signature change.
+//
+// Agreed is false when the arm errored, which is deliberate: for the promotion decision
+// "the decider did not reach the same answer" and "the decider was unreachable" are the
+// same answer — not ready. The error/disagree split stays in the metric's label.
+type shadowOutcome struct {
+	Ran    bool
+	Agreed bool
 }
 
 // refuses reports which ceiling, if any, forbids a request of estTokens. Nil-safe: no
@@ -362,10 +379,14 @@ func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.Score
 		if shadowFired {
 			shadowPath = a.Choice
 		}
+		agreement := shadowAgreement(ok, entry.Path, shadowFired, shadowPath, err)
+		if spend != nil {
+			spend.shadow = shadowOutcome{Ran: true, Agreed: agreement == "agree"}
+		}
 		if rr.Metrics != nil {
 			rr.Metrics.DecisionShadow.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("consumer", "rerank"),
-				attribute.String("agreement", shadowAgreement(ok, entry.Path, shadowFired, shadowPath, err))))
+				attribute.String("agreement", agreement)))
 		}
 		if rr.Log != nil {
 			rr.Log.Info("rerank shadow comparison",

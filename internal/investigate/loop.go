@@ -181,6 +181,12 @@ type RecallDecision struct {
 	// the withdrawal meant for a caller (the eval harness, an operator) that needs to
 	// tell "the catalog entry was bad" from "the reviewer was down" apart.
 	VerifyUnavailable bool
+	// ShadowRan / ShadowAgreed report a shadow-mode rerank comparison, when one ran.
+	// Telemetry/eval-only, like VerifyUnavailable above: they carry no delivery risk and
+	// only disambiguate what happened. ShadowRan is false on every non-shadow backend,
+	// which is what keeps a normal run's eval report free of a meaningless 0/0.
+	ShadowRan    bool
+	ShadowAgreed bool
 }
 
 // LoopInvestigator is the ReAct investigation loop: it drives a ModelProvider with
@@ -877,7 +883,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	if entry == nil {
 		// Recall was consulted but no gate cleared: report the non-fire so a caller
 		// can distinguish it from a recall that fired and was later withdrawn.
-		li.emitRecall(RecallDecision{})
+		li.emitRecall(RecallDecision{ShadowRan: spend.shadow.Ran, ShadowAgreed: spend.shadow.Agreed})
 		// C2 near-miss: the confidence gate discarded every candidate, but the
 		// structural pre-filter may still hold an entry whose resource agrees with
 		// this workload — a possibly-related past incident. Surface the top one as an
@@ -931,7 +937,8 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		// because it reviewed the entry and found it wanting. VerifyUnavailable is the
 		// same disambiguation carried on RecallDecision, for callers (the eval harness)
 		// that consume the struct instead of log lines.
-		li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, VerifyUnavailable: true})
+		li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, VerifyUnavailable: true,
+			ShadowRan: spend.shadow.Ran, ShadowAgreed: spend.shadow.Agreed})
 		if m := li.Recall.Metrics; m != nil {
 			// OnRecall is eval-only (its sole production consumer is internal/eval), and
 			// this Warn is the only other production signal, so recall_hits_total is the
@@ -985,14 +992,15 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	}
 	if len(rec.RootCauses) > 0 {
 		*result = "recall"
-		li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, ShortCircuited: true})
+		li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, ShortCircuited: true,
+			ShadowRan: spend.shadow.Ran, ShadowAgreed: spend.shadow.Agreed})
 		finish(rec)
 		return nil, true
 	}
 	// The adversarial verify pass rejected every recalled root cause (a stale or
 	// poisoned catalog entry). Don't deliver an empty finding — fall through to a
 	// full investigation, the intended fail-safe ("verify guards recall").
-	li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path})
+	li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, ShadowRan: spend.shadow.Ran, ShadowAgreed: spend.shadow.Agreed})
 	li.Log.Info("instant recall rejected by verify; running full investigation",
 		"title", req.Title, "entry", entry.Path)
 	// …but fall through WITH the same C2 near-miss enrichment the non-fire path gets.

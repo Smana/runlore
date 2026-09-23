@@ -418,3 +418,65 @@ func TestShadowAgreement(t *testing.T) {
 		})
 	}
 }
+
+// TestShadowOutcomeRidesTheSpendChannel pins the attribution: the comparison must
+// reach the caller through the per-investigation channel, never a field on the shared
+// Reranker, or one incident's shadow result would be reported against another.
+func TestShadowOutcomeRidesTheSpendChannel(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	for _, tc := range []struct {
+		name       string
+		dec        providers.Decider
+		wantRan    bool
+		wantAgreed bool
+	}{
+		{
+			name:    "agreement when both fire on the same entry",
+			dec:     &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "a.md", Confidence: 0.9}}},
+			wantRan: true, wantAgreed: true,
+		},
+		{
+			name:    "disagreement when the decider declines",
+			dec:     &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: rerankNoneOption, Confidence: 0.9}}},
+			wantRan: true, wantAgreed: false,
+		},
+		{
+			name:    "an outage counts as ran-but-not-agreed",
+			dec:     &fakeDecider{err: errors.New("down")},
+			wantRan: true, wantAgreed: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &Reranker{
+				Model:   &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+				Decider: tc.dec, Backend: "shadow", Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+			}
+			spend := &recallSpend{}
+			if _, _, ok := rr.rank(context.Background(), Request{Title: "t"}, cands, spend); !ok {
+				t.Fatal("the LLM verdict must still stand in shadow mode")
+			}
+			if spend.shadow.Ran != tc.wantRan || spend.shadow.Agreed != tc.wantAgreed {
+				t.Fatalf("want ran=%v agreed=%v, got %+v", tc.wantRan, tc.wantAgreed, spend.shadow)
+			}
+		})
+	}
+}
+
+// TestNonShadowBackendsRecordNoComparison keeps a normal run's report clean: with no
+// shadow arm there is nothing to compare, and ShadowTotal must stay zero rather than
+// publishing a 0/0.
+func TestNonShadowBackendsRecordNoComparison(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	for _, backend := range []string{"", "llm", "jev"} {
+		rr := &Reranker{
+			Model:   &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+			Decider: &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "a.md", Confidence: 0.9}}},
+			Backend: backend, Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+		}
+		spend := &recallSpend{}
+		_, _, _ = rr.rank(context.Background(), Request{Title: "t"}, cands, spend)
+		if spend.shadow.Ran {
+			t.Fatalf("backend %q must record no shadow comparison", backend)
+		}
+	}
+}

@@ -63,6 +63,11 @@ type ReportCase struct {
 	RecallFired        int    `json:"recall_fired_runs,omitempty"`
 	RecallShortCircuit int    `json:"recall_short_circuit_runs,omitempty"`
 
+	// ShadowAgree / ShadowTotal mirror CaseAggregate's shadow-mode rerank comparison
+	// counters. Both zero (omitted) when no shadow arm ran.
+	ShadowAgree int `json:"shadow_agree,omitempty"`
+	ShadowTotal int `json:"shadow_total,omitempty"`
+
 	// Per-case token spend (median over the repeats) — what the scorecard's
 	// cost-per-investigation table is computed from.
 	InputTokens  int `json:"input_tokens,omitempty"`
