@@ -1268,79 +1268,199 @@ at it degraded, instead of wondering why nothing changed."
 
 ---
 
-## Task 6: Shadow agreement in the eval report
+## Task 6: Carry the shadow verdict out, and publish it per case
 
 **Files:**
-- Modify: `internal/eval/replay_report.go` (one field on `ReportCase`, mirrored on `CaseAggregate` in `internal/eval/eval.go`)
-- Modify: `internal/eval/scorecard.go` (one column, rendered only when present)
-- Test: `internal/eval/replay_report_test.go`
+- Modify: `internal/investigate/rerank.go` (a per-investigation carrier on `recallSpend`)
+- Modify: `internal/investigate/loop.go:155-180` (`RecallDecision` fields) and its four `emitRecall` sites (lines ~880, ~934, ~988, ~995)
+- Modify: `internal/eval/eval.go` (`Result` fields, `runOne`, `aggregateResults`)
+- Modify: `internal/eval/replay_report.go`, `internal/eval/scorecard.go`
+- Test: `internal/investigate/rerank_test.go`, `internal/eval/replay_report_test.go`
 
 **Interfaces:**
-- Consumes: nothing from earlier tasks at compile time — the eval reads counters the reranker already writes.
-- Produces: `CaseAggregate.ShadowAgree int` and `.ShadowTotal int`, mirrored as `ReportCase.ShadowAgree` / `.ShadowTotal` with tags `shadow_agree,omitempty` / `shadow_total,omitempty`.
+- Consumes: the shadow branch of `rank` from Task 4.
+- Produces: unexported `shadowOutcome{Ran, Agreed bool}` and `recallSpend.shadow shadowOutcome`; `RecallDecision.ShadowRan bool` / `.ShadowAgreed bool`; `eval.Result.ShadowRan bool` / `.ShadowAgreed bool`; `CaseAggregate.ShadowAgree int` / `.ShadowTotal int`, mirrored on `ReportCase` with tags `shadow_agree,omitempty` / `shadow_total,omitempty`.
 
-**Note on field order:** `Report()` converts `CaseAggregate` to `ReportCase` by struct conversion, so the two must stay identical in field order and type. Add both fields at the same position in both structs or the build fails — which is the intended guard.
+**Why the carrier rides `recallSpend`.** One `Reranker` is built in the app wiring and serves every investigation, so a field on it would be a data race and would attribute one incident's comparison to another. `recallSpend` is created per investigation at `loop.go:870` by the loop itself and threaded into `rank`, so the loop can read the outcome back with **no signature change** to `Recall` or `Reranker` — and the comparison is attributed to the investigation that made it.
 
-- [ ] **Step 1: Write the failing test**
+**Field-order constraint.** `Report()` converts `CaseAggregate` to `ReportCase` by struct conversion, so both must gain the two fields at the same position and type or the build fails. That failure is the intended guard, not an obstacle.
+
+- [ ] **Step 1: Write the failing test for the carrier**
+
+Append to `internal/investigate/rerank_test.go`:
 
 ```go
-func TestReportCarriesShadowAgreement(t *testing.T) {
-	camp := Campaign{N: 5, Aggregates: []CaseAggregate{
-		{Name: "c", Runs: 5, PassRate: 1, Reached: true, ShadowAgree: 4, ShadowTotal: 5},
-	}}
-	b, err := camp.Report("t", "m", providers.Usage{}, nil).JSON()
-	if err != nil {
-		t.Fatalf("JSON: %v", err)
+// TestShadowOutcomeRidesTheSpendChannel pins the attribution: the comparison must
+// reach the caller through the per-investigation channel, never a field on the shared
+// Reranker, or one incident's shadow result would be reported against another.
+func TestShadowOutcomeRidesTheSpendChannel(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	for _, tc := range []struct {
+		name       string
+		dec        providers.Decider
+		wantRan    bool
+		wantAgreed bool
+	}{
+		{
+			name:    "agreement when both fire on the same entry",
+			dec:     &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "a.md", Confidence: 0.9}}},
+			wantRan: true, wantAgreed: true,
+		},
+		{
+			name:    "disagreement when the decider declines",
+			dec:     &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: rerankNoneOption, Confidence: 0.9}}},
+			wantRan: true, wantAgreed: false,
+		},
+		{
+			name:    "an outage counts as ran-but-not-agreed",
+			dec:     &fakeDecider{err: errors.New("down")},
+			wantRan: true, wantAgreed: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := &Reranker{
+				Model:   &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+				Decider: tc.dec, Backend: "shadow", Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+			}
+			spend := &recallSpend{}
+			if _, _, ok := rr.rank(context.Background(), Request{Title: "t"}, cands, spend); !ok {
+				t.Fatal("the LLM verdict must still stand in shadow mode")
+			}
+			if spend.shadow.Ran != tc.wantRan || spend.shadow.Agreed != tc.wantAgreed {
+				t.Fatalf("want ran=%v agreed=%v, got %+v", tc.wantRan, tc.wantAgreed, spend.shadow)
+			}
+		})
 	}
-	var got Report
-	if err := json.Unmarshal(b, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if got.Cases[0].ShadowAgree != 4 || got.Cases[0].ShadowTotal != 5 {
-		t.Fatalf("shadow agreement not carried: %+v", got.Cases[0])
-	}
-	// A run with no shadow arm must not ship the keys at all.
-	clean := Campaign{N: 1, Aggregates: []CaseAggregate{{Name: "c", Runs: 1, PassRate: 1}}}
-	cb, err := clean.Report("t", "m", providers.Usage{}, nil).JSON()
-	if err != nil {
-		t.Fatalf("JSON: %v", err)
-	}
-	if strings.Contains(string(cb), "shadow_") {
-		t.Fatalf("a non-shadow run must omit the shadow keys:\n%s", cb)
+}
+
+// TestNonShadowBackendsRecordNoComparison keeps a normal run's report clean: with no
+// shadow arm there is nothing to compare, and ShadowTotal must stay zero rather than
+// publishing a 0/0.
+func TestNonShadowBackendsRecordNoComparison(t *testing.T) {
+	cands := []catalog.ScoredEntry{{Entry: catalog.Entry{Path: "a.md", Title: "A"}, Score: 1}}
+	for _, backend := range []string{"", "llm", "jev"} {
+		rr := &Reranker{
+			Model:   &stubRerankModel{match: true, entryID: "a.md", confidence: 0.95},
+			Decider: &fakeDecider{answers: providers.Answers{rerankQuestionID: {Choice: "a.md", Confidence: 0.9}}},
+			Backend: backend, Threshold: 0.7, ThresholdJev: 0.7, K: 5,
+		}
+		spend := &recallSpend{}
+		_, _, _ = rr.rank(context.Background(), Request{Title: "t"}, cands, spend)
+		if spend.shadow.Ran {
+			t.Fatalf("backend %q must record no shadow comparison", backend)
+		}
 	}
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `go test ./internal/eval/ -run TestReportCarriesShadowAgreement`
-Expected: FAIL to build — `unknown field ShadowAgree`.
+Run: `go test ./internal/investigate/ -run 'TestShadowOutcome|TestNonShadowBackends'`
+Expected: FAIL to build — `spend.shadow undefined`.
 
-- [ ] **Step 3: Add the fields and the scorecard column**
+- [ ] **Step 3: Add the carrier and set it in the shadow branch**
 
-Add to `CaseAggregate` (in `internal/eval/eval.go`), immediately after the recall telemetry fields:
+In `internal/investigate/rerank.go`, beside `recallSpend`:
 
 ```go
-	// ShadowAgree / ShadowTotal count shadow-mode rerank comparisons over the repeats:
-	// how often the decision model reached the same fire decision as the LLM. Zero when
-	// no shadow arm ran, which is why the report omits them rather than printing 0/0.
+// shadowOutcome records one shadow-mode comparison for the caller's telemetry.
+//
+// It rides recallSpend rather than sitting on the Reranker because ONE Reranker serves
+// every investigation: a field there would be a data race, and it would attribute one
+// incident's comparison to another. recallSpend is created per investigation by the
+// loop, which is therefore able to read the result back without any signature change.
+//
+// Agreed is false when the arm errored, which is deliberate: for the promotion decision
+// "the decider did not reach the same answer" and "the decider was unreachable" are the
+// same answer — not ready. The error/disagree split stays in the metric's label.
+type shadowOutcome struct {
+	Ran    bool
+	Agreed bool
+}
+```
+
+Add `shadow shadowOutcome` to `recallSpend`, and in `rank`'s shadow branch, after computing `agreement`:
+
+```go
+	spend.shadow = shadowOutcome{Ran: true, Agreed: agreement == "agree"}
+```
+
+Guard it for a nil spend (`if spend != nil`), matching `recallSpend.refuses`'s nil-safety.
+
+- [ ] **Step 4: Surface it on RecallDecision**
+
+In `internal/investigate/loop.go`, add to `RecallDecision` after `VerifyUnavailable`:
+
+```go
+	// ShadowRan / ShadowAgreed report a shadow-mode rerank comparison, when one ran.
+	// Telemetry/eval-only, like VerifyUnavailable above: they carry no delivery risk and
+	// only disambiguate what happened. ShadowRan is false on every non-shadow backend,
+	// which is what keeps a normal run's eval report free of a meaningless 0/0.
+	ShadowRan    bool
+	ShadowAgreed bool
+```
+
+The four `emitRecall` sites each build a fresh literal, so add the two fields to each from the spend the loop already holds:
+
+```go
+	// at each of the four sites, e.g. the no-fire one:
+	li.emitRecall(RecallDecision{ShadowRan: spend.shadow.Ran, ShadowAgreed: spend.shadow.Agreed})
+```
+
+Do this for all four literals (lines ~880, ~934, ~988, ~995). A shadow comparison happens whether or not recall fires, so omitting the no-fire site would drop most of the sample.
+
+- [ ] **Step 5: Thread it through the eval and publish it**
+
+In `internal/eval/eval.go`, add to `Result` beside the recall telemetry:
+
+```go
+	// ShadowRan / ShadowAgreed mirror RecallDecision's, so the replay corpus measures
+	// shadow-mode agreement per case rather than only in a process-global metric.
+	ShadowRan    bool
+	ShadowAgreed bool
+```
+
+In `runOne`, beside the existing recall lines:
+
+```go
+	res.ShadowRan = decision.ShadowRan
+	res.ShadowAgreed = decision.ShadowAgreed
+```
+
+In `aggregateResults`, count them inside the existing loop:
+
+```go
+		if res.ShadowRan {
+			shadowTotal++
+			if res.ShadowAgreed {
+				shadowAgree++
+			}
+		}
+```
+
+declaring `shadowAgree, shadowTotal := 0, 0` beside `passes, fired, shortCircuits` and setting `ShadowAgree: shadowAgree, ShadowTotal: shadowTotal` in the returned literal. Add the two fields to `CaseAggregate` after the recall counters:
+
+```go
+	// ShadowAgree / ShadowTotal count shadow-mode rerank comparisons over the repeats.
+	// Zero when no shadow arm ran, which is why the report omits them rather than
+	// publishing 0/0.
 	ShadowAgree int
 	ShadowTotal int
 ```
 
-and at the same position in `ReportCase` (in `internal/eval/replay_report.go`):
+and at the SAME position in `ReportCase` (`internal/eval/replay_report.go`):
 
 ```go
 	ShadowAgree int `json:"shadow_agree,omitempty"`
 	ShadowTotal int `json:"shadow_total,omitempty"`
 ```
 
-In `internal/eval/scorecard.go`, in the per-scenario table, add a `shadow` cell that renders `—` when `ShadowTotal == 0` and `4/5 (80%)` otherwise. Follow `recallCell`'s shape and place the new helper beside it:
+In `internal/eval/scorecard.go`, add a `shadow` column to the per-scenario table beside `recallCell`, with its helper:
 
 ```go
 // shadowCell renders shadow-mode rerank agreement, or an em dash when no shadow arm
-// ran. A published number here is the evidence for promoting a backend from shadow to
-// live, so it belongs in the scorecard rather than only in the metrics.
+// ran. The published number is the evidence for promoting a backend from shadow to
+// live, so it belongs in the artifact a reader opens and not only in the metrics.
 func shadowCell(c ReportCase) string {
 	if c.ShadowTotal == 0 {
 		return "—"
@@ -1350,25 +1470,73 @@ func shadowCell(c ReportCase) string {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 6: Write the report round-trip test**
 
-Run: `go test ./internal/eval/ -v -run 'TestReportCarriesShadow|TestScorecard'`
-Expected: PASS. Update any scorecard golden-output test that now has an extra column.
+Append to `internal/eval/replay_report_test.go`:
 
-- [ ] **Step 5: Quality gate and commit**
+```go
+func TestReportCarriesShadowAgreement(t *testing.T) {
+	a := aggregateResults(Case{Name: "c"}, []Result{
+		{Pass: true, ShadowRan: true, ShadowAgreed: true},
+		{Pass: true, ShadowRan: true, ShadowAgreed: true},
+		{Pass: true, ShadowRan: true},
+	})
+	if a.ShadowAgree != 2 || a.ShadowTotal != 3 {
+		t.Fatalf("want 2/3, got %d/%d", a.ShadowAgree, a.ShadowTotal)
+	}
+	b, err := (Campaign{N: 3, Aggregates: []CaseAggregate{a}}).Report("t", "m", providers.Usage{}, nil).JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	var got Report
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Cases[0].ShadowAgree != 2 || got.Cases[0].ShadowTotal != 3 {
+		t.Fatalf("shadow agreement not carried: %+v", got.Cases[0])
+	}
+
+	// A run with no shadow arm must not ship the keys at all.
+	clean := aggregateResults(Case{Name: "c"}, []Result{{Pass: true}})
+	cb, err := (Campaign{N: 1, Aggregates: []CaseAggregate{clean}}).Report("t", "m", providers.Usage{}, nil).JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	if strings.Contains(string(cb), "shadow_") {
+		t.Fatalf("a non-shadow run must omit the shadow keys:\n%s", cb)
+	}
+}
+```
+
+- [ ] **Step 7: Run the tests**
+
+Run: `go test ./internal/investigate/ ./internal/eval/ -v -run 'TestShadowOutcome|TestNonShadowBackends|TestReportCarriesShadow'`
+Expected: all PASS. Then run the full package suites — the four `emitRecall` literals are read by existing recall tests, and a scorecard golden test may need its extra column.
+
+- [ ] **Step 8: Quality gate and commit**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
-git add internal/eval/
-git commit -m "feat(eval): publish shadow-mode rerank agreement per case
+git add internal/investigate/ internal/eval/
+git commit -m "feat(eval): measure shadow-mode rerank agreement per case
 
-The number that decides whether a decision-model backend is ready to go live
-belongs in the artifact a reader opens, not only in the metrics a deployment
-may not scrape. Omitted entirely when no shadow arm ran, so a normal run's
-report and scorecard are unchanged."
+Shadow mode existed to produce a number, and the number had nowhere to go: the
+reranker recorded agreement to a process-global metric, while the eval reads
+per-case telemetry through the RecallDecision hook, which had no shadow field.
+A promotion decision cannot be read off a metric that cannot be attributed to
+a case.
+
+The carrier rides recallSpend rather than sitting on the Reranker, because one
+Reranker serves every investigation: a field there would be a data race and
+would attribute one incident's comparison to another. recallSpend is created
+per investigation by the loop, so the loop reads the outcome back with no
+signature change to Recall or Reranker.
+
+An outage counts as ran-but-not-agreed. For the promotion decision, 'did not
+reach the same answer' and 'was unreachable' are the same answer — not ready.
+The error and disagree split stays in the metric's label, where it is
+actionable."
 ```
-
----
 
 ## Task 7: Curation dedup tiers
 
@@ -1545,3 +1713,5 @@ third party being reachable."
 **Four defects this review caught and fixed in place.** A `wireQuestion` carrying a blank scaffolding field with a step telling the implementer to delete it. A fixture helper reading the request body with a single `Read` rather than `io.ReadAll`, which would flake on a chunked body. `BuildDecider` taking a logger it never used, which `revive` would reject. And a shadow-agreement switch whose `"error"` label was unreachable, because `rankJev` collapses an outage and a no-match into the same `false` — fixed by splitting `decideRerank` out so the shadow arm sees the error.
 
 **Ordering constraint.** Task 6 adds a field to both `CaseAggregate` and `ReportCase`; they are converted by struct conversion, so both must change together in the same position or the build breaks. That is stated in the task.
+
+**A fifth defect, caught by the pre-flight scan before execution.** Task 6 originally added the eval's shadow fields with nothing to populate them: the reranker records agreement to a process-global metric, while the eval reads per-case telemetry through the `RecallDecision` hook. Shadow mode's whole purpose is a per-case number, so the task now carries the verdict from the reranker to the caller as well — on `recallSpend`, because one `Reranker` serves every investigation and a field on it would be a race that misattributes one incident's comparison to another.
