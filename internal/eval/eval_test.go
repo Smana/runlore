@@ -1131,3 +1131,86 @@ func TestAggregateCapsTheNumberOfClaims(t *testing.T) {
 		t.Fatalf("want the cap of %d claims, got %d", maxFailedClaims, len(got))
 	}
 }
+
+// TestHeldOutCaseDiscriminates validates the held-out case's scoring the only way that
+// is free and deterministic: by scoring hand-written answers against it.
+//
+// A case whose required terms cannot be hit, or whose distractor cannot fire, looks like
+// coverage without being any — and this is the one case the corpus must be able to trust,
+// because it is the one the prompt is not tuned against. So the three answers that matter
+// are pinned here rather than inferred from a nightly.
+func TestHeldOutCaseDiscriminates(t *testing.T) {
+	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	var held Case
+	for _, c := range cases {
+		if c.Name == "hpa-ceiling-saturation" {
+			held = c
+		}
+	}
+	if held.Name == "" {
+		t.Fatal("the held-out case is not in the shipped corpus")
+	}
+	if held.Gate != nil && *held.Gate {
+		t.Fatal("the held-out case must not gate: a case that gates gets tuned")
+	}
+
+	for _, tc := range []struct {
+		name     string
+		inv      providers.Investigation
+		wantPass bool
+	}{
+		{
+			name: "the right cause, reasoned from metrics",
+			inv: providers.Investigation{
+				Title:      "pricing-api latency: autoscaler at its ceiling",
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:         "pricing-api is pinned at its autoscaling maximum of 4 replicas with CPU at 94%, so doubled request volume has nowhere to scale",
+					SuggestedAction: "raise the maximum replica count for pricing-api",
+				}},
+			},
+			wantPass: true,
+		},
+		{
+			// The most available wrong answer in the product, and the reason this case
+			// exists: a recent same-namespace change that explains nothing.
+			name: "blaming the coincident change fails twice",
+			inv: providers.Investigation{
+				Title:      "pricing-api latency after the promo-banner bump",
+				Confidence: 0.9,
+				RootCauses: []providers.Hypothesis{{
+					Summary:         "the promo-banner image bump to 2.8.5 degraded pricing-api",
+					SuggestedAction: "roll back promo-banner",
+				}},
+			},
+			wantPass: false,
+		},
+		{
+			// Documents the asymmetry the case's comment claims: the honesty channels
+			// exist, and a correct agent uses ruled_out rather than the summary. Scoring
+			// reads the claim only, so a dismissal written into the summary is a blame.
+			name: "the right cause, but dismissing the distractor in the claim",
+			inv: providers.Investigation{
+				Title:      "pricing-api autoscaling ceiling reached",
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:         "pricing-api hit its autoscaling ceiling; this is not the promo-banner bump",
+					SuggestedAction: "raise the ceiling",
+				}},
+				RuledOut: []string{"the promo-banner bump: unrelated workload, 22 req/s, unchanged pricing-api revision"},
+			},
+			wantPass: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Score(held.Name, tc.inv, held.Expected)
+			if got.Pass != tc.wantPass {
+				t.Fatalf("want pass=%v, got pass=%v (missing=%q over-claimed=%q)",
+					tc.wantPass, got.Pass, got.Missing, got.OverClaimed)
+			}
+		})
+	}
+}
