@@ -336,3 +336,29 @@ func TestRerankShadowLetsTheLLMDecide(t *testing.T) {
 		t.Fatalf("the shadow arm must still be called once, got %d", fake.calls)
 	}
 }
+
+// TestShadowAgreement pins the operator-facing label directly, since only the error
+// case is otherwise exercised end-to-end (TestRerankShadowLetsTheLLMDecide asserts a
+// different property: that the outcome never depends on the shadow arm).
+func TestShadowAgreement(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		llmFired, shadowFired bool
+		llmPath, shadowPath   string
+		err                   error
+		want                  string
+	}{
+		{name: "both fire the same entry", llmFired: true, llmPath: "a.md", shadowFired: true, shadowPath: "a.md", want: "agree"},
+		{name: "neither fires", llmFired: false, shadowFired: false, want: "agree"},
+		{name: "both fire different entries", llmFired: true, llmPath: "a.md", shadowFired: true, shadowPath: "b.md", want: "disagree"},
+		{name: "the LLM fires and the decider declines", llmFired: true, llmPath: "a.md", shadowFired: false, want: "disagree"},
+		{name: "the decider errors", llmFired: true, llmPath: "a.md", shadowFired: false, err: errors.New("upstream down"), want: "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shadowAgreement(tc.llmFired, tc.llmPath, tc.shadowFired, tc.shadowPath, tc.err)
+			if got != tc.want {
+				t.Fatalf("want %s, got %s", tc.want, got)
+			}
+		})
+	}
+}
