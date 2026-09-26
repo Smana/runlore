@@ -372,19 +372,26 @@ func warningCallsIn(fn *ast.FuncDecl) map[string][]ast.Stmt {
 // (WebhookAuthWarning in serve.go) and a qualified selector
 // (config.ChatWithoutCaptureWarning).
 func warningCallName(n ast.Node) string {
+	if name := callName(n); strings.HasSuffix(name, warningSuffix) {
+		return name
+	}
+	return ""
+}
+
+// callName reports the function n calls — a bare identifier's name or a qualified
+// selector's — or "" if n is not a call. It is the name-agnostic half of
+// warningCallName, shared with pins on startup notices that are deliberately NOT
+// warnings (disabledTools, an Info line) and so carry no suffix to match on.
+func callName(n ast.Node) string {
 	call, ok := n.(*ast.CallExpr)
 	if !ok {
 		return ""
 	}
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		if strings.HasSuffix(fn.Name, warningSuffix) {
-			return fn.Name
-		}
+		return fn.Name
 	case *ast.SelectorExpr:
-		if strings.HasSuffix(fn.Sel.Name, warningSuffix) {
-			return fn.Sel.Name
-		}
+		return fn.Sel.Name
 	}
 	return ""
 }

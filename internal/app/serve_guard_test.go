@@ -201,10 +201,13 @@ func outermostStmt(stack []ast.Node) ast.Stmt {
 // so `_ = f()` and a bare `f()` are the only ways to discard the result, and both are
 // caught here.
 //
-// The call is matched through warningCallName, so BOTH spellings count: a
-// same-package identifier (WebhookAuthWarning) and a qualified selector
+// The call is matched through callName, so BOTH spellings count: a same-package
+// identifier (WebhookAuthWarning) and a qualified selector
 // (config.ChatWithoutCaptureWarning). Matching only the first is what let the
-// package-app guard this replaced miss every cross-package warning.
+// package-app guard this replaced miss every cross-package warning. callName rather
+// than warningCallName because `guarded` is compared by full name anyway, and the
+// disabledTools startup notice — an Info line, so no *Warning suffix — is pinned
+// through this same assertion.
 func assertWarningIsRaised(t *testing.T, file string, stmt ast.Stmt, guarded, raiser string) {
 	t.Helper()
 	if stmt == nil {
@@ -218,7 +221,7 @@ func assertWarningIsRaised(t *testing.T, file string, stmt ast.Stmt, guarded, ra
 			return true
 		}
 		for i, rhs := range as.Rhs {
-			if warningCallName(rhs) != guarded {
+			if callName(rhs) != guarded {
 				continue
 			}
 			if i < len(as.Lhs) {

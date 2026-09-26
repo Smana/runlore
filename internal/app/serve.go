@@ -354,6 +354,17 @@ func RunServe(version string, args []string) error {
 	if msg := RecallDecayWarning(cfg, resolveCapable); msg != "" {
 		log.Warn(msg, "resolve_capable_source", resolveCapable)
 	}
+	// What the loop will run WITHOUT — named once, here, for the same reason the
+	// warning above is raised once: the condition is pure config. serve announces at
+	// Info everything it turned on, so an install missing its evidence backends (the
+	// `minimal` profile wires neither metrics.url nor logs.url) looked identical in
+	// the logs to one that has them all. Info, not Warn: a deliberately-minimal
+	// install boots this way every time, and a warning that fires on purpose is
+	// tuned out. The same helper as `lore investigate`'s stderr note, so the two
+	// commands cannot disagree about what counts as off (#467).
+	if off := disabledTools(cfg); len(off) > 0 {
+		log.Info("running without", "tools", off)
+	}
 	// The queue (not alertEnq, which may be the coalescer) is wired as the
 	// pipeline's Canceller; the pipeline only calls it when
 	// triggers.incidents.cancel_queued_on_resolve is on.
