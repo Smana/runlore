@@ -66,7 +66,8 @@ expected:
   # the full registry.k8s.io/pause:v9.9.9-does-not-exist reference.
   root_cause_entities: [eval-victim, v9.9.9]
   # eval-victim-config is the poisoned catalog entry's fabricated cause (its drifted
-  # APP_MODE key). It is the one distractor in the shipped set that survives the rule
+  # APP_MODE key). It was the first distractor in the shipped set to survive the rule
+  # (hpa-ceiling-saturation's now do too)
   # "must appear in this case's own evidence, and a correct claim must have no reason to
   # name it — not even to DISMISS it" (claimText excludes ruled_out, so a dismissal in
   # the summary would score as a blame):

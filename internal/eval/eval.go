@@ -101,7 +101,10 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 			got, done = inv, true
 		},
 	}
-	req := investigate.Request{Source: investigate.SourceAlert, Title: c.Name, Message: c.Prompt, Workload: c.workload()}
+	// DisplayName, never Name: the slug is a file name, and one that names the answer
+	// ("hpa-ceiling-saturation") would open the seed prompt with it before a single
+	// tool is called. Production seeds the alert's own title, so replay does too.
+	req := investigate.Request{Source: investigate.SourceAlert, Title: c.DisplayName(), Message: c.Prompt, Workload: c.workload()}
 	if err := li.Investigate(ctx, req); err != nil {
 		return Result{Name: c.Name, Missing: []string{noteInvestigationError + err.Error()}}
 	}
@@ -189,9 +192,10 @@ func (c Case) FakeTools() []investigate.Tool {
 // unexported fields.
 func (c Case) Symptom() string { return c.Prompt }
 
-// DisplayName returns the incident title for demo/report labeling: the case's
-// alert_title when set, else its name. See Case.AlertTitle for why the distinction
-// is load-bearing on the instant-recall path.
+// DisplayName returns the incident title the loop is seeded with, in replay and in
+// the demo, and the label reports carry: the case's alert_title when set, else its
+// name. See Case.AlertTitle for why the distinction is load-bearing on the
+// instant-recall path, and runOne for why the seed must never see the slug.
 func (c Case) DisplayName() string { return cmp.Or(c.AlertTitle, c.Name) }
 
 // AffectedWorkload returns the case's affected workload (zero when unset), so the demo

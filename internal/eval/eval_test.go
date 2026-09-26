@@ -1140,27 +1140,22 @@ func TestAggregateCapsTheNumberOfClaims(t *testing.T) {
 // because it is the one the prompt is not tuned against. So the three answers that matter
 // are pinned here rather than inferred from a nightly.
 func TestHeldOutCaseDiscriminates(t *testing.T) {
-	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
-	if err != nil {
-		t.Fatalf("Load examples/eval: %v", err)
-	}
-	var held Case
-	for _, c := range cases {
-		if c.Name == "hpa-ceiling-saturation" {
-			held = c
-		}
-	}
-	if held.Name == "" {
-		t.Fatal("the held-out case is not in the shipped corpus")
-	}
-	if held.Gate != nil && *held.Gate {
+	held := shippedCase(t, "hpa-ceiling-saturation")
+	// gates() and not a nil-check on Gate: an absent `gate:` line GATES (case.go), so
+	// the regression that matters — someone deleting `gate: false` — must fail here.
+	if held.gates() {
 		t.Fatal("the held-out case must not gate: a case that gates gets tuned")
 	}
 
+	// Each scenario pins WHICH gate decides it, not just the pass bit: a scenario that
+	// fails for the wrong reason (missing the term when it should be an over-claim)
+	// would otherwise pass this test while the distractor was silently disabled.
 	for _, tc := range []struct {
-		name     string
-		inv      providers.Investigation
-		wantPass bool
+		name        string
+		inv         providers.Investigation
+		wantPass    bool
+		wantMissing []string // must_contain terms the claim misses; nil = none
+		wantOver    []string // distractors the claim blames; nil = none
 	}{
 		{
 			name: "the right cause, reasoned from metrics",
@@ -1170,6 +1165,20 @@ func TestHeldOutCaseDiscriminates(t *testing.T) {
 				RootCauses: []providers.Hypothesis{{
 					Summary:         "pricing-api is pinned at its autoscaling maximum of 4 replicas with CPU at 94%, so doubled request volume has nowhere to scale",
 					SuggestedAction: "raise the maximum replica count for pricing-api",
+				}},
+			},
+			wantPass: true,
+		},
+		{
+			// The abbreviation is the most natural correct spelling — it is in the case's
+			// own filename — and the mechanism term must accept it.
+			name: "the right cause, spelled HPA",
+			inv: providers.Investigation{
+				Title:      "pricing-api HPA at maxReplicas",
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:         "pricing-api's HPA is at maxReplicas=4 (ScalingLimited) with CPU 94% against a 70% target; demand doubled over the week",
+					SuggestedAction: "raise maxReplicas for pricing-api",
 				}},
 			},
 			wantPass: true,
@@ -1186,7 +1195,27 @@ func TestHeldOutCaseDiscriminates(t *testing.T) {
 					SuggestedAction: "roll back promo-banner",
 				}},
 			},
-			wantPass: false,
+			wantPass:    false,
+			wantMissing: []string{"autoscal|hpa"},
+			wantOver:    []string{"promo-banner"},
+		},
+		{
+			// The second wrong answer the evidence offers: the logs call the upstream
+			// "slow", and only the metrics show it has been that slow all week. Blaming
+			// it must be distinguishable in the scorecard from blaming the change and
+			// from naming nothing, so it is a listed distractor.
+			name: "blaming the upstream dependency is a named over-claim",
+			inv: providers.Investigation{
+				Title:      "pricing-api latency from quote-engine",
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:         "quote-engine responds in 600ms+ and pricing-api waits on it",
+					SuggestedAction: "investigate quote-engine",
+				}},
+			},
+			wantPass:    false,
+			wantMissing: []string{"autoscal|hpa"},
+			wantOver:    []string{"quote-engine"},
 		},
 		{
 			// Documents the asymmetry the case's comment claims: the honesty channels
@@ -1203,6 +1232,7 @@ func TestHeldOutCaseDiscriminates(t *testing.T) {
 				RuledOut: []string{"the promo-banner bump: unrelated workload, 22 req/s, unchanged pricing-api revision"},
 			},
 			wantPass: false,
+			wantOver: []string{"promo-banner"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1210,6 +1240,21 @@ func TestHeldOutCaseDiscriminates(t *testing.T) {
 			if got.Pass != tc.wantPass {
 				t.Fatalf("want pass=%v, got pass=%v (missing=%q over-claimed=%q)",
 					tc.wantPass, got.Pass, got.Missing, got.OverClaimed)
+			}
+			for _, term := range tc.wantMissing {
+				if !slices.Contains(got.Missing, term) {
+					t.Errorf("want %q reported missing, got missing=%q", term, got.Missing)
+				}
+			}
+			if tc.wantMissing == nil && tc.wantPass {
+				for _, m := range got.Missing {
+					if !strings.HasPrefix(m, "over-claimed: ") {
+						t.Errorf("a passing claim must miss nothing, got missing=%q", got.Missing)
+					}
+				}
+			}
+			if !slices.Equal(got.OverClaimed, tc.wantOver) {
+				t.Errorf("want over-claimed=%q, got %q", tc.wantOver, got.OverClaimed)
 			}
 		})
 	}
