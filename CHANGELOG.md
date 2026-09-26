@@ -14,6 +14,29 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.17.0](https://github.com/Smana/runlore/compare/v0.16.2...v0.17.0) (2026-09-26)
+
+
+### Features
+
+* **eval:** add a held-out case the prompt is not tuned against ([#579](https://github.com/Smana/runlore/issues/579)) ([d1c9158](https://github.com/Smana/runlore/commit/d1c91580e33b38ffebd32377487a44373d457c37))
+* **providers:** a decision model behind the recall reranker and curation dedup ([#581](https://github.com/Smana/runlore/issues/581)) ([c65a7ba](https://github.com/Smana/runlore/commit/c65a7ba70d79bdae175e48972e818a3b3cf2218f))
+* **serve:** name the investigation tools the loop runs without, once at startup ([#583](https://github.com/Smana/runlore/issues/583)) ([540a8a8](https://github.com/Smana/runlore/commit/540a8a81fb9d7d7776998c586d4adb731baf20cb)), closes [#467](https://github.com/Smana/runlore/issues/467)
+
+
+### Bug Fixes
+
+* **curator:** meter and guard the dedup decider, cap the decider client's body read, fix the backend docs ([#588](https://github.com/Smana/runlore/issues/588)) ([f340b4e](https://github.com/Smana/runlore/commit/f340b4e1b1fb2c9eb4db99a5e91055d50d3c563d)), closes [#581](https://github.com/Smana/runlore/issues/581)
+* **curator:** show the dedup decider both resources, so it can answer the question it is asked ([#586](https://github.com/Smana/runlore/issues/586)) ([389b1bd](https://github.com/Smana/runlore/commit/389b1bd6410c56d1f7e08780eb77a566c11f34c9)), closes [#581](https://github.com/Smana/runlore/issues/581)
+* **eval:** stop the held-out case from handing the model its own answer ([#585](https://github.com/Smana/runlore/issues/585)) ([69f79c1](https://github.com/Smana/runlore/commit/69f79c1e3057fa5131bf851a39648d14e8e17197)), closes [#579](https://github.com/Smana/runlore/issues/579)
+* **investigate:** name the resource in a root cause, and report what a miss claimed ([#578](https://github.com/Smana/runlore/issues/578)) ([1912865](https://github.com/Smana/runlore/commit/19128652a54548e968d5cf9468a7c654eada593a))
+* **recall:** overlap the shadow arm, split the confidence histogram by choice ([#587](https://github.com/Smana/runlore/issues/587)) ([23c1ce4](https://github.com/Smana/runlore/commit/23c1ce450573bf2a6e2a9de01cb1ba7c15d3a879)), closes [#581](https://github.com/Smana/runlore/issues/581)
+
+
+### Documentation
+
+* **specs:** resolve the decision model's retention question, and state the cost ([#580](https://github.com/Smana/runlore/issues/580)) ([9704876](https://github.com/Smana/runlore/commit/9704876b9fec3b3cfeac1bbe5cf8282767342790))
+
 ## [0.16.2](https://github.com/Smana/runlore/compare/v0.16.1...v0.16.2) (2026-09-22)
 
 
