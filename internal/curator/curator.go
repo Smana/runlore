@@ -302,8 +302,20 @@ const dedupQuestionID = "same_pattern"
 // false means the caller uses the BM25 path, so a decider outage degrades to today's
 // behaviour rather than blocking curation.
 func (c *Curator) sameIncidentPattern(ctx context.Context, inv providers.Investigation, hit catalog.ScoredEntry) (float64, bool) {
-	state := "PROPOSED FINDING\n" + Fingerprint(inv) +
-		"\n\nEXISTING CATALOG ENTRY\n" + hit.Entry.Title + "\n" + hit.Entry.Description
+	// Both sides name their resource, spelled the way the drafted entry writes it
+	// (normalizeResource: pod hash folded, ARN collapsed), so the "same resource" half
+	// of the question below can be answered from the state. It could not be before:
+	// the finding's resource reached the decider only as Fingerprint's bare words and
+	// the entry's not at all, so a same-symptom finding on a DIFFERENT workload read
+	// as a confident duplicate, the skip tier dropped it, and a Confirm was recorded
+	// against the wrong entry. The entry's alert-side index goes along when set: it
+	// is the resource an incoming alert would carry, which is what the finding has.
+	state := "PROPOSED FINDING\nresource: " + normalizeResource(inv.Resource) + "\n" + Fingerprint(inv) +
+		"\n\nEXISTING CATALOG ENTRY\nresource: " + hit.Entry.Resource
+	if hit.Entry.AlertResource != "" {
+		state += "\nalert_resource: " + hit.Entry.AlertResource
+	}
+	state += "\n" + hit.Entry.Title + "\n" + hit.Entry.Description
 	ans, err := c.Decider.Decide(ctx, state, []providers.Question{{
 		ID:   dedupQuestionID,
 		Kind: providers.KindNoul,

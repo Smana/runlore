@@ -501,18 +501,23 @@ func TestDedupTiers(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		dec          providers.Decider
+		dupScore     float64 // the BM25 gate, which only the outage case reaches
 		wantFiled    bool
 		wantNamesHit bool
 	}{
-		{"a confident duplicate is not filed", fakeDecider{noul: 0.95}, false, false},
-		{"a middling match is filed with the suspect named", fakeDecider{noul: 0.70}, true, true},
-		{"a weak match files as today", fakeDecider{noul: 0.20}, true, false},
-		{"a decider outage falls back to the BM25 path", fakeDecider{err: errors.New("down")}, true, false},
+		{"a confident duplicate is not filed", fakeDecider{noul: 0.95}, 5.0, false, false},
+		{"a middling match is filed with the suspect named", fakeDecider{noul: 0.70}, 5.0, true, true},
+		{"a weak match files as today", fakeDecider{noul: 0.20}, 5.0, true, false},
+		// dup_score BELOW the hit's 0.49, so this case passes only if the BM25 gate
+		// actually runs. With the default 5.0 the finding filed whether or not the
+		// fallback existed, and the case proved nothing about it.
+		{"a decider outage falls back to the BM25 path", fakeDecider{err: errors.New("down")}, 0.4, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeForge{}
 			c := newCurator(f, multiScored{hits: []catalog.ScoredEntry{hit}})
 			c.Decider = tc.dec
+			c.DupScore = tc.dupScore
 			c.DedupSkipAbove = 0.85
 			c.DedupAnnotateAbove = 0.60
 
