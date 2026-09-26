@@ -280,8 +280,17 @@ func (rr *Reranker) decideRerank(ctx context.Context, req Request, cands []catal
 		return providers.Answer{}, fmt.Errorf("no answer for question %q", rerankQuestionID)
 	}
 	if rr.Metrics != nil {
-		rr.Metrics.DecisionConfidence.Record(ctx, a.Confidence,
-			metric.WithAttributes(attribute.String("consumer", "rerank")))
+		// Which kind of answer this sample is. The histogram is what the promotion
+		// procedure reads a fire bar off, and "confident there is nothing to recall" and
+		// "confident candidate X matches" are different distributions: on a corpus where
+		// most incidents have no runbook the none answers carry the mass, and a bar set
+		// against it lands above every candidate answer, so in jev mode nothing fires.
+		choice := "candidate"
+		if a.Choice == rerankNoneOption {
+			choice = "none"
+		}
+		rr.Metrics.DecisionConfidence.Record(ctx, a.Confidence, metric.WithAttributes(
+			attribute.String("consumer", "rerank"), attribute.String("choice", choice)))
 	}
 	return a, nil
 }
@@ -353,6 +362,22 @@ func shadowAgreement(llmFired bool, llmPath string, shadowFired bool, shadowPath
 	}
 }
 
+// effectiveBackend is the one place the Backend string and the Decider's presence
+// resolve to the path rank takes: "llm" (the default, and the kill-switch fallback when
+// a non-llm Backend has no Decider), "jev" or "shadow". rank switches on it, and
+// Recall.affordRerank reads it to know whether the call it is about to gate spends any
+// LLM tokens at all — two copies of that rule would eventually disagree.
+func (rr *Reranker) effectiveBackend() string {
+	if rr.Decider == nil {
+		return "llm"
+	}
+	switch rr.Backend {
+	case "jev", "shadow":
+		return rr.Backend
+	}
+	return "llm"
+}
+
 // rank routes the decision to the configured backend. The LLM path is the default and
 // is unchanged; a decider that is configured but absent (the kill switch) falls back to
 // it rather than failing, so an investigation's outcome never depends on the decider
@@ -361,10 +386,7 @@ func shadowAgreement(llmFired bool, llmPath string, shadowFired bool, shadowPath
 // is unreachable in production, but the safe default is the proven path, and a typo
 // must never silently double the decider's call volume.
 func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) (catalog.Entry, float64, bool) {
-	if rr.Decider == nil {
-		return rr.rankLLM(ctx, req, cands, spend)
-	}
-	switch rr.Backend {
+	switch rr.effectiveBackend() {
 	case "jev":
 		return rr.rankJev(ctx, req, cands, spend)
 	case "shadow":
@@ -372,8 +394,25 @@ func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.Score
 		// never change the outcome, including when it errors, so its answer is recorded
 		// and discarded. decideRerank rather than rankJev, because agreement needs to
 		// distinguish a genuine disagreement from an outage.
+		//
+		// The decider is asked WHILE the LLM runs and joined after, so shadow costs the
+		// recall path max(LLM, decider) rather than their sum: run serially, a slow or
+		// black-holed endpoint added up to its client timeout to every instant recall —
+		// twice per investigation on the outcomeFallback path — for a verdict the LLM
+		// had already given. Joined rather than abandoned, because the comparison is
+		// written to spend, which the loop reads once rank returns.
+		type shadowAnswer struct {
+			a   providers.Answer
+			err error
+		}
+		shadow := make(chan shadowAnswer, 1)
+		go func() {
+			a, err := rr.decideRerank(ctx, req, cands)
+			shadow <- shadowAnswer{a, err}
+		}()
 		entry, conf, ok := rr.rankLLM(ctx, req, cands, spend)
-		a, err := rr.decideRerank(ctx, req, cands)
+		s := <-shadow
+		a, err := s.a, s.err
 		shadowFired := err == nil && a.Choice != rerankNoneOption && a.Confidence >= rr.ThresholdJev
 		shadowPath := ""
 		if shadowFired {

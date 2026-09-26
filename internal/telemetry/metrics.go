@@ -131,7 +131,10 @@ type Metrics struct {
 
 	// DecisionConfidence is the calibrated confidence a decision model returned, by
 	// consumer. It is the distribution a threshold is read OFF: shadow mode exists to
-	// fill this histogram so the live bar is chosen from data rather than invented.
+	// fill this histogram so the live bar is chosen from data rather than invented. The
+	// rerank consumer also labels each sample by choice (none|candidate): confidence
+	// that nothing matches and confidence that a named candidate does are different
+	// distributions, and the bar belongs to the second.
 	DecisionConfidence metric.Float64Histogram
 	// DecisionShadow counts shadow-mode comparisons (labels: consumer, agreement =
 	// agree|disagree|error), which is what says whether a backend is ready to go live.
@@ -211,7 +214,7 @@ func NewMetrics() *Metrics {
 		CatalogEmbedDegraded:  ctr("catalog_embed_degraded_total", "catalog reloads that left hybrid recall without vectors (embed failure)"),
 		AlertRuleDegraded:     ctr("alert_rule_degraded_total", "alert_rule tool calls that answered with an \"unavailable\" note instead of the firing rule's expression (label: reason=no_capability|backend_error|no_rules|unmatched_alert, class=systemic|routine)"),
 
-		DecisionConfidence: histF("decision_model_confidence", "calibrated confidence returned by the decision model (label: consumer)"),
+		DecisionConfidence: histF("decision_model_confidence", "calibrated confidence returned by the decision model (labels: consumer; choice=none|candidate on the rerank consumer)"),
 		DecisionShadow:     ctr("decision_model_shadow_total", "shadow-mode comparisons against the live backend (labels: consumer, agreement)"),
 	}
 }
