@@ -10,7 +10,7 @@
 # key configured can never be mistaken for a real green eval.
 #
 # The same honesty requirement applies to a run that OVERRUNS, and used not to hold.
-# The eval is ~30 live LLM investigations run sequentially (6 cases x -n 5), so it is
+# The eval is ~35 live LLM investigations run sequentially (7 cases x -n 5), so it is
 # slow and its duration drifts with the suite, the provider, and how often recall
 # falls through to a full investigation. Every nightly run from 2026-08-07 to
 # 2026-08-14 hit the old 20-minute JOB ceiling mid-run: `lore` was killed with no

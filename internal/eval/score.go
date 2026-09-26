@@ -85,14 +85,30 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 // notInClaim returns the terms absent from claim, which must already be lower-cased.
 // must_contain and root_cause_entities are matched identically — the same haystack,
 // the same case-insensitive substring rule — so the rule is stated once here.
+//
+// A term may list alternative spellings separated by "|" ("autoscal|hpa"), and is
+// present when the claim contains ANY of them. A miss reports the whole term, so the
+// scorecard shows every spelling that was accepted. This exists for the held-out
+// case, whose one mechanism term cannot be re-tuned after its first result: "HPA" is
+// the most natural correct spelling and contains no "autoscal".
 func notInClaim(claim string, terms []string) []string {
 	var missing []string
 	for _, t := range terms {
-		if !strings.Contains(claim, strings.ToLower(t)) {
+		if !containsAny(claim, strings.Split(strings.ToLower(t), "|")) {
 			missing = append(missing, t)
 		}
 	}
 	return missing
+}
+
+// containsAny reports whether s contains at least one of subs.
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // coveredByEntity reports whether a distractor hit is already explained by a correctly

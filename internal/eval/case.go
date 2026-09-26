@@ -136,7 +136,7 @@ type CaseRecall struct {
 // Distractors over-claim penalty. Keep the split editorial — mechanism words in
 // MustContain, blamed entities in RootCauseEntities — and don't duplicate across them.
 type Expected struct {
-	MustContain       []string `yaml:"must_contain"`        // keywords that must appear in the claim (recall, over claim text)
+	MustContain       []string `yaml:"must_contain"`        // keywords that must appear in the claim (recall, over claim text); "a|b" accepts either spelling
 	MinConfidence     float64  `yaml:"min_confidence"`      // confidence floor (0 = no floor)
 	RootCauseEntities []string `yaml:"root_cause_entities"` // entities that MUST be named as the cause; same match as MustContain, and its presence is what enables Distractors
 	Distractors       []string `yaml:"distractors"`         // entities present in the case's own evidence that a correct claim has no reason to name — not even to dismiss, since claimText excludes ruled_out; only evaluated when root_cause_entities is non-empty
