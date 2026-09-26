@@ -351,8 +351,9 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   of backend. **`shadow` reads it too** — it decides whether a shadow comparison counts as a fire, so
   leaving it unset while shadowing measures agreement at a threshold of zero, not at the bar `jev`
   would actually run at. Promotion path: run `shadow` with it unset to fill the confidence histogram,
-  read a candidate bar off that distribution, set it **while still in `shadow`**, read the agreement
-  counter at that bar, and only then switch `rerank_backend` to `jev`.
+  read a bar off its `choice="candidate"` series **only** (the `none` answers sit far above it and
+  would put the bar out of every candidate's reach), set it **while still in `shadow`**, read the
+  agreement counter at that bar, and only then switch `rerank_backend` to `jev`.
 - `instant_recall.hybrid` (**EXPERIMENTAL**, off by default; needs `model.embeddings`) — switches recall
   to fused **BM25 + embedding** retrieval, gated on **cosine** similarity (`hybrid_min_score` default
   **0.80**, `hybrid_margin_gap` default **0.05**) instead of the BM25 magnitude. *Provenance:* the hybrid

@@ -564,15 +564,10 @@ func nearMissAgrees(reqW providers.Workload, entryResource string, requireWorklo
 // a recall REJECTION instead puts it beside rerank_no_signal and rerank_low_confidence,
 // where an operator already looks to learn why a rerank did not happen.
 func (r *Recall) affordRerank(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) bool {
-	// The ceiling is a guard on LLM tokens, and the jev backend spends none (rankJev is
-	// unaccounted by design). Gating it on the LLM's request estimate skipped a call that
-	// costs nothing — and on the outcomeFallback path, whose second rank call runs
-	// against real prior spend, an over-budget incident then got neither the recall the
-	// free decider would have produced nor the investigation the ceiling was about to
-	// stop. Shadow still makes the LLM call, and stays gated.
-	if r.Rerank.effectiveBackend() == "jev" {
-		return true
-	}
+	// Gated whatever the backend, including jev, whose rank call itself spends no LLM
+	// tokens: the recall it produces still runs confirmRecall and verifyFindings, which
+	// are paid completions the ceiling never sees, so letting a crossed ceiling fire a
+	// free rank call would have it buy a verify it was about to refuse.
 	reason := spend.refuses(r.Rerank.requestEstimate(req, cands))
 	if reason == "" {
 		return true

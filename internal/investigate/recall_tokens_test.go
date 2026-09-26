@@ -18,38 +18,55 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-// meteredInstruments installs a REAL SDK meter provider backed by a manual reader and
-// returns the instrument set bound to it, plus a reader that sums an int64 counter by
-// its exported series name (0, false when the series was never recorded). The provider
-// is global, so the returned instruments must be used by exactly one test at a time
-// (no t.Parallel here) and the cleanup restores the no-op provider.
-func meteredInstruments(t *testing.T) (*telemetry.Metrics, func(series string) (int64, bool)) {
+// installMeterReader installs a REAL SDK meter provider backed by a manual reader and
+// returns the instrument set bound to it, plus the reader. The provider is global, so
+// the returned instruments must be used by exactly one test at a time (no t.Parallel
+// here) and the cleanup restores the no-op provider.
+func installMeterReader(t *testing.T) (*telemetry.Metrics, *sdkmetric.ManualReader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
-	return telemetry.NewMetrics(), func(series string) (int64, bool) {
-		var rm metricdata.ResourceMetrics
-		if err := reader.Collect(context.Background(), &rm); err != nil {
-			t.Fatalf("collect metrics: %v", err)
-		}
-		for _, sm := range rm.ScopeMetrics {
-			for _, md := range sm.Metrics {
-				if md.Name != series {
-					continue
-				}
-				sum, ok := md.Data.(metricdata.Sum[int64])
-				if !ok {
-					t.Fatalf("series %q is not an int64 sum (%T)", series, md.Data)
-				}
-				var total int64
-				for _, dp := range sum.DataPoints {
-					total += dp.Value
-				}
-				return total, true
+	return telemetry.NewMetrics(), reader
+}
+
+// findSeries collects what the reader has and returns the series by its exported
+// name (false when it was never recorded).
+func findSeries(t *testing.T, reader *sdkmetric.ManualReader, series string) (metricdata.Metrics, bool) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, md := range sm.Metrics {
+			if md.Name == series {
+				return md, true
 			}
 		}
-		return 0, false
+	}
+	return metricdata.Metrics{}, false
+}
+
+// meteredInstruments is installMeterReader plus a reader that sums an int64 counter
+// by its exported series name (0, false when the series was never recorded).
+func meteredInstruments(t *testing.T) (*telemetry.Metrics, func(series string) (int64, bool)) {
+	t.Helper()
+	m, reader := installMeterReader(t)
+	return m, func(series string) (int64, bool) {
+		md, ok := findSeries(t, reader, series)
+		if !ok {
+			return 0, false
+		}
+		sum, ok := md.Data.(metricdata.Sum[int64])
+		if !ok {
+			t.Fatalf("series %q is not an int64 sum (%T)", series, md.Data)
+		}
+		var total int64
+		for _, dp := range sum.DataPoints {
+			total += dp.Value
+		}
+		return total, true
 	}
 }
 
