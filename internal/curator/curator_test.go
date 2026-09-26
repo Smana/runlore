@@ -477,15 +477,20 @@ func TestCurateRecordsDedupScore(t *testing.T) {
 	}
 }
 
-// fakeDecider answers one noul question with a canned probability.
+// fakeDecider answers one noul question with a canned probability, or fails, or —
+// noAnswer — answers nothing at all (a 200 whose payload lacks the question asked).
 type fakeDecider struct {
-	noul float64
-	err  error
+	noul     float64
+	err      error
+	noAnswer bool
 }
 
 func (f fakeDecider) Decide(_ context.Context, _ string, qs []providers.Question) (providers.Answers, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.noAnswer {
+		return providers.Answers{}, nil
 	}
 	return providers.Answers{qs[0].ID: {Noul: f.noul}}, nil
 }

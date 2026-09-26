@@ -107,7 +107,7 @@ func TestDecideFailureShapes(t *testing.T) {
 		{"a rate limit is an error, not a retry storm", http.StatusTooManyRequests, `{"error":"slow down"}`, "decide status 429"},
 		{"a server error surfaces status only", http.StatusInternalServerError, `{"error":"boom"}`, "decide status 500"},
 		{"a malformed body is an error", http.StatusOK, `{"answers":`, "parse response"},
-		{"an empty answer set is an error", http.StatusOK, `{"model":"jev","answers":{}}`, "no answers"},
+		{"an empty answer set is an error", http.StatusOK, `{"model":"jev","answers":{}}`, "no answer for question"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _, count := fixtureServer(t, tc.status, tc.body)

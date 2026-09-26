@@ -395,7 +395,8 @@ config:
   #   # Bare hostname only: no scheme, path, port or userinfo.
   #   # File-time dedup gate backend: bm25 (default, the dup_score threshold) | jev (a
   #   # decision model answers "same incident pattern?", off by default — requires
-  #   # decision_model.enabled).
+  #   # decision_model.enabled; asked only for a top hit at/above the related-entries
+  #   # floor 0.2, below which bm25 decides as it always did).
   #   # dedup_backend: bm25
   #   # dedup_skip_above: 0.9      # jev: above this confidence, skip filing (record a confirmation). REQUIRED when dedup_backend is jev
   #   # dedup_annotate_above: 0.7  # jev: between this and skip_above, file with the suspect named in the PR description. REQUIRED when dedup_backend is jev

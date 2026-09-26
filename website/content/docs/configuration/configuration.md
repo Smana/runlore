@@ -537,7 +537,10 @@ synthetic findings out of the review queue while still notifying chat (see
 `dedup_backend` selects the **file-time** dedup gate — the check that runs on every drafted KB
 entry, upstream of the fingerprint check, which still short-circuits first: `bm25` (default, the
 `dup_score` threshold above) or `jev` (a [`decision_model`](#decision_model--a-non-generative-decider)
-answers "same incident pattern?" — off by default, requires `decision_model.enabled`). `jev` scores
+answers "same incident pattern?" — off by default, requires `decision_model.enabled`). The decider is
+asked only when the top BM25 hit scores at or above the related-entries floor (`0.2`, the same floor
+below which a hit is not shown to the reviewer as related); below it the `bm25` gate decides, as it
+always did, so a noise-floor hit never costs a paid off-host call. `jev` scores
 into **three tiers** via two required band edges, `dedup_skip_above` and `dedup_annotate_above` (both
 probabilities in `(0,1]`, and `dedup_skip_above` must exceed `dedup_annotate_above`): above
 `dedup_skip_above` the candidate is a confident duplicate — skipped, recorded as a confirmation, no

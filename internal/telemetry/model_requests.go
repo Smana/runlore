@@ -15,11 +15,10 @@ import (
 // runlore_model_request_duration_seconds{provider}. result is "ok" or "error" from err.
 // Nil-safe on m, so a caller with no metrics wired records nothing.
 //
-// One helper for every consumer of a backend, because the two decision-model
-// consumers instrumented this pair separately and one of them (the curator's dedup
-// decider) did not: a decider returning 401 on every curation fell back to BM25
-// behind a Warn line while the series the observability page points operators at
-// stayed flat. Now the recorder is the same call in both places.
+// One recording site for every model-shaped backend: the inline copies of this pair
+// (rerank, summarize, loop, and embed's recordRequest) are being migrated onto it, so
+// that no consumer can be instrumented differently from the rest again — the
+// curator's dedup decider was, and its outages showed up nowhere but a Warn line.
 func (m *Metrics) RecordModelRequest(ctx context.Context, provider string, started time.Time, err error) {
 	if m == nil {
 		return

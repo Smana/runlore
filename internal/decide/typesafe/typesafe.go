@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -120,38 +121,46 @@ func (c *Client) Decide(ctx context.Context, state string, qs []providers.Questi
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	// One attempt, deliberately, and a plain Do rather than httpx.DoWithRetry at one
-	// attempt (which is the same call behind a retry loop that never loops). The
-	// reranker sits on the recall critical path with a FREE fall-through (a
-	// rejected/failed decide just falls through to the full investigation it was going
-	// to run anyway), unlike internal/embed's retry, which guards a call with no such
-	// fall-through. Retrying a rate limit here would mean waiting up to 30s of backoff
-	// per hop before doing what a single failure already triggers for free — pure added
-	// latency in front of a gate that doesn't need it.
+	// One attempt, deliberately: a rejected or failed decide falls through to the full
+	// investigation that was going to run anyway, so a retry (unlike internal/embed's,
+	// which guards a call with no such fall-through) would only add backoff latency in
+	// front of a gate that does not need it. A plain Do, because httpx.DoWithRetry at
+	// one attempt is the same call behind a loop that never loops.
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("decide request: %w", err)
 	}
 	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
-	// Capped, like every other backend client: base_url is operator-configurable, so
-	// the body is untrusted in size as well as content, and this is a few KB of JSON
-	// on the recall path — never something to allocate without bound.
-	data, err := httpx.ReadBody(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
 		// base_url is operator-configurable, so never echo the upstream body: it is an
 		// information-disclosure and log-injection surface. Status + request id only,
-		// matching internal/embed.
+		// as the logs and metrics clients do. Decided BEFORE the body is read, so a
+		// misrouted base_url's multi-MB error page reports its status, not its size.
 		return nil, fmt.Errorf("decide status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
+	}
+	// Capped, as the logs and metrics clients are: the body is untrusted in size as well
+	// as content, and a decide response is a few KB of JSON on the recall path. The
+	// cap's own message names a query to narrow; there is none here, so the error is
+	// built from the sentinel with the remedy that applies.
+	data, err := httpx.ReadBody(resp.Body)
+	if err != nil {
+		if errors.Is(err, httpx.ErrResponseTooLarge) {
+			return nil, fmt.Errorf("read response: %w: over %d bytes — decision_model.base_url is answering with something that is not a decide response",
+				httpx.ErrResponseTooLarge, httpx.MaxResponseBytes)
+		}
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 	var wr wireResponse
 	if err := json.Unmarshal(data, &wr); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
-	if len(wr.Answers) == 0 {
-		return nil, fmt.Errorf("response carried no answers")
+	// Every question asked must be answered, so a 200 whose payload lacks one (vendor
+	// schema drift, a gateway rewriting ids) fails here, for every consumer, rather
+	// than being re-detected in each of them.
+	for _, q := range qs {
+		if _, ok := wr.Answers[q.ID]; !ok {
+			return nil, fmt.Errorf("response carried no answer for question %q", q.ID)
+		}
 	}
 	out := make(providers.Answers, len(wr.Answers))
 	for id, a := range wr.Answers {
