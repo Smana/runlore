@@ -724,10 +724,12 @@ type InstantRecall struct {
 	// mode (corrupt/stale/missing file) degrades to a cold re-embed.
 	VectorCache VectorCache `yaml:"vector_cache"`
 
-	// RerankBackend selects the reranking backend: "llm" (default, the configured model)
-	// or "jev" (a decision model answers "same incident pattern?"). InstantRecall runs
-	// only when enabled; this field names which backend runs when it does. Empty defaults
-	// to llm in ApplyDefaults.
+	// RerankBackend selects the reranking backend, which answers "which of these
+	// candidates, if any, is the runbook for this incident?": "llm" (default, the
+	// configured model), "jev" (a decision model answers instead) or "shadow" (both run,
+	// the LLM decides, the decider's agreement is recorded). InstantRecall runs only when
+	// enabled; this field names which backend runs when it does. Empty defaults to llm
+	// in ApplyDefaults.
 	RerankBackend string `yaml:"rerank_backend"`
 	// RerankThresholdJev is the jev backend's calibrated confidence bar. Required when
 	// rerank_backend is jev and decision_model is enabled. Must be in (0,1].
@@ -2001,6 +2003,15 @@ func (c *Config) DecisionModelUsable() bool {
 	return d.Enabled && d.BaseURL != "" && d.Model != ""
 }
 
+// RerankBackends and DedupBackends are the values Validate accepts for
+// catalog.instant_recall.rerank_backend and forge.dedup_backend. Exported so that the
+// places that describe them to an operator (internal/docsguard) read the parser's own
+// set rather than a hand-written copy — a copy is how `shadow` went undocumented.
+var (
+	RerankBackends = []string{"llm", "jev", "shadow"}
+	DedupBackends  = []string{"bm25", "jev"}
+)
+
 // Validate enforces cross-field invariants after loading — fail-closed defaults
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
@@ -2481,18 +2492,15 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	switch b := c.Catalog.InstantRecall.RerankBackend; b {
-	case "", "llm", "shadow":
-	case "jev":
-		// Only the live backend needs a bar. Shadow records the confidence distribution
-		// instead, which is how the value gets chosen in the first place.
-		if c.DecisionModelUsable() {
-			if t := c.Catalog.InstantRecall.RerankThresholdJev; t <= 0 || t > 1 {
-				return fmt.Errorf("catalog.instant_recall.rerank_threshold_jev must be in (0,1] and is required when rerank_backend is jev, got %g", t)
-			}
+	if b := c.Catalog.InstantRecall.RerankBackend; b != "" && !slices.Contains(RerankBackends, b) {
+		return fmt.Errorf("catalog.instant_recall.rerank_backend %q is not valid (%s)", b, strings.Join(RerankBackends, "|"))
+	}
+	// Only the live backend needs a bar. Shadow records the confidence distribution
+	// instead, which is how the value gets chosen in the first place.
+	if c.Catalog.InstantRecall.RerankBackend == "jev" && c.DecisionModelUsable() {
+		if t := c.Catalog.InstantRecall.RerankThresholdJev; t <= 0 || t > 1 {
+			return fmt.Errorf("catalog.instant_recall.rerank_threshold_jev must be in (0,1] and is required when rerank_backend is jev, got %g", t)
 		}
-	default:
-		return fmt.Errorf("catalog.instant_recall.rerank_backend %q is not valid (llm|jev|shadow)", b)
 	}
 	// rerank_threshold_jev is read by `shadow` too — it decides whether a shadow
 	// comparison counts as a fire (see rerank.go's shadowFired), not only by `jev` — so
@@ -2501,23 +2509,20 @@ func (c *Config) Validate() error {
 	if t := c.Catalog.InstantRecall.RerankThresholdJev; t != 0 && (t < 0 || t > 1) {
 		return fmt.Errorf("catalog.instant_recall.rerank_threshold_jev must be in (0,1] when set, got %g", t)
 	}
-	switch b := c.Forge.DedupBackend; b {
-	case "", "bm25":
-	case "jev":
-		if c.DecisionModelUsable() {
-			if c.Forge.DedupSkipAbove <= 0 || c.Forge.DedupSkipAbove > 1 {
-				return fmt.Errorf("forge.dedup_skip_above must be in (0,1] and is required when dedup_backend is jev, got %g", c.Forge.DedupSkipAbove)
-			}
-			if c.Forge.DedupAnnotateAbove <= 0 || c.Forge.DedupAnnotateAbove > 1 {
-				return fmt.Errorf("forge.dedup_annotate_above must be in (0,1] and is required when dedup_backend is jev, got %g", c.Forge.DedupAnnotateAbove)
-			}
-			if c.Forge.DedupSkipAbove <= c.Forge.DedupAnnotateAbove {
-				return fmt.Errorf("forge.dedup_skip_above (%g) must be greater than forge.dedup_annotate_above (%g), or the tiers are unorderable",
-					c.Forge.DedupSkipAbove, c.Forge.DedupAnnotateAbove)
-			}
+	if b := c.Forge.DedupBackend; b != "" && !slices.Contains(DedupBackends, b) {
+		return fmt.Errorf("forge.dedup_backend %q is not valid (%s)", b, strings.Join(DedupBackends, "|"))
+	}
+	if c.Forge.DedupBackend == "jev" && c.DecisionModelUsable() {
+		if c.Forge.DedupSkipAbove <= 0 || c.Forge.DedupSkipAbove > 1 {
+			return fmt.Errorf("forge.dedup_skip_above must be in (0,1] and is required when dedup_backend is jev, got %g", c.Forge.DedupSkipAbove)
 		}
-	default:
-		return fmt.Errorf("forge.dedup_backend %q is not valid (bm25|jev)", b)
+		if c.Forge.DedupAnnotateAbove <= 0 || c.Forge.DedupAnnotateAbove > 1 {
+			return fmt.Errorf("forge.dedup_annotate_above must be in (0,1] and is required when dedup_backend is jev, got %g", c.Forge.DedupAnnotateAbove)
+		}
+		if c.Forge.DedupSkipAbove <= c.Forge.DedupAnnotateAbove {
+			return fmt.Errorf("forge.dedup_skip_above (%g) must be greater than forge.dedup_annotate_above (%g), or the tiers are unorderable",
+				c.Forge.DedupSkipAbove, c.Forge.DedupAnnotateAbove)
+		}
 	}
 	// Retirement pass (opt-in): its knobs are only meaningful when enabled, and a
 	// disabled block is never validated. ApplyDefaults fills unset (0) values while
@@ -2782,11 +2787,15 @@ type Forge struct {
 	GitHost string `yaml:"git_host"`
 
 	// DedupBackend selects the file-time dedup gate: "bm25" (default, the DupScore
-	// threshold below) or "jev" (a decision model answers "same incident pattern?").
+	// threshold below) or "jev" (a decision model answers "same incident pattern?" —
+	// asked only for a top BM25 hit at or above the related-entries floor of 0.2, below
+	// which the bm25 gate decides as it always did).
 	DedupBackend string `yaml:"dedup_backend"`
 	// DedupSkipAbove / DedupAnnotateAbove are the jev backend's band edges. Above skip:
-	// do not file, record a confirmation. Between: file, naming the suspect in the body.
-	// Below annotate: file as today. Both are REQUIRED when DedupBackend is jev — a
+	// do not file, record a confirmation. Between: file, naming the suspect in the PR/MR
+	// description (never in the entry, which is what gets committed — see
+	// providers.KBEntry.SuspectedDuplicate). Below annotate: file as today. Both are
+	// REQUIRED when DedupBackend is jev — a
 	// default nobody measured would be invented rather than chosen.
 	DedupSkipAbove     float64 `yaml:"dedup_skip_above"`
 	DedupAnnotateAbove float64 `yaml:"dedup_annotate_above"`

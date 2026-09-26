@@ -8,6 +8,7 @@
 package curator
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -62,7 +63,14 @@ type Curator struct {
 	Decider            providers.Decider
 	DedupSkipAbove     float64
 	DedupAnnotateAbove float64
-	Log                *slog.Logger
+	// DedupMinScore is the top-hit BM25 score below which the Decider is not asked
+	// and the BM25 gate decides instead: the decider is a paid off-host call, and a
+	// catalog returns SOME hit for every query. 0 ⇒ relatedFloor, the floor below
+	// which a hit is not shown to the reviewer as related either. A parameter rather
+	// than the constant in place, because BM25 scores are corpus-dependent and a spend
+	// floor and a display floor will want to move apart; not yet wired to config.
+	DedupMinScore float64
+	Log           *slog.Logger
 }
 
 // Curate applies the three-step gate. It returns the created PR ref, or an empty
@@ -150,8 +158,11 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		// unless the decider itself is unreachable, in which case sameIncidentPattern
 		// returns ok=false and curation falls back to the BM25 gate below, so a third
 		// party being down never blocks curation.
+		//
+		// Not below DedupMinScore: the decider is a paid off-host call, and below the
+		// floor the BM25 gate decides as it always did (see the field's doc).
 		tiered := false
-		if c.Decider != nil {
+		if c.Decider != nil && hits[0].Score >= cmp.Or(c.DedupMinScore, relatedFloor) {
 			if prob, ok := c.sameIncidentPattern(ctx, inv, hits[0]); ok {
 				tiered = true
 				switch {
@@ -316,19 +327,23 @@ func (c *Curator) sameIncidentPattern(ctx context.Context, inv providers.Investi
 		state += "\nalert_resource: " + hit.Entry.AlertResource
 	}
 	state += "\n" + hit.Entry.Title + "\n" + hit.Entry.Description
+	started := time.Now()
 	ans, err := c.Decider.Decide(ctx, state, []providers.Question{{
 		ID:   dedupQuestionID,
 		Kind: providers.KindNoul,
 		Instructions: "The proposed finding and the existing catalog entry describe the SAME incident pattern: " +
 			"the same resource failing the same way for the same reason. A different fault on the same workload is NOT the same pattern.",
 	}})
+	a, ok := ans[dedupQuestionID]
+	if err == nil && !ok {
+		// Counted as an error: the fallback is identical, and an ok here would hide it.
+		err = fmt.Errorf("decider returned no %q answer", dedupQuestionID)
+	}
+	// The same series the reranker's decider calls land on, so an outage here is as
+	// visible as one there — it used to be a Warn line and a flat metric.
+	c.Metrics.RecordModelRequest(ctx, "decide", started, err)
 	if err != nil {
 		c.Log.Warn("dedup decider failed; falling back to the BM25 gate", "err", err)
-		return 0, false
-	}
-	a, ok := ans[dedupQuestionID]
-	if !ok {
-		c.Log.Warn("dedup decider returned no answer; falling back to the BM25 gate")
 		return 0, false
 	}
 	if c.Metrics != nil {
