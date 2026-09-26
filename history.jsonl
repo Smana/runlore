@@ -44,3 +44,4 @@
 {"at":"2026-09-23T10:54:28Z","model":"openai/glm-4.5-air","n":5,"pass_rate":0.8333333333333334,"reached":5,"total":6,"input_tokens":1212648,"output_tokens":58450,"cost_usd":0.3068246}
 {"at":"2026-09-24T11:18:05Z","model":"openai/glm-4.5-air","n":5,"pass_rate":0.7142857142857143,"reached":5,"total":7,"input_tokens":1363582,"output_tokens":61851,"cost_usd":0.3407525}
 {"at":"2026-09-25T11:17:59Z","model":"openai/glm-4.5-air","n":5,"pass_rate":0.7142857142857143,"reached":5,"total":7,"input_tokens":1489348,"output_tokens":68303,"cost_usd":0.3730029000000001}
+{"at":"2026-09-26T11:00:52Z","model":"openai/glm-4.5-air","n":5,"pass_rate":0.7142857142857143,"reached":5,"total":7,"input_tokens":1606841,"output_tokens":68538,"cost_usd":0.39676}
