@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -113,29 +112,31 @@ func (c *Client) Decide(ctx context.Context, state string, qs []providers.Questi
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	newReq := func() (*http.Request, error) {
-		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+decidePath, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		r.Header.Set("Content-Type", "application/json")
-		if c.apiKey != "" {
-			r.Header.Set("Authorization", "Bearer "+c.apiKey)
-		}
-		return r, nil
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+decidePath, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
 	}
-	// attempts=1: no retry. The reranker sits on the recall critical path with a FREE
-	// fall-through (a rejected/failed decide just falls through to the full
-	// investigation it was going to run anyway), unlike internal/embed's retry, which
-	// guards a call with no such fall-through. Retrying a rate limit here would mean
-	// waiting up to 30s of backoff per hop before doing what a single failure already
-	// triggers for free — pure added latency in front of a gate that doesn't need it.
-	resp, err := httpx.DoWithRetry(ctx, c.http, 1, newReq)
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	// One attempt, deliberately, and a plain Do rather than httpx.DoWithRetry at one
+	// attempt (which is the same call behind a retry loop that never loops). The
+	// reranker sits on the recall critical path with a FREE fall-through (a
+	// rejected/failed decide just falls through to the full investigation it was going
+	// to run anyway), unlike internal/embed's retry, which guards a call with no such
+	// fall-through. Retrying a rate limit here would mean waiting up to 30s of backoff
+	// per hop before doing what a single failure already triggers for free — pure added
+	// latency in front of a gate that doesn't need it.
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("decide request: %w", err)
 	}
 	defer func() { httpx.Drain(resp.Body); _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
+	// Capped, like every other backend client: base_url is operator-configurable, so
+	// the body is untrusted in size as well as content, and this is a few KB of JSON
+	// on the recall path — never something to allocate without bound.
+	data, err := httpx.ReadBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

@@ -150,8 +150,15 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		// unless the decider itself is unreachable, in which case sameIncidentPattern
 		// returns ok=false and curation falls back to the BM25 gate below, so a third
 		// party being down never blocks curation.
+		//
+		// Not below relatedFloor: the decider is a paid third-party call that carries
+		// the finding's text off-host, and a 200-entry catalog returns SOME hit for every
+		// query — at 0.02, an entry nobody would call related. The reranker guards its
+		// call with rerank_min_score; this guard is the floor relatedEntries already
+		// applies, below which a hit is not even shown to the reviewer. Below it the
+		// BM25 gate decides, as it always did.
 		tiered := false
-		if c.Decider != nil {
+		if c.Decider != nil && hits[0].Score >= relatedFloor {
 			if prob, ok := c.sameIncidentPattern(ctx, inv, hits[0]); ok {
 				tiered = true
 				switch {
@@ -316,12 +323,16 @@ func (c *Curator) sameIncidentPattern(ctx context.Context, inv providers.Investi
 		state += "\nalert_resource: " + hit.Entry.AlertResource
 	}
 	state += "\n" + hit.Entry.Title + "\n" + hit.Entry.Description
+	started := time.Now()
 	ans, err := c.Decider.Decide(ctx, state, []providers.Question{{
 		ID:   dedupQuestionID,
 		Kind: providers.KindNoul,
 		Instructions: "The proposed finding and the existing catalog entry describe the SAME incident pattern: " +
 			"the same resource failing the same way for the same reason. A different fault on the same workload is NOT the same pattern.",
 	}})
+	// The same series the reranker's decider calls land on, so an outage here is as
+	// visible as one there — it used to be a Warn line and a flat metric.
+	c.Metrics.RecordModelRequest(ctx, "decide", started, err)
 	if err != nil {
 		c.Log.Warn("dedup decider failed; falling back to the BM25 gate", "err", err)
 		return 0, false

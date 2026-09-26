@@ -724,10 +724,12 @@ type InstantRecall struct {
 	// mode (corrupt/stale/missing file) degrades to a cold re-embed.
 	VectorCache VectorCache `yaml:"vector_cache"`
 
-	// RerankBackend selects the reranking backend: "llm" (default, the configured model)
-	// or "jev" (a decision model answers "same incident pattern?"). InstantRecall runs
-	// only when enabled; this field names which backend runs when it does. Empty defaults
-	// to llm in ApplyDefaults.
+	// RerankBackend selects the reranking backend, which answers "which of these
+	// candidates, if any, is the runbook for this incident?": "llm" (default, the
+	// configured model), "jev" (a decision model answers instead) or "shadow" (both run,
+	// the LLM decides, the decider's agreement is recorded). InstantRecall runs only when
+	// enabled; this field names which backend runs when it does. Empty defaults to llm
+	// in ApplyDefaults.
 	RerankBackend string `yaml:"rerank_backend"`
 	// RerankThresholdJev is the jev backend's calibrated confidence bar. Required when
 	// rerank_backend is jev and decision_model is enabled. Must be in (0,1].
@@ -2785,8 +2787,10 @@ type Forge struct {
 	// threshold below) or "jev" (a decision model answers "same incident pattern?").
 	DedupBackend string `yaml:"dedup_backend"`
 	// DedupSkipAbove / DedupAnnotateAbove are the jev backend's band edges. Above skip:
-	// do not file, record a confirmation. Between: file, naming the suspect in the body.
-	// Below annotate: file as today. Both are REQUIRED when DedupBackend is jev — a
+	// do not file, record a confirmation. Between: file, naming the suspect in the PR/MR
+	// description (never in the entry, which is what gets committed — see
+	// providers.KBEntry.SuspectedDuplicate). Below annotate: file as today. Both are
+	// REQUIRED when DedupBackend is jev — a
 	// default nobody measured would be invented rather than chosen.
 	DedupSkipAbove     float64 `yaml:"dedup_skip_above"`
 	DedupAnnotateAbove float64 `yaml:"dedup_annotate_above"`

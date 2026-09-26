@@ -339,8 +339,9 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   being reached at all (see [Observability]({{< relref "/docs/operations/observability.md" >}})).
   If the ratio is bad, raise `rerank_min_score` toward your corpus's real score regime — that trades
   recall coverage for calls not made.
-- `instant_recall.rerank_backend` — which backend answers the reranker's "same incident pattern?"
-  question: `llm` (default, the configured `model`, described above) · `jev` (a `decision_model`
+- `instant_recall.rerank_backend` — which backend answers the reranker's question, "which of these
+  candidates, if any, is the runbook for this incident?": `llm` (default, the configured `model`,
+  described above) · `jev` (a `decision_model`
   answers instead — off by default, requires `decision_model.enabled`) · `shadow` (both run; `jev`'s
   verdict is recorded for comparison and discarded, `llm` still decides — see
   [`decision_model`](#decision_model--a-non-generative-decider) below). An investigation's outcome
@@ -540,7 +541,8 @@ answers "same incident pattern?" — off by default, requires `decision_model.en
 into **three tiers** via two required band edges, `dedup_skip_above` and `dedup_annotate_above` (both
 probabilities in `(0,1]`, and `dedup_skip_above` must exceed `dedup_annotate_above`): above
 `dedup_skip_above` the candidate is a confident duplicate — skipped, recorded as a confirmation, no
-PR; between the two edges it still files, but **with the suspect named in the body** so the reviewer
+PR; between the two edges it still files, but **with the suspect named in the pull request's
+description** (never in the entry itself, which is what gets committed) so the reviewer
 decides; below `dedup_annotate_above` it files as today. No tier can close or skip a
 human-labelled artifact.
 
