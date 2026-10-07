@@ -6,7 +6,7 @@ Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlo
 lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 ```
 
-**Latest run:** 2026-10-06T12:55:42Z · model `openai/glm-4.5-air` · **2/7 scenarios reached (29%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.42 (1.7M in / 73.2k out tokens)
+**Latest run:** 2026-10-07T12:48:29Z · model `openai/glm-4.5-air` · **3/7 scenarios reached (43%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.43 (1.7M in / 76.8k out tokens)
 
 ## Scenarios (latest run)
 
@@ -14,11 +14,11 @@ lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 |---|---|---|---|---|---|
 | gitops-broken-kustomization | ✅ PASS | 100% (n=5) | 0.90 | — | — |
 | harbor-chart-bump | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | harbor-db |
-| hpa-ceiling-saturation | ❌ MISS | 0% (n=5) | 0.80 | — | autoscal\|hpa, over-claimed: quote-engine |
-| node-eviction-no-commons | ⚠️ FLAKY | 60% (n=5) | 0.70 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
+| hpa-ceiling-saturation | ❌ MISS | 20% (n=5) | 0.90 | — | over-claimed: quote-engine |
+| node-eviction-no-commons | ❌ MISS | 0% (n=5) | 0.80 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
 | node-eviction-with-commons | ✅ PASS | 100% (n=5) | 0.90 | fired 0/5 · short-circuit 0/5 (expect: rejected) | — |
 | poisoned-recall-rejected | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | pull |
-| poisoned-recall-verify | ⚠️ FLAKY | 40% (n=5) | 1.00 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | eval-victim, pull |
+| poisoned-recall-verify | ✅ PASS | 100% (n=5) | 1.00 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | — |
 
 ## Cost per investigation
 
@@ -26,11 +26,11 @@ Median provider-reported tokens per case on `openai/glm-4.5-air`, priced at $0.2
 
 | path | cases | median in tok | median out tok | est. cost |
 |---|---|---|---|---|
-| full investigation | 7 | 32.3k | 1.5k | $0.008 |
+| full investigation | 7 | 32.4k | 1.7k | $0.008 |
 
 ## Confidence calibration
 
-- **Confidently wrong** (missed with median confidence ≥ 0.70): 5 — harbor-chart-bump, hpa-ceiling-saturation, node-eviction-no-commons, poisoned-recall-rejected, poisoned-recall-verify
+- **Confidently wrong** (missed with median confidence ≥ 0.70): 4 — harbor-chart-bump, hpa-ceiling-saturation, node-eviction-no-commons, poisoned-recall-rejected
 - **Underconfident** (reached with median confidence < 0.50): none
 
 ## History
@@ -39,6 +39,7 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 
 | date | model | reached | pass-rate | est. cost |
 |---|---|---|---|---|
+| 2026-10-07T12:48:29Z | openai/glm-4.5-air | 3/7 | 43% | $0.43 |
 | 2026-10-06T12:55:42Z | openai/glm-4.5-air | 2/7 | 29% | $0.42 |
 | 2026-10-05T13:41:17Z | openai/glm-4.5-air | 5/7 | 71% | $0.36 |
 | 2026-10-04T12:01:11Z | openai/glm-4.5-air | 2/7 | 29% | $0.40 |
@@ -68,4 +69,3 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 | 2026-09-10T10:41:10Z | openai/glm-4.5-air | 2/6 | 33% | $0.34 |
 | 2026-09-09T11:04:57Z | openai/glm-4.5-air | 2/6 | 33% | $0.31 |
 | 2026-09-08T10:47:50Z | openai/glm-4.5-air | 3/6 | 50% | $0.34 |
-| 2026-09-07T11:40:44Z | openai/glm-4.5-air | 2/6 | 33% | $0.31 |
