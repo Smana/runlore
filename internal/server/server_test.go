@@ -522,3 +522,47 @@ func TestSlackResponseBodyReplaceFlag(t *testing.T) {
 		t.Fatalf("feedback ack must be ephemeral (clicker-only), got %s", fb)
 	}
 }
+
+func TestFactoryWebhookRoute(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	s := New(nil, Actions{Factory: h}, nil, nil, nil, nil, discardLog)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/factory/webhook", strings.NewReader("{}")))
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("with Actions.Factory the route answers from its handler: %d", w.Code)
+	}
+	s = New(nil, Actions{}, nil, nil, nil, nil, discardLog)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/factory/webhook", strings.NewReader("{}")))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("without it the route does not exist: %d", w.Code)
+	}
+	var typedNil *http.ServeMux
+	s = New(nil, Actions{Factory: typedNil}, nil, nil, nil, nil, discardLog)
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/factory/webhook", strings.NewReader("{}")))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("a typed-nil handler is no handler: %d", w.Code)
+	}
+}
+
+func TestFactoryWebhookIsForwardedByAFollower(t *testing.T) {
+	// A follower relays the request, headers and body unchanged, so the signature verifies on the leader.
+	var gotSig, gotBody string
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotSig, gotBody = r.Header.Get("webhook-signature"), string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer leader.Close()
+	fwd := &Forward{IsLeader: func() bool { return false }, LeaderAddr: func() string { return strings.TrimPrefix(leader.URL, "http://") },
+		SelfName: "me", LeaderName: func() string { return "other" }, Log: discardLog}
+	s := New(nil, Actions{Factory: http.NotFoundHandler()}, nil, nil, nil, fwd, discardLog)
+	r := httptest.NewRequest(http.MethodPost, "/factory/webhook", strings.NewReader(`{"type":"x"}`))
+	r.Header.Set("webhook-signature", "v1,abc")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent || gotSig != "v1,abc" || gotBody != `{"type":"x"}` {
+		t.Fatalf("%d %q %q", w.Code, gotSig, gotBody)
+	}
+}
