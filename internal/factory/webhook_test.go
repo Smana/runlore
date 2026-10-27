@@ -261,11 +261,12 @@ func TestReceiverThreadLines(t *testing.T) {
 		{`{"type":"room.task_received","room":"abcdefgh"}`, "Agent factory task `abcdefgh` took this incident; its public stub is issue #42."},
 		{`{"type":"room.task_received","room":"fix00001","origin":"abcdefgh"}`, "The fix was published and started as task `fix00001`."},
 		{`{"type":"room.pr_opened","room":"fix00001","pr":7,"origin":"abcdefgh"}`, "The fix's pull request is #7."},
-		{`{"type":"room.waiting_for_human","room":"fix00001","reason":"review_requested","origin":"abcdefgh"}`, "The fix waits for a human: review_requested."},
+		{`{"type":"room.waiting_for_human","room":"fix00001","reason":"review_requested","origin":"abcdefgh"}`, "The fix waits for a human: `review_requested`."},
 		{`{"type":"room.merged","room":"fix00001","pr":7,"origin":"abcdefgh"}`, "The fix #7 is merged."},
+		{`{"type":"room.pr_opened","room":"abcdefgh","pr":3}`, "Agent factory task `abcdefgh` opened pull request #3."},
 		{`{"type":"room.reverted","room":"fix00001","pr":7,"origin":"abcdefgh"}`, "The fix #7 was reverted."},
-		{`{"type":"room.ended","room":"fix00001","state":"done","origin":"abcdefgh"}`, "The fix's task ended: done."},
-		{`{"type":"room.ended","room":"abcdefgh","state":"done"}`, "Agent factory task `abcdefgh` ended: done. A maintainer publishes its proposal with `factory/publish`."},
+		{`{"type":"room.ended","room":"fix00001","state":"done","origin":"abcdefgh"}`, "The fix's task ended: `done`."},
+		{`{"type":"room.ended","room":"abcdefgh","state":"done"}`, "Agent factory task `abcdefgh` ended: `done`. A maintainer publishes its proposal with `factory/publish`."},
 	} {
 		before := len(g.rep.got)
 		if got := g.post(sign(g.key, "t"+strconv.Itoa(i), g.now, []byte(c.body)), c.body); got != http.StatusNoContent {

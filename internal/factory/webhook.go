@@ -287,13 +287,16 @@ func threadLine(ev Event, rec Record) string {
 		return fmt.Sprintf("Agent factory task `%s` took this incident; its public stub is issue #%d.", room, rec.Issue)
 	case "room.ended":
 		if fix {
-			return fmt.Sprintf("The fix's task ended: %s.", code(ev.State))
+			return fmt.Sprintf("The fix's task ended: `%s`.", code(ev.State))
 		}
-		return fmt.Sprintf("Agent factory task `%s` ended: %s. A maintainer publishes its proposal with `factory/publish`.", room, code(ev.State))
+		return fmt.Sprintf("Agent factory task `%s` ended: `%s`. A maintainer publishes its proposal with `factory/publish`.", room, code(ev.State))
 	case "room.pr_opened":
+		if !fix {
+			return fmt.Sprintf("Agent factory task `%s` opened pull request #%d.", room, ev.PR)
+		}
 		return fmt.Sprintf("The fix's pull request is #%d.", ev.PR)
 	case "room.waiting_for_human":
-		return fmt.Sprintf("The fix waits for a human: %s.", code(ev.Reason))
+		return fmt.Sprintf("The fix waits for a human: `%s`.", code(ev.Reason))
 	case "room.merged":
 		return fmt.Sprintf("The fix #%d is merged.", ev.PR)
 	case "room.reverted":
