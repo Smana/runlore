@@ -49,6 +49,7 @@ type Config struct {
 	Notify        Notify        `yaml:"notify"`         // chat delivery for findings
 	Catalog       Catalog       `yaml:"catalog"`        // OKF knowledge catalog
 	Outcome       Outcome       `yaml:"outcome"`        // learning-loop outcome ledger
+	Factory       Factory       `yaml:"factory"`        // agent factory client and webhook receiver; empty url disables it
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
@@ -73,6 +74,59 @@ type Config struct {
 type Logging struct {
 	Format string `yaml:"format"` // "text" (default) | "json"
 	Level  string `yaml:"level"`  // "debug" | "info" (default) | "warn" | "error"
+}
+
+// Factory configures the agent-factory integration: RunLore files each finding
+// as a task with the factory's API and follows it through the broker's signed
+// webhooks. Secrets are env var NAMES, never values. An empty URL turns the
+// whole integration off.
+type Factory struct {
+	URL             string         `yaml:"url"`               // factory API base URL; empty disables the integration
+	TokenURL        string         `yaml:"token_url"`         // OAuth2 token endpoint (client credentials); https only
+	ClientIDEnv     string         `yaml:"client_id_env"`     // env var holding the client id
+	ClientSecretEnv string         `yaml:"client_secret_env"` // env var holding the client secret
+	ProjectIDEnv    string         `yaml:"project_id_env"`    // env var holding the identity provider project id (token audience)
+	Repository      string         `yaml:"repository"`        // owner/name the factory works on
+	MaxCostUSD      float64        `yaml:"max_cost_usd"`      // per-task cost ceiling sent with each task; must be above 0
+	Webhook         FactoryWebhook `yaml:"webhook"`           // the inbound webhook receiver
+}
+
+// FactoryWebhook configures the receiver of the broker's Standard Webhooks.
+type FactoryWebhook struct {
+	SecretEnv string `yaml:"secret_env"` // env var holding one or two base64 signing keys, one per line
+}
+
+// Enabled reports whether the factory integration is configured.
+func (f Factory) Enabled() bool { return f.URL != "" }
+
+// validateFactory checks the factory block when it is enabled.
+func validateFactory(f Factory) error {
+	if !f.Enabled() {
+		return nil
+	}
+	if f.TokenURL == "" {
+		return fmt.Errorf("factory.token_url is required when factory.url is set")
+	}
+	if !strings.HasPrefix(f.TokenURL, "https://") {
+		return fmt.Errorf("factory.token_url must be https (client credentials never travel in clear), got %q", f.TokenURL)
+	}
+	for name, v := range map[string]string{
+		"factory.client_id_env":      f.ClientIDEnv,
+		"factory.client_secret_env":  f.ClientSecretEnv,
+		"factory.project_id_env":     f.ProjectIDEnv,
+		"factory.webhook.secret_env": f.Webhook.SecretEnv,
+	} {
+		if v == "" {
+			return fmt.Errorf("%s is required when factory.url is set", name)
+		}
+	}
+	if owner, repo, ok := strings.Cut(f.Repository, "/"); !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return fmt.Errorf("factory.repository must be owner/name, got %q", f.Repository)
+	}
+	if f.MaxCostUSD <= 0 {
+		return fmt.Errorf("factory.max_cost_usd must be above 0, got %v", f.MaxCostUSD)
+	}
+	return nil
 }
 
 // Endpoint is a backend base URL with optional auth; empty URL disables the
@@ -2016,6 +2070,9 @@ var (
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
 func (c *Config) Validate() error {
+	if err := validateFactory(c.Factory); err != nil {
+		return err
+	}
 	if err := validateCloud(c.Cloud); err != nil {
 		return err
 	}
