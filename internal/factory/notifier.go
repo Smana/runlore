@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
@@ -25,6 +26,10 @@ type Notifier struct {
 
 var _ providers.Notifier = (*Notifier)(nil)
 
+// deliverTimeout bounds one Deliver, retries included: notify.Multi delivers sequentially on the
+// investigation path with no deadline of its own.
+const deliverTimeout = 20 * time.Second
+
 // Deliver posts the finding to the factory under the TriggerKey. An investigation without a
 // TriggerKey, or a disabled client, is skipped. A 202 or a 429 is logged and not an error; a 503
 // that outlasts the client's retries is.
@@ -32,6 +37,8 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 	if inv.TriggerKey == "" || !n.Client.Enabled() {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, deliverTimeout)
+	defer cancel()
 	p := notify.NewPayload(inv)
 	req := TaskRequest{
 		Repository: n.Repository,

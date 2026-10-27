@@ -68,7 +68,7 @@ func (f *fakeFactory) server(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func init() { retrySleep = func(time.Duration) {} }
+func init() { retrySleep = func(context.Context, time.Duration) error { return nil } }
 
 func newTestClient(t *testing.T, f *fakeFactory, clock *time.Time) *Client {
 	srv := f.server(t)
@@ -137,5 +137,26 @@ func TestClientOffWithoutItsEnv(t *testing.T) {
 		func(string) string { return "" }, &http.Client{}, time.Now)
 	if c.Enabled() {
 		t.Fatal("empty credentials: off")
+	}
+}
+
+func TestRetrySleepHonoursTheContext(t *testing.T) {
+	saved := retrySleep
+	t.Cleanup(func() { retrySleep = saved })
+	retrySleep = defaultRetrySleep
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	if err := retrySleep(ctx, time.Minute); err == nil || time.Since(start) > time.Second {
+		t.Fatalf("a cancelled context ends the wait at once: %v", err)
+	}
+	clock := time.Unix(1_800_000_000, 0)
+	c := newTestClient(t, &fakeFactory{ttl: time.Hour, script: []int{503, 503, 503}}, &clock)
+	retrySleep = defaultRetrySleep
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel2()
+	start = time.Now()
+	if _, err := c.CreateTask(ctx2, "k", req); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("CreateTask gives up when its context ends, not after the 1 s and 3 s waits: %v after %s", err, time.Since(start))
 	}
 }

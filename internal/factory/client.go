@@ -33,8 +33,20 @@ const tokenSkew = 60 * time.Second
 // retryDelays are the waits before the second and third attempt of a CreateTask.
 var retryDelays = []time.Duration{time.Second, 3 * time.Second}
 
-// retrySleep waits between attempts; tests replace it with a no-op.
-var retrySleep = time.Sleep
+// retrySleep waits between attempts and returns early, with the context's error, when ctx ends;
+// tests replace it with a no-op.
+var retrySleep = defaultRetrySleep
+
+func defaultRetrySleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
 
 // Incident is the finding's identity, as the factory's task API names it.
 type Incident struct {
@@ -159,7 +171,9 @@ func (c *Client) CreateTask(ctx context.Context, key string, req TaskRequest) (C
 	var lastErr error
 	for attempt := 0; attempt <= len(retryDelays); attempt++ {
 		if attempt > 0 {
-			retrySleep(retryDelays[attempt-1])
+			if err := retrySleep(ctx, retryDelays[attempt-1]); err != nil {
+				return Created{}, fmt.Errorf("factory: %w (last: %w)", err, lastErr)
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			return Created{}, err

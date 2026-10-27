@@ -5,7 +5,9 @@ package factory
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,3 +134,22 @@ func TestDeliverADuplicateKeepsTheState(t *testing.T) {
 		t.Fatalf("the same room keeps its state: %+v", r)
 	}
 }
+
+func TestDeliverHasItsOwnDeadline(t *testing.T) {
+	n, _, _, _ := newTestNotifier(t, []int{201})
+	var got time.Duration
+	n.Client.hc.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if d, ok := r.Context().Deadline(); ok {
+			got = time.Until(d)
+		}
+		return nil, errors.New("stop")
+	})
+	_ = n.Deliver(context.Background(), testInvestigation())
+	if got <= 0 || got > deliverTimeout {
+		t.Fatalf("Deliver bounds the investigation path: deadline in %s", got)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
