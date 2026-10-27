@@ -1029,6 +1029,9 @@ factory:
   provider with the OAuth2 client-credentials grant (`token_url` must be `https`) and caches the
   token until a minute before it expires. With `url` set but one of the three credential variables
   empty, the client stays off and one warning at start names the variable.
+- **`url` may be plain `http` only inside the cluster** (a `svc.cluster.local` address behind a
+  NetworkPolicy). The bearer token travels with every call, so use `https` for anything that
+  leaves the cluster; only `token_url` is enforced to be `https`.
 - **`repository`** is the `owner/name` the factory works on; **`max_cost_usd`** is the per-task
   cost ceiling sent with each task and must be above zero. The finding text is secret-redacted
   before it leaves, and every task is `dataClass: internal`.
