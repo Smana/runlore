@@ -200,16 +200,32 @@ func (l *Ledger) Due(at time.Time) []Record {
 // Seen reports whether id was recorded within the last 10 minutes of at; when it was not, it
 // records it (persisted) and returns false.
 func (l *Ledger) Seen(id string, at time.Time) (bool, error) {
+	if seen := l.HasSeen(id, at); seen {
+		return true, nil
+	}
+	return false, l.MarkSeen(id, at)
+}
+
+// HasSeen reports whether id was recorded within the last 10 minutes of at, without recording it.
+func (l *Ledger) HasSeen(id string, at time.Time) bool {
 	if l.path == "" {
-		return false, nil
+		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if t, ok := l.seen[id]; ok && at.Sub(t) < seenWindow {
-		return true, nil
+	t, ok := l.seen[id]
+	return ok && at.Sub(t) < seenWindow
+}
+
+// MarkSeen records id as seen at at (persisted).
+func (l *Ledger) MarkSeen(id string, at time.Time) error {
+	if l.path == "" {
+		return nil
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if err := l.appendLocked(line{Seen: id, At: &at}); err != nil {
-		return false, err
+		return err
 	}
 	l.seen[id] = at
 	for k, t := range l.seen {
@@ -217,7 +233,7 @@ func (l *Ledger) Seen(id string, at time.Time) (bool, error) {
 			delete(l.seen, k)
 		}
 	}
-	return false, l.maybeCompactLocked()
+	return l.maybeCompactLocked()
 }
 
 // Register records the Slack root of key's incident thread. It is notify.ThreadSink: best-effort,

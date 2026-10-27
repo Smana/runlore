@@ -191,42 +191,45 @@ func (rc *Receiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if rc.Ledger != nil {
-		seen, err := rc.Ledger.Seen(id, now)
-		if err != nil {
-			rc.log().Error("factory webhook: recording the id failed", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		if seen {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
+	if rc.Ledger != nil && rc.Ledger.HasSeen(id, now) {
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 	var ev Event
 	if err := json.Unmarshal(body, &ev); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	rc.handle(r.Context(), ev, now)
+	if err := rc.handle(r.Context(), ev, now); err != nil {
+		// Not marked seen: the broker's retry of this id must be handled, not dropped.
+		rc.log().Error("factory webhook: handling failed", "err", err, "type", ev.Type)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if rc.Ledger != nil {
+		if err := rc.Ledger.MarkSeen(id, now); err != nil {
+			// The event is handled; a replay would only repeat an idempotent update.
+			rc.log().Error("factory webhook: recording the id failed", "err", err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // handle updates the ledger for ev and posts its thread line. An event for a room the ledger does
 // not know is ignored; the caller still gets 204.
-func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) {
+func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 	if rc.Ledger == nil || ev.Room == "" || ev.Type == "" {
-		return
+		return nil
 	}
 	rec, ok := rc.Ledger.ByRoom(ev.Room)
 	if !ok && ev.Origin != "" {
 		rec, ok = rc.Ledger.ByRoom(ev.Origin)
 	}
 	if !ok {
-		return
+		return nil
 	}
 	if ev.Room != rec.Room && rec.FixRoom != "" && rec.FixRoom != ev.Room {
-		return // a second room naming this origin: the first fix stays the incident's fix
+		return nil // a second room naming this origin: the first fix stays the incident's fix
 	}
 	var newlyMerged bool
 	err := rc.Ledger.Upsert(rec.TriggerKey, func(r *Record) {
@@ -243,8 +246,7 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) {
 		rec = *r
 	})
 	if err != nil {
-		rc.log().Error("factory webhook: updating the ledger failed", "err", err, "type", ev.Type)
-		return
+		return fmt.Errorf("updating the ledger: %w", err)
 	}
 	if line := threadLine(ev, rec); line != "" && rec.SlackRoot != "" && rc.Replier != nil {
 		if err := rc.Replier.ReplyInThread(ctx, rec.SlackRoot, rec.SlackChannel, line); err != nil {
@@ -259,6 +261,7 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) {
 			rc.OnMerged(c, key)
 		}()
 	}
+	return nil
 }
 
 // safeCode admits only the short identifier-like values the broker sends. Room text must never

@@ -12,6 +12,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -360,5 +361,26 @@ func TestReceiverKeepsTheFirstFixRoom(t *testing.T) {
 	}
 	if r, _ := g.l.Get("k1"); r.FixRoom != "fix00001" || r.PR != 7 || len(g.rep.got) != 1 {
 		t.Fatalf("%+v %v", r, g.rep.got)
+	}
+}
+
+func TestReceiverRecordsTheIDOnlyAfterHandlingIt(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions do not bind root")
+	}
+	g := newRig(t)
+	body := `{"type":"room.pr_opened","room":"abcdefgh","pr":9}`
+	h := sign(g.key, "after-1", g.now, []byte(body))
+	path := filepath.Join(filepath.Dir(g.l.path), "f.jsonl")
+	must(t, os.Chmod(path, 0o400)) // the ledger cannot be appended to
+	if got := g.post(h, body); got != http.StatusInternalServerError || len(g.rep.got) != 0 {
+		t.Fatalf("a failed handling answers 500 so the broker retries: %d", got)
+	}
+	must(t, os.Chmod(path, 0o600))
+	if got := g.post(h, body); got != http.StatusNoContent || len(g.rep.got) != 1 {
+		t.Fatalf("the retry of the same id is handled, not dropped as seen: %d %v", got, g.rep.got)
+	}
+	if got := g.post(h, body); got != http.StatusNoContent || len(g.rep.got) != 1 {
+		t.Fatalf("and a replay after that is dropped: %d", got)
 	}
 }
