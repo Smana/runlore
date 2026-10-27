@@ -119,12 +119,13 @@ func IdempotencyKey(triggerKey string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// accessToken returns the cached token, fetching a new one within 60 s of its expiry.
-func (c *Client) accessToken(ctx context.Context) (string, error) {
+// accessToken returns the cached token, fetching a new one within 60 s of its expiry. retry is
+// true for a failure worth another attempt: a transport error or a 5xx from the token endpoint.
+func (c *Client) accessToken(ctx context.Context) (tok string, retry bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.token != "" && c.now().Add(tokenSkew).Before(c.expires) {
-		return c.token, nil
+		return c.token, false, nil
 	}
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
@@ -134,31 +135,31 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", httpx.SanitizeURLError(err)
+		return "", false, httpx.SanitizeURLError(err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("factory token: %w", httpx.SanitizeURLError(err))
+		return "", true, fmt.Errorf("factory token: %w", httpx.SanitizeURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return "", fmt.Errorf("factory token: read: %w", err)
+		return "", true, fmt.Errorf("factory token: read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("factory token: status %d", resp.StatusCode)
+		return "", resp.StatusCode >= 500, fmt.Errorf("factory token: status %d", resp.StatusCode)
 	}
 	var tr struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   int    `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &tr); err != nil || tr.AccessToken == "" {
-		return "", errors.New("factory token: malformed response")
+		return "", false, errors.New("factory token: malformed response")
 	}
 	c.token = tr.AccessToken
 	c.expires = c.now().Add(time.Duration(tr.ExpiresIn) * time.Second)
-	return c.token, nil
+	return c.token, false, nil
 }
 
 // CreateTask posts the task. A 503 or a transport error is retried twice more with the same key,
@@ -205,9 +206,9 @@ func (c *Client) dropToken() {
 
 // postTask makes one attempt; retry is true for a 503 or a transport error.
 func (c *Client) postTask(ctx context.Context, key string, payload []byte) (Created, bool, error) {
-	tok, err := c.accessToken(ctx)
+	tok, retry, err := c.accessToken(ctx)
 	if err != nil {
-		return Created{}, false, err
+		return Created{}, retry, err
 	}
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.URL, "/")+"/v1/tasks", bytes.NewReader(payload))
 	if err != nil {

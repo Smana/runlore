@@ -5,6 +5,7 @@ package factory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,12 +20,13 @@ import (
 // fakeFactory is ZITADEL's token endpoint and the factory's API in one server: tokens expire after
 // ttl, and /v1/tasks answers from script, one reply per call, recording each Idempotency-Key.
 type fakeFactory struct {
-	ttl     time.Duration
-	tokens  atomic.Int32
-	keys    []string
-	bodies  []TaskRequest
-	newRoom string // when set, 201 answers carry this room
-	script  []int
+	ttl        time.Duration
+	tokens     atomic.Int32
+	keys       []string
+	bodies     []TaskRequest
+	tokenFails int    // the first N token requests answer 503
+	newRoom    string // when set, 201 answers carry this room
+	script     []int
 }
 
 func (f *fakeFactory) server(t *testing.T) *httptest.Server {
@@ -34,6 +36,11 @@ func (f *fakeFactory) server(t *testing.T) *httptest.Server {
 			_ = r.ParseForm()
 			if r.Form.Get("grant_type") != "client_credentials" || !strings.Contains(r.Form.Get("scope"), "urn:zitadel:iam:org:project:id:proj1:aud") {
 				http.Error(w, "bad", http.StatusBadRequest)
+				return
+			}
+			if f.tokenFails > 0 {
+				f.tokenFails--
+				http.Error(w, "down", http.StatusServiceUnavailable)
 				return
 			}
 			n := f.tokens.Add(1)
@@ -173,5 +180,29 @@ func TestCreateTaskRefreshesTheTokenOnce401(t *testing.T) {
 	got, err = c.CreateTask(context.Background(), "k2", req)
 	if err != nil || got.Status != 401 || f.tokens.Load() != 3 {
 		t.Fatalf("a second 401 is returned, not looped on: %+v %v, %d tokens", got, err, f.tokens.Load())
+	}
+}
+
+func TestCreateTaskRetriesAFailingTokenEndpoint(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	f := &fakeFactory{ttl: time.Hour, tokenFails: 2, script: []int{201}}
+	c := newTestClient(t, f, &clock)
+	if got, err := c.CreateTask(context.Background(), "k1", req); err != nil || got.Status != 201 {
+		t.Fatalf("a 5xx from the token endpoint is retried: %+v %v", got, err)
+	}
+	f = &fakeFactory{ttl: time.Hour, tokenFails: 3, script: []int{201}}
+	c = newTestClient(t, f, &clock)
+	if _, err := c.CreateTask(context.Background(), "k1", req); err == nil {
+		t.Fatal("three token failures are an error")
+	}
+	// A transport error on the token call is retried too.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Close() // nothing listens: connection refused
+	c = NewClient(config.Factory{URL: srv.URL, TokenURL: srv.URL, ClientIDEnv: "ID", ClientSecretEnv: "S", ProjectIDEnv: "P"},
+		func(string) string { return "x" }, &http.Client{}, func() time.Time { return clock })
+	var dials int
+	c.hc.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) { dials++; return nil, errors.New("refused") })
+	if _, err := c.CreateTask(context.Background(), "k1", req); err == nil || dials != 3 {
+		t.Fatalf("a token transport error is retried like a task one: %d dials, %v", dials, err)
 	}
 }
