@@ -22,6 +22,7 @@ type fakeFactory struct {
 	ttl    time.Duration
 	tokens atomic.Int32
 	keys   []string
+	bodies []TaskRequest
 	script []int
 }
 
@@ -38,6 +39,9 @@ func (f *fakeFactory) server(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": fmt.Sprintf("tok%d", n), "expires_in": f.ttl.Milliseconds() / 1000})
 		case "/v1/tasks":
 			f.keys = append(f.keys, r.Header.Get("Idempotency-Key"))
+			var tr TaskRequest
+			_ = json.NewDecoder(r.Body).Decode(&tr)
+			f.bodies = append(f.bodies, tr)
 			code := f.script[0]
 			f.script = f.script[1:]
 			w.WriteHeader(code)

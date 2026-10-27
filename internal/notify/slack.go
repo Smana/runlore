@@ -85,7 +85,7 @@ func init() {
 				if sl.SilenceButton {
 					b.SilenceWindows = d.Cfg.Notify.Silence.Std()
 				}
-				if sl.ThreadCapture {
+				if sl.ThreadCapture || d.Cfg.Factory.Enabled() {
 					b.Threads = d.Threads
 				}
 				return b, nil
@@ -1244,6 +1244,10 @@ type Multi struct {
 func NewMulti(log *slog.Logger, notifiers ...providers.Notifier) *Multi {
 	return &Multi{notifiers: notifiers, log: log}
 }
+
+// Add appends notifiers to the fan-out. Call it before the first Deliver: it is not safe
+// concurrently with one.
+func (m *Multi) Add(n ...providers.Notifier) { m.notifiers = append(m.notifiers, n...) }
 
 var (
 	_ providers.Notifier         = (*Multi)(nil)
