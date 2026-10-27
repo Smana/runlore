@@ -78,7 +78,7 @@ func TestDeliverRefusalsWriteNothing(t *testing.T) {
 	if err := n.Deliver(context.Background(), testInvestigation()); err != nil {
 		t.Fatalf("a 429 is logged, not an error: %v", err)
 	}
-	if _, ok := l.Get("k1"); ok || !strings.Contains(logs.String(), "principal_daily_tasks") {
+	if _, ok := l.Get("k1"); ok || !strings.Contains(logs.String(), "principal_daily_tasks") || !strings.Contains(logs.String(), "level=INFO") {
 		t.Fatalf("429: ledger written or reason not logged: %s", logs.String())
 	}
 }
@@ -153,3 +153,13 @@ func TestDeliverHasItsOwnDeadline(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestDeliverOtherRefusalsLogAtWarn(t *testing.T) {
+	n, _, l, logs := newTestNotifier(t, []int{400})
+	if err := n.Deliver(context.Background(), testInvestigation()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := l.Get("k1"); ok || !strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("a refusal that is not 202 or 429 is a warning: %s", logs.String())
+	}
+}

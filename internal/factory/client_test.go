@@ -160,3 +160,18 @@ func TestRetrySleepHonoursTheContext(t *testing.T) {
 		t.Fatalf("CreateTask gives up when its context ends, not after the 1 s and 3 s waits: %v after %s", err, time.Since(start))
 	}
 }
+
+func TestCreateTaskRefreshesTheTokenOnce401(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	f := &fakeFactory{ttl: time.Hour, script: []int{401, 201}}
+	c := newTestClient(t, f, &clock)
+	got, err := c.CreateTask(context.Background(), "k1", req)
+	if err != nil || got.Status != 201 || f.tokens.Load() != 2 {
+		t.Fatalf("a revoked token is dropped and the call retried once: %+v %v, %d tokens", got, err, f.tokens.Load())
+	}
+	f.script = []int{401, 401}
+	got, err = c.CreateTask(context.Background(), "k2", req)
+	if err != nil || got.Status != 401 || f.tokens.Load() != 3 {
+		t.Fatalf("a second 401 is returned, not looped on: %+v %v, %d tokens", got, err, f.tokens.Load())
+	}
+}

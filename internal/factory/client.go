@@ -169,6 +169,7 @@ func (c *Client) CreateTask(ctx context.Context, key string, req TaskRequest) (C
 		return Created{}, fmt.Errorf("factory: marshal task: %w", err)
 	}
 	var lastErr error
+	refreshed := false
 	for attempt := 0; attempt <= len(retryDelays); attempt++ {
 		if attempt > 0 {
 			if err := retrySleep(ctx, retryDelays[attempt-1]); err != nil {
@@ -179,12 +180,27 @@ func (c *Client) CreateTask(ctx context.Context, key string, req TaskRequest) (C
 			return Created{}, err
 		}
 		got, retry, err := c.postTask(ctx, key, payload)
+		if err == nil && got.Status == http.StatusUnauthorized && !refreshed {
+			// The cached token was revoked or rotated before its expiry: drop it and go again
+			// once, without spending one of the 503 attempts.
+			refreshed = true
+			c.dropToken()
+			attempt--
+			continue
+		}
 		if !retry {
 			return got, err
 		}
 		lastErr = err
 	}
 	return Created{}, fmt.Errorf("factory: task not accepted after %d attempts: %w", len(retryDelays)+1, lastErr)
+}
+
+// dropToken forgets the cached access token so the next call fetches a fresh one.
+func (c *Client) dropToken() {
+	c.mu.Lock()
+	c.token, c.expires = "", time.Time{}
+	c.mu.Unlock()
 }
 
 // postTask makes one attempt; retry is true for a 503 or a transport error.

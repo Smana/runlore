@@ -74,7 +74,13 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 			r.Task, r.Room, r.Issue = got.Task, got.Room, got.Issue
 		})
 	default:
-		n.log().Info("factory did not take the finding", "status", got.Status, "reason", got.Reason, "alert", inv.AlertName)
+		// 202 (below the factory's threshold) and 429 (a limit) are the factory deciding; any
+		// other status is a refusal the operator should see.
+		lvl := slog.LevelWarn
+		if got.Status == http.StatusAccepted || got.Status == http.StatusTooManyRequests {
+			lvl = slog.LevelInfo
+		}
+		n.log().Log(ctx, lvl, "factory did not take the finding", "status", got.Status, "reason", got.Reason, "alert", inv.AlertName)
 		return nil
 	}
 }
