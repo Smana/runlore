@@ -19,11 +19,12 @@ import (
 // fakeFactory is ZITADEL's token endpoint and the factory's API in one server: tokens expire after
 // ttl, and /v1/tasks answers from script, one reply per call, recording each Idempotency-Key.
 type fakeFactory struct {
-	ttl    time.Duration
-	tokens atomic.Int32
-	keys   []string
-	bodies []TaskRequest
-	script []int
+	ttl     time.Duration
+	tokens  atomic.Int32
+	keys    []string
+	bodies  []TaskRequest
+	newRoom string // when set, 201 answers carry this room
+	script  []int
 }
 
 func (f *fakeFactory) server(t *testing.T) *httptest.Server {
@@ -47,7 +48,11 @@ func (f *fakeFactory) server(t *testing.T) *httptest.Server {
 			w.WriteHeader(code)
 			switch code {
 			case http.StatusCreated:
-				_, _ = w.Write([]byte(`{"task":"abcdefgh","room":"abcdefgh","issue":42}`))
+				room := "abcdefgh"
+				if f.newRoom != "" {
+					room = f.newRoom
+				}
+				_, _ = w.Write([]byte(`{"task":"` + room + `","room":"` + room + `","issue":42}`))
 			case http.StatusOK:
 				_, _ = w.Write([]byte(`{"task":"abcdefgh","room":"abcdefgh","issue":42,"duplicate":true}`))
 			case http.StatusAccepted:

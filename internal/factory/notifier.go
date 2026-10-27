@@ -57,6 +57,12 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 			workload = inv.Resource.Kind + "/" + inv.Resource.Name
 		}
 		return n.Ledger.Upsert(inv.TriggerKey, func(r *Record) {
+			if r.Room != "" && r.Room != got.Room {
+				// A new generation for this TriggerKey (the incident re-fired after the old task
+				// ended): start clean, or a stale merge would trigger the old soak. The Slack
+				// root belongs to this delivery and is kept.
+				*r = Record{TriggerKey: r.TriggerKey, SlackRoot: r.SlackRoot, SlackChannel: r.SlackChannel}
+			}
 			r.Alert, r.Namespace, r.Workload = inv.AlertName, inv.Resource.Namespace, workload
 			r.Task, r.Room, r.Issue = got.Task, got.Room, got.Issue
 		})

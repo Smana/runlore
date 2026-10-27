@@ -96,3 +96,39 @@ func TestDeliverWithoutATriggerKeyPostsNothing(t *testing.T) {
 		t.Fatalf("%v %v", err, f.keys)
 	}
 }
+
+func TestDeliverANewGenerationDoesNotInheritTheOldState(t *testing.T) {
+	n, f, l, _ := newTestNotifier(t, []int{201, 201})
+	ctx := context.Background()
+	must(t, n.Deliver(ctx, testInvestigation()))
+	l.Register("slack", "1729.0001", "C01", providers.Investigation{TriggerKey: "k1"})
+	must(t, l.Upsert("k1", func(r *Record) {
+		r.FixRoom, r.PR, r.MergedAt, r.SoakUntil = "fix00001", 7, time.Unix(1_800_000_000, 0), time.Unix(1_800_001_800, 0)
+		r.Verdict, r.Outcome, r.FiringAtMerge, r.Events = "resolved", "done", true, []string{"room.merged"}
+	}))
+	f.script = []int{201} // the incident re-fires: the factory answers 201 with a new room
+	f.newRoom = "bcdefghi"
+	must(t, n.Deliver(ctx, testInvestigation()))
+	r, _ := l.Get("k1")
+	if r.Room != "bcdefghi" || r.FixRoom != "" || r.PR != 0 || !r.MergedAt.IsZero() || !r.SoakUntil.IsZero() ||
+		r.Verdict != "" || r.Outcome != "" || r.FiringAtMerge || len(r.Events) != 0 {
+		t.Fatalf("the new generation starts clean: %+v", r)
+	}
+	if r.SlackRoot != "1729.0001" {
+		t.Fatalf("the Slack root belongs to the delivery, not the generation: %+v", r)
+	}
+	if _, ok := l.ByRoom("fix00001"); ok {
+		t.Fatal("the old fix room no longer resolves to the incident")
+	}
+}
+
+func TestDeliverADuplicateKeepsTheState(t *testing.T) {
+	n, _, l, _ := newTestNotifier(t, []int{201, 200})
+	ctx := context.Background()
+	must(t, n.Deliver(ctx, testInvestigation()))
+	must(t, l.Upsert("k1", func(r *Record) { r.FixRoom, r.PR = "fix00001", 7 }))
+	must(t, n.Deliver(ctx, testInvestigation()))
+	if r, _ := l.Get("k1"); r.FixRoom != "fix00001" || r.PR != 7 {
+		t.Fatalf("the same room keeps its state: %+v", r)
+	}
+}
