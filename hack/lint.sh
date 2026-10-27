@@ -11,7 +11,7 @@
 #
 # The panic aborts the whole run — not just staticcheck — so the exit status says
 # "failed" for a reason that has nothing to do with the code. Observed with Go 1.27.0
-# local against go.mod's toolchain go1.26.6.
+# local against go.mod's toolchain go1.26.9.
 #
 # That failure mode is worse than it looks: the tempting workaround is
 # `--disable=staticcheck`, which does produce a clean run, and silently drops one of
