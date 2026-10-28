@@ -156,7 +156,8 @@ func (l *Ledger) Upsert(key string, fn func(*Record)) error {
 		return err
 	}
 	l.records[key] = r
-	return l.maybeCompactLocked()
+	l.compactBestEffortLocked()
+	return nil
 }
 
 // Get returns the record of key.
@@ -233,7 +234,8 @@ func (l *Ledger) MarkSeen(id string, at time.Time) error {
 			delete(l.seen, k)
 		}
 	}
-	return l.maybeCompactLocked()
+	l.compactBestEffortLocked()
+	return nil
 }
 
 // Register records the Slack root of key's incident thread. It is notify.ThreadSink: best-effort,
@@ -270,6 +272,15 @@ func (l *Ledger) appendLocked(ln line) error {
 	}
 	l.lines++
 	return nil
+}
+
+// compactBestEffortLocked compacts when due. The line it follows is already durable, so a failed
+// compaction is a warning, never a failed write: reporting it as one would leave memory ahead of
+// what the caller believes was stored.
+func (l *Ledger) compactBestEffortLocked() {
+	if err := l.maybeCompactLocked(); err != nil {
+		slog.Warn("factory ledger: compaction failed; the file keeps growing until it succeeds", "err", err)
+	}
 }
 
 // maybeCompactLocked rewrites the file once it holds compactFactor times the live lines.

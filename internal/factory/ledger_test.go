@@ -147,3 +147,30 @@ func TestRegisterIgnoresOtherTransportsAndEmptyKeys(t *testing.T) {
 		t.Fatal("an empty key is not recorded")
 	}
 }
+
+func TestLedgerCompactionFailureDoesNotLoseTheWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("file permissions do not bind root")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.jsonl")
+	now := time.Unix(1_800_000_000, 0)
+	l, _ := OpenLedger(p, func() time.Time { return now })
+	must(t, l.Upsert("k1", func(r *Record) { r.Room = "abcdefgh" }))
+	must(t, os.Chmod(dir, 0o500)) // appending to the file works; creating the compaction temp file does not
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	var merged error
+	for i := range 100 {
+		merged = l.Upsert("k1", func(r *Record) { r.PR = i; r.MergedAt = now })
+		if merged != nil {
+			break
+		}
+	}
+	if merged != nil {
+		t.Fatalf("the line is on disk, so a failed compaction is not a failed write: %v", merged)
+	}
+	again, _ := OpenLedger(p, func() time.Time { return now })
+	if r, _ := again.Get("k1"); r.PR != 99 || r.MergedAt.IsZero() {
+		t.Fatalf("memory and disk agree: %+v", r)
+	}
+}
