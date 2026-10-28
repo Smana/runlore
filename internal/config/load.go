@@ -44,6 +44,15 @@ func Load(path string) (*Config, error) {
 // be exactly one place that knows these values; a second copy (even a "just the
 // timeout" one) would drift the moment either side changes.
 func ApplyDefaults(c *Config) {
+	// Factory verification defaults, only once the integration is on.
+	if c.Factory.Enabled() {
+		if c.Factory.Soak == 0 {
+			c.Factory.Soak = Duration(30 * time.Minute)
+		}
+		if c.Factory.Verify.MaxSteps == 0 {
+			c.Factory.Verify.MaxSteps = 6
+		}
+	}
 	// Coalesce defaults: when enabled without explicit tuning, choose conservative
 	// values that reduce storm noise without introducing too much investigation lag.
 	if c.Investigation.Coalesce.Enabled {

@@ -89,7 +89,19 @@ type Factory struct {
 	Repository      string         `yaml:"repository"`        // owner/name the factory works on
 	MaxCostUSD      float64        `yaml:"max_cost_usd"`      // per-task cost ceiling sent with each task; must be above 0
 	Webhook         FactoryWebhook `yaml:"webhook"`           // the inbound webhook receiver
+	Soak            Duration       `yaml:"soak"`              // how long after a merge before the alert is checked; 0 => 30m (ApplyDefaults), at least 5m
+	Verify          FactoryVerify  `yaml:"verify"`            // the post-merge check; an empty alertmanager_url leaves verification off
 }
+
+// FactoryVerify configures the check RunLore makes once a fix has soaked.
+type FactoryVerify struct {
+	AlertmanagerURL string `yaml:"alertmanager_url"` // Alertmanager base URL to ask whether the alert still fires; empty turns verification off
+	MaxSteps        int    `yaml:"max_steps"`        // step ceiling of the short re-investigation; 0 => 6 (ApplyDefaults)
+}
+
+// minFactorySoak is the shortest soak accepted: a verdict taken sooner would read the
+// alert before the fix could have taken effect.
+const minFactorySoak = 5 * time.Minute
 
 // FactoryWebhook configures the receiver of the broker's Standard Webhooks.
 type FactoryWebhook struct {
@@ -125,6 +137,15 @@ func validateFactory(f Factory) error {
 	}
 	if f.MaxCostUSD <= 0 {
 		return fmt.Errorf("factory.max_cost_usd must be above 0, got %v", f.MaxCostUSD)
+	}
+	if f.Soak.Std() < minFactorySoak {
+		return fmt.Errorf("factory.soak must be at least 5m, got %v", f.Soak.Std())
+	}
+	if u := f.Verify.AlertmanagerURL; u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		return fmt.Errorf("factory.verify.alertmanager_url must be http(s), got %q", u)
+	}
+	if f.Verify.MaxSteps <= 0 {
+		return fmt.Errorf("factory.verify.max_steps must be above 0, got %d", f.Verify.MaxSteps)
 	}
 	return nil
 }
