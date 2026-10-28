@@ -46,6 +46,9 @@ type Verifier struct {
 	Log     *slog.Logger
 
 	once sync.Mutex // one pass at a time: a slow pass must not overlap the next tick
+	// evidence caches the re-investigation of each key until its verdict is settled, so a factory
+	// outage does not rerun the paid investigation on every tick. Guarded by once.
+	evidence map[string]string
 }
 
 func (v *Verifier) now() time.Time {
@@ -71,16 +74,17 @@ func (v *Verifier) OnMerged(ctx context.Context, key string) {
 		return
 	}
 	firing, err := v.Firing(ctx, rec.Alert, rec.Namespace)
+	assumed := ""
 	if err != nil {
 		v.log().Warn("factory verifier: cannot tell whether the alert fires at the merge; assuming it does", "alert", rec.Alert, "err", err)
-		firing = true
+		firing, assumed = true, "Alertmanager unreachable"
 	}
 	start := rec.MergedAt
 	if start.IsZero() {
 		start = v.now()
 	}
 	if err := v.Ledger.Upsert(key, func(r *Record) {
-		r.FiringAtMerge = firing
+		r.FiringAtMerge, r.FiringAssumed = firing, assumed
 		r.SoakUntil = start.Add(v.Soak)
 	}); err != nil {
 		v.log().Error("factory verifier: recording the soak failed", "err", err)
@@ -107,6 +111,17 @@ func (v *Verifier) Run(ctx context.Context, every time.Duration) {
 func (v *Verifier) Once(ctx context.Context) {
 	v.once.Lock()
 	defer v.once.Unlock()
+	// A merge recorded without a deadline (a crash between the two writes) is scheduled from its
+	// merge time; whether the alert fired at the merge was never read, so it is assumed.
+	for _, rec := range v.Ledger.Unscheduled() {
+		v.log().Warn("factory verifier: a merge had no soak deadline; scheduling it from the merge time", "alert", rec.Alert)
+		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) {
+			r.FiringAtMerge, r.FiringAssumed = true, "merge not processed before a restart"
+			r.SoakUntil = r.MergedAt.Add(v.Soak)
+		}); err != nil {
+			v.log().Error("factory verifier: recording the soak failed", "err", err)
+		}
+	}
 	for _, rec := range v.Ledger.Due(v.now()) {
 		if ctx.Err() != nil {
 			return
@@ -125,7 +140,14 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 	if firing {
 		verdict = verdictPersisting
 	}
-	ev := v.evidence(ctx, rec)
+	ev, ok := v.evidence[rec.TriggerKey]
+	if !ok {
+		ev = v.gather(ctx, rec)
+		if v.evidence == nil {
+			v.evidence = map[string]string{}
+		}
+		v.evidence[rec.TriggerKey] = ev
+	}
 	vctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
 	status, reason, err := v.Client.PostVerification(vctx, rec.FixRoom, Verification{
@@ -140,6 +162,7 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 	}
 	switch status {
 	case http.StatusCreated, http.StatusOK:
+		delete(v.evidence, rec.TriggerKey)
 		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.Verdict = verdict }); err != nil {
 			v.log().Error("factory verifier: recording the verdict failed", "err", err)
 			return
@@ -152,6 +175,7 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict:
 		// The factory refused for good: the window closed, the fix is not ours, the verdict
 		// stands already. Asking again cannot change the answer.
+		delete(v.evidence, rec.TriggerKey)
 		outcome := code(reason)
 		if reason == "" {
 			outcome = fmt.Sprintf("http_%d", status)
@@ -171,7 +195,15 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 
 // evidence is the re-investigation's text, redacted and cut to the factory's ceiling; when it
 // cannot run, a fixed line with the error's class (never its text).
-func (v *Verifier) evidence(ctx context.Context, rec Record) string {
+func (v *Verifier) gather(ctx context.Context, rec Record) string {
+	note := ""
+	if rec.FiringAssumed != "" {
+		note = "firing at merge assumed: " + rec.FiringAssumed + "\n"
+	}
+	return truncate(note+v.reinvestigate(ctx, rec), maxEvidence)
+}
+
+func (v *Verifier) reinvestigate(ctx context.Context, rec Record) string {
 	if v.Reinvestigate == nil {
 		return "re-investigation unavailable: not configured"
 	}

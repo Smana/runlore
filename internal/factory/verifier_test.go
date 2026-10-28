@@ -250,6 +250,59 @@ func TestVerifier(t *testing.T) {
 	})
 }
 
+func TestVerifierRecoversAMergeWithoutDeadline(t *testing.T) {
+	ctx := context.Background()
+	r := newVerifierRig(t, 201)
+	r.firing = false
+	// The receiver persisted MergedAt, then the process died before OnMerged wrote SoakUntil.
+	r.now = r.now.Add(soak - time.Minute)
+	r.v.Once(ctx)
+	if len(r.vs.bodies) != 0 {
+		t.Fatal("not due yet")
+	}
+	rec, _ := r.ledger.Get("k1")
+	if !rec.SoakUntil.Equal(rec.MergedAt.Add(soak)) || !rec.FiringAtMerge {
+		t.Fatalf("the deadline is backfilled from MergedAt: %+v", rec)
+	}
+	r.now = r.now.Add(time.Minute)
+	r.v.Once(ctx)
+	got := r.posted()
+	if len(got) != 1 || got[0].Verdict != "resolved" || !got[0].Alert.FiringAtMerge ||
+		!strings.HasPrefix(got[0].Evidence, "firing at merge assumed: ") {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestVerifierEvidenceNamesTheAssumption(t *testing.T) {
+	r := newVerifierRig(t, 201)
+	r.firing = true
+	r.amErr = errors.New("down")
+	r.v.OnMerged(context.Background(), "k1")
+	r.amErr = nil
+	r.now = r.now.Add(soak)
+	r.v.Once(context.Background())
+	if ev := r.posted()[0].Evidence; !strings.HasPrefix(ev, "firing at merge assumed: Alertmanager unreachable\n") || !strings.Contains(ev, r.reText) {
+		t.Fatalf("%q", ev)
+	}
+}
+
+func TestVerifierReinvestigatesOnceDuringAnOutage(t *testing.T) {
+	ctx := context.Background()
+	r := newVerifierRig(t, 503, 503, 503, 503, 503, 503, 201)
+	r.firing = true
+	r.v.OnMerged(ctx, "k1")
+	r.now = r.now.Add(soak)
+	r.v.Once(ctx)
+	r.v.Once(ctx)
+	if r.reRuns != 1 {
+		t.Fatalf("the paid re-investigation ran %d times in an outage, want 1", r.reRuns)
+	}
+	r.v.Once(ctx) // the factory answers: the cached evidence is posted
+	if r.reRuns != 1 || len(r.posted()) != 7 || r.posted()[6].Evidence != r.posted()[0].Evidence {
+		t.Fatalf("runs %d", r.reRuns)
+	}
+}
+
 func TestSoakText(t *testing.T) {
 	for d, want := range map[time.Duration]string{30 * time.Minute: "30m", time.Hour: "1h", 90 * time.Minute: "1h30m", 5 * time.Minute: "5m"} {
 		if got := soakText(d); got != want {
