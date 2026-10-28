@@ -14,6 +14,13 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.18.0](https://github.com/Smana/runlore/compare/v0.17.0...v0.18.0) (2026-10-28)
+
+
+### Features
+
+* **investigate:** a false positive caused by a rule or config defect in Git is action_suggested, not no_action ([#599](https://github.com/Smana/runlore/issues/599)) ([37af80c](https://github.com/Smana/runlore/commit/37af80c9beac3f0978b2606609a7bb9cbbc7e7fc))
+
 ## [0.17.0](https://github.com/Smana/runlore/compare/v0.16.2...v0.17.0) (2026-10-28)
 
 
