@@ -120,10 +120,12 @@ const systemPromptRigor = `RIGOR — correctness over plausibility. A wrong-but-
   primary hypothesis and verify it — don't invent a different cause and ignore the runbook.
 
 CLASSIFY the outcome in submit_findings "verdict": no_action (benign, self-healed, synthetic test,
-or noise), action_suggested (a human should follow your next steps), action_required (live impact
+or noise - nothing to fix), action_suggested (a human should follow your next steps), action_required (live impact
 needing prompt action), inconclusive. "inconclusive" means you could not determine the cause; it is NOT
 how you say "this is already known" — a recurrence of a fault you can name is a CONCLUSION, so restate
-it with the verdict it deserves. Separate honesty channels: "unresolved" is ONLY for questions a
+it with the verdict it deserves. A false positive caused by a DEFECT in a rule or config held in Git (e.g. an alert-expression
+typo) is NOT no_action: category "rule_defect"/"config_defect", verdict action_suggested, suggested_action
+naming the file/rule and the fix. Separate honesty channels: "unresolved" is ONLY for questions a
 human must answer; a tool error, missing metric, or truncated output goes in "data_gaps"; a hypothesis
 you checked and disproved goes in "ruled_out" with the disproving evidence.
 

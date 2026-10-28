@@ -87,11 +87,12 @@ func submitFindingsSpec() providers.ToolSpec {
 "confidence":{"type":"number","description":"how strongly the evidence below supports THIS root cause, 0-1. It measures support for the cause you STATED, not how sure you are of the narrative around it. Required: an omitted confidence is delivered as 0%, which reads to the on-call as 'no confidence' and buries a sound finding under a red badge"},
 "change_ref":{"type":"string"},
 "evidence":{"type":"array","minItems":1,"items":{"type":"string"},"description":"REQUIRED, at least one: the specific tool results that support this cause - name the tool and quote the value, error or log line it returned. This is what lets a human check the cause and what the verify pass traces. A cause asserted with no evidence is delivered as a bare paragraph under a confidence badge nothing backs"},
+"category":{"type":"string","enum":["rule_defect","config_defect","change","resource","transient","other"],"description":"kind of cause. rule_defect/config_defect: an alerting/recording rule or other config held in Git is wrong (e.g. a typo making an alert always fire) - verdict must be action_suggested, suggested_action naming the file/rule and the fix"},
 "suggested_action":{"type":"string","description":"what the human should DO about this cause. Required whenever the verdict is action_suggested or action_required, unless a top-level actions entry already covers it - a card whose verdict promises an action and then offers none is worse than one that admits it is inconclusive"},
 "reversible":{"type":"boolean"}},
 "required":["summary","confidence","evidence"]}},
 "unresolved":{"type":"array","items":{"type":"string"},"description":"genuine open questions only a human can answer - put tool or data limitations in data_gaps instead"},
-"verdict":{"type":"string","enum":["no_action","action_suggested","action_required","inconclusive"],"description":"actionability for the on-call: no_action (benign/self-healed/synthetic), action_suggested (a human should follow the next steps), action_required (live impact needing prompt action), inconclusive (you genuinely could not determine the cause, and data_gaps/unresolved say what blocked you). A recurrence of a fault you DID identify is NOT inconclusive - naming a known cause again is still a conclusion, so restate it with the actionability verdict it deserves. The converse also holds: if you could not name the failing resource or the cause THIS time, the verdict is inconclusive however sure you are of everything around it - do not report a high-confidence action_suggested whose actual finding is that you could not identify what failed"},
+"verdict":{"type":"string","enum":["no_action","action_suggested","action_required","inconclusive"],"description":"actionability for the on-call: no_action (benign/self-healed/synthetic, nothing to fix; NOT a false positive caused by a rule/config defect in Git), action_suggested (a human should follow the next steps), action_required (live impact needing prompt action), inconclusive (you genuinely could not determine the cause, and data_gaps/unresolved say what blocked you). A recurrence of a fault you DID identify is NOT inconclusive - naming a known cause again is still a conclusion, so restate it with the actionability verdict it deserves. The converse also holds: if you could not name the failing resource or the cause THIS time, the verdict is inconclusive however sure you are of everything around it - do not report a high-confidence action_suggested whose actual finding is that you could not identify what failed"},
 "ruled_out":{"type":"array","items":{"type":"string"},"description":"hypotheses you considered and REJECTED, one line each naming the disproving evidence"},
 "data_gaps":{"type":"array","items":{"type":"string"},"description":"signals you could not obtain (tool errors, RBAC denials, truncated output) that limited the investigation - data limitations, NOT questions for a human. State the tool you called and the ACTUAL error it returned. Do NOT speculate about a cause you did not verify: if a metrics query returned nothing, call discover_metrics before claiming a metric or its name is absent; if a logs query returned nothing, call discover_log_fields; if a tool was refused, report the refusal rather than guessing why. An empty result is not evidence that the data does not exist."},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
@@ -132,6 +133,7 @@ type findings struct {
 		ChangeRef       string   `json:"change_ref"`
 		Evidence        []string `json:"evidence"`
 		SuggestedAction string   `json:"suggested_action"`
+		Category        string   `json:"category"`
 		Reversible      bool     `json:"reversible"`
 	} `json:"root_causes"`
 	Unresolved []string `json:"unresolved"`
@@ -266,6 +268,7 @@ func buildInvestigation(f findings) providers.Investigation {
 			Reversible:      rc.Reversible,
 		})
 	}
+	enforceDefectActionable(&inv, f)
 	for _, a := range f.Actions {
 		inv.Actions = append(inv.Actions, providers.Action{
 			Name:        a.Description,
@@ -292,4 +295,32 @@ func buildInvestigation(f findings) providers.Investigation {
 		}
 	}
 	return inv
+}
+
+// defectCategory reports whether a root-cause category names a fixable defect in a
+// rule or config the GitOps source holds.
+func defectCategory(c string) bool {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "rule_defect", "config_defect":
+		return true
+	}
+	return false
+}
+
+// enforceDefectActionable is the deterministic floor under the verdict: a false
+// positive caused by a defect in a rule or config that lives in Git (live case: a
+// VMRule selecting deployment="image-galery" so the alert always fired) is
+// actionable, because the fix is a PR to that file. Models still call it no_action
+// ("false positive, workload healthy"), which makes downstream gates skip it as
+// below threshold and no fix is ever proposed. So a no_action verdict whose leading
+// cause is a rule_defect/config_defect is raised to action_suggested. inconclusive
+// and the stronger verdicts are left alone.
+func enforceDefectActionable(inv *providers.Investigation, f findings) {
+	if inv.Verdict != providers.VerdictNoAction || len(f.RootCauses) == 0 || !defectCategory(f.RootCauses[0].Category) {
+		return
+	}
+	inv.Verdict = providers.VerdictActionSuggested
+	if strings.TrimSpace(inv.RootCauses[0].SuggestedAction) == "" && len(f.Actions) == 0 {
+		inv.RootCauses[0].SuggestedAction = "Fix the defect in the rule/config source in Git (PR to the file named in the cause): " + inv.RootCauses[0].Summary
+	}
 }

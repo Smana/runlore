@@ -1983,7 +1983,7 @@ type Verdict string
 
 // The model-facing verdict vocabulary; submit_findings requires one of these.
 const (
-	VerdictNoAction        Verdict = "no_action"        // benign / self-healed / synthetic; nothing to do
+	VerdictNoAction        Verdict = "no_action"        // benign / self-healed / synthetic / expected; nothing to fix (a false positive from a rule defect is action_suggested)
 	VerdictActionSuggested Verdict = "action_suggested" // a human should follow the suggested next steps
 	VerdictActionRequired  Verdict = "action_required"  // live impact; act promptly
 	VerdictInconclusive    Verdict = "inconclusive"     // could not be determined with available data

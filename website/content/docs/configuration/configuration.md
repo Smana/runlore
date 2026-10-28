@@ -531,6 +531,8 @@ The value is a bare hostname — no scheme, path, port or userinfo.
 still reaches chat, but no repo artifact is created. Values are validated at startup against the
 verdict enum (`no_action` / `action_suggested` / `action_required` / `inconclusive`); an unknown
 value fails fast. Empty (the default) preserves the original behaviour: every verdict is eligible.
+`no_action` means genuine noise only; a false positive caused by a defect in a rule or config held
+in Git is `action_suggested` (see [reviewing-knowledge.md]({{< relref "reviewing-knowledge.md" >}})).
 Recommended production value is `skip_verdicts: ["no_action"]`, which keeps benign / self-healed /
 synthetic findings out of the review queue while still notifying chat (see
 [reviewing-knowledge.md]({{< relref "reviewing-knowledge.md#expected-triage-volume" >}})).
