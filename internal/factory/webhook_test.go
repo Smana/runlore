@@ -385,3 +385,19 @@ func TestReceiverRecordsTheIDOnlyAfterHandlingIt(t *testing.T) {
 		t.Fatalf("and a replay after that is dropped: %d", got)
 	}
 }
+
+func TestReceiverLogsAtInfoWhatItDoesWithAnEvent(t *testing.T) {
+	g := newRig(t)
+	g.rc.OnMerged = func(context.Context, string) {}
+	stray := `{"type":"room.merged","room":"zzzzzzzz","origin":"nothere1","pr":9}`
+	g.post(sign(g.key, "s1", g.now, []byte(stray)), stray)
+	if out := g.logs.String(); !strings.Contains(out, "level=INFO") || !strings.Contains(out, "matches no incident") ||
+		!strings.Contains(out, "zzzzzzzz") || !strings.Contains(out, "nothere1") {
+		t.Fatalf("no-match not logged: %s", out)
+	}
+	merged := `{"type":"room.merged","room":"fix00001","pr":7,"origin":"abcdefgh"}`
+	g.post(sign(g.key, "s2", g.now, []byte(merged)), merged)
+	if out := g.logs.String(); !strings.Contains(out, "fix merge seen") || !strings.Contains(out, "k1") {
+		t.Fatalf("merge not logged: %s", out)
+	}
+}
