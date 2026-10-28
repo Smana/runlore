@@ -22,8 +22,10 @@ import (
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/factory"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
+	"github.com/Smana/runlore/internal/notify"
 	_ "github.com/Smana/runlore/internal/notify/templated" // self-registers the templated notifier
 	_ "github.com/Smana/runlore/internal/notify/webhook"   // self-registers the generic outgoing-webhook notifier
 	"github.com/Smana/runlore/internal/outcome"
@@ -213,9 +215,23 @@ func RunServe(version string, args []string) error {
 	// never itself blocks the /sync goroutine.
 	matrixDispatch := thread.NewDispatcher(matrixMentionConcurrency, matrixMentionTimeout, log)
 	matrixBusyDispatch := thread.NewDispatcher(matrixBusyConcurrency, matrixMentionTimeout, log)
-	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadRegistry, log)
+	// With the agent factory on, the Slack root of each incident is also recorded in the
+	// factory ledger, so the broker's webhooks can be answered in that thread.
+	factoryLedger, factoryClient, err := BuildFactory(cfg, log)
+	if err != nil {
+		return fmt.Errorf("factory: %w", err)
+	}
+	var threadSink notify.ThreadSink = threadRegistry
+	if factoryLedger != nil {
+		threadSink = notify.Sinks{threadRegistry, factoryLedger}
+	}
+	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadSink, log)
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
+	}
+	if notifier != nil && factoryClient.Enabled() {
+		notifier.Add(&factory.Notifier{Client: factoryClient, Ledger: factoryLedger,
+			Repository: cfg.Factory.Repository, MaxCostUSD: cfg.Factory.MaxCostUSD, Log: log})
 	}
 	// One responder, two transports: built ONCE and shared by both Slack's and
 	// Matrix's thread-capture wiring below, so the per-hour forge-write budget
@@ -392,6 +408,12 @@ func RunServe(version string, args []string) error {
 		if rerr := ledger.Reload(); rerr != nil {
 			log.Warn("outcome ledger reload on leadership failed; serving prior cache", "err", rerr)
 		}
+		// Same for the factory ledger: the receiver and the thread lines read it.
+		if factoryLedger != nil {
+			if rerr := factoryLedger.Reload(); rerr != nil {
+				log.Warn("factory ledger reload on leadership failed; serving prior state", "err", rerr)
+			}
+		}
 		go queue.Run(workCtx)
 		// The gitops watcher source is built only when sources.gitops.enabled, so
 		// RunWatchers no-ops when no watcher source is present.
@@ -517,6 +539,12 @@ func RunServe(version string, args []string) error {
 		if mention := BuildThreadMention(cfg, threadResponder, notifier, log); mention != nil {
 			acts.Threads = mention
 		}
+	}
+	// The agent factory's webhook receiver, assigned through a nil-checked variable for the
+	// same typed-nil reason as acts.Threads above.
+	if rc := BuildFactoryReceiver(cfg, factoryLedger, notifier, log); rc != nil {
+		acts.Factory = rc
+		log.Info("agent factory webhook enabled", "endpoint", "/factory/webhook")
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds

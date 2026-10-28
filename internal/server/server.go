@@ -99,6 +99,7 @@ type Server struct {
 	approvers        map[string]bool    // Slack user IDs permitted to approve actions (empty = none)
 	guard            *authGuard         // failed-auth backoff for the shared-token endpoints
 	threads          ThreadHandler      // nil unless notify.slack.thread_capture is on
+	factory          http.Handler       // nil unless factory.url is set; serves POST /factory/webhook
 	seenEvents       *seenSet           // Slack event_id dedup for delivery retries
 	telemetryMetrics *telemetry.Metrics // nil unless telemetry is configured; nil-safe throughout
 	// eventDispatcher and busyDispatcher run detached mention handlers and the
@@ -222,6 +223,7 @@ type Actions struct {
 	WebhookToken string             // optional bearer token required on POST /webhook/alertmanager
 	ApproverIDs  []string           // Slack user IDs permitted to approve actions
 	Threads      ThreadHandler      // opt-in thread capture (notify.slack.thread_capture)
+	Factory      http.Handler       // opt-in agent factory webhook receiver (factory.url); mounted at POST /factory/webhook
 	Metrics      *telemetry.Metrics // optional; nil-safe — powers the mentions-dropped-on-saturation counter
 	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
 	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions) — a
@@ -259,6 +261,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
 		threads:          liveIface(acts.Threads),
+		factory:          liveIface(acts.Factory),
 		seenEvents:       newSeenSet(1024),
 		telemetryMetrics: acts.Metrics,
 		eventDispatcher:  thread.NewDispatcher(maxConcurrentMentions, mentionHandlerTimeout, log),
@@ -294,6 +297,12 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	mux.Handle("POST /actions/{id}/reject", work(http.HandlerFunc(s.handleReject)))
 	mux.Handle("POST /actions/pause", work(http.HandlerFunc(s.handlePause)))
 	mux.Handle("POST /actions/resume", work(http.HandlerFunc(s.handleResume)))
+	// The factory's webhook is work-bearing: the ledger it writes lives in the leader, and a
+	// follower relays the request byte-identical so the signature verifies there. The route
+	// authenticates itself (Standard Webhooks signature); it is not behind the shared token.
+	if s.factory != nil {
+		mux.Handle("POST /factory/webhook", work(s.factory))
+	}
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)
 	}

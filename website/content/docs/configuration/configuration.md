@@ -1004,6 +1004,52 @@ key as self-describing blocks. Both build through the same registry — the spli
 is deliberate: type-checked config for the built-ins, zero-code extensibility
 for everything else.
 
+### `factory` — the agent factory (opt-in)
+
+With `factory.url` set, RunLore hands each finished investigation to the agent factory as an
+ordinary API client (`POST /v1/tasks`, one task per `TriggerKey`, so a re-delivery is a duplicate,
+not a second task) and follows the work through the factory broker's signed webhooks into the
+incident's Slack thread. The factory decides every gate: whether the finding becomes a task, what
+it may do, and whether a fix is published. RunLore only files, listens and reports. An empty `url`
+(the default) builds nothing and mounts no route.
+
+```yaml
+factory:
+  url: http://agent-factory.agent-system.svc.cluster.local:8082
+  token_url: https://auth.example.com/oauth/v2/token
+  client_id_env: FACTORY_CLIENT_ID
+  client_secret_env: FACTORY_CLIENT_SECRET
+  project_id_env: FACTORY_PROJECT_ID
+  repository: Smana/cloud-native-ref
+  max_cost_usd: 2
+  webhook: {secret_env: FACTORY_WEBHOOK_KEY}
+```
+
+- **Credentials are env var names, never values.** The client authenticates to the identity
+  provider with the OAuth2 client-credentials grant (`token_url` must be `https`) and caches the
+  token until a minute before it expires. With `url` set but one of the three credential variables
+  empty, the client stays off and one warning at start names the variable.
+- **`url` may be plain `http` only inside the cluster** (a `svc.cluster.local` address behind a
+  NetworkPolicy). The bearer token travels with every call, so use `https` for anything that
+  leaves the cluster; only `token_url` is enforced to be `https`.
+- **`repository`** is the `owner/name` the factory works on; **`max_cost_usd`** is the per-task
+  cost ceiling sent with each task and must be above zero. The finding text is secret-redacted
+  before it leaves, and every task is `dataClass: internal`.
+- **The receiver is `POST /factory/webhook`** on the serve port. It verifies a
+  [Standard Webhooks](https://www.standardwebhooks.com/) HMAC-SHA256 signature in constant time,
+  refuses (`401`, no detail) a bad signature or a timestamp more than five minutes from its clock,
+  acknowledges a verified event `204` (known room or not), and drops a `webhook-id` it saw in the
+  last ten minutes. `webhook.secret_env` names a variable holding one base64 signing key of at
+  least 32 bytes, or two on separate lines during a rotation; it is read at each request. A
+  follower replica relays the request to the leader unchanged.
+- **What is posted to Slack** is a fixed English line built from ids only, never room text: that
+  the factory took the incident (and its public stub issue), that its task ended, that a fix was
+  started, its pull request number, that it waits for a human, that it was merged or reverted.
+  The Slack root is recorded whenever `factory.url` is set, even with `notify.slack.thread_capture`
+  off.
+- **State** is `factory.jsonl`, an append-only ledger beside `outcome.ledger_path` (without that
+  path the ledger is off and webhooks cannot be matched to incidents).
+
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook). The listen address is the
 `--addr` CLI flag (`:8080` in the chart), **not** a config key. TLS is terminated externally

@@ -1949,3 +1949,26 @@ func TestSlackWhatChangedTruncatesOnWordBoundary(t *testing.T) {
 		t.Errorf("a short change_ref must render verbatim and escaped:\ngot  %q\nwant %q", got, escapeMrkdwn(short))
 	}
 }
+
+// With thread_capture off the Slack bot still records its root when the agent factory is on:
+// the factory ledger needs the root to post its thread lines.
+func TestSlackBuildWiresThreadsForTheFactory(t *testing.T) {
+	t.Setenv("FAC_SLACK_BOT", "xoxb-test")
+	sink := &countingSink{}
+	build := func(factoryURL string) *SlackBot {
+		cfg := &config.Config{}
+		cfg.Notify.Slack = config.SlackNotify{BotTokenEnv: "FAC_SLACK_BOT", Channel: "C1"}
+		cfg.Factory.URL = factoryURL
+		n, err := registry["slack"].Build(Deps{Cfg: cfg, Log: slog.New(slog.DiscardHandler), Threads: sink})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n.(*SlackBot)
+	}
+	if b := build("http://factory"); b.Threads != ThreadSink(sink) {
+		t.Fatalf("factory on: Threads is the deps' sink, got %v", b.Threads)
+	}
+	if b := build(""); b.Threads != nil {
+		t.Fatal("factory off and thread_capture off: no sink, as before")
+	}
+}
