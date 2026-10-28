@@ -71,6 +71,11 @@ func (v *Verifier) log() *slog.Logger {
 func (v *Verifier) OnMerged(ctx context.Context, key string) {
 	rec, ok := v.Ledger.Get(key)
 	if !ok || rec.Alert == "" {
+		why := "no ledger record for the key"
+		if ok {
+			why = "the record names no alert"
+		}
+		v.log().Info("factory verifier: merge not scheduled, "+why, "key", key)
 		return
 	}
 	firing, err := v.Firing(ctx, rec.Alert, rec.Namespace)
@@ -90,6 +95,7 @@ func (v *Verifier) OnMerged(ctx context.Context, key string) {
 		v.log().Error("factory verifier: recording the soak failed", "err", err)
 		return
 	}
+	v.log().Info("factory verifier: soak scheduled", "key", key, "alert", rec.Alert, "until", start.Add(v.Soak), "firing_at_merge", firing)
 	v.reply(ctx, rec, fmt.Sprintf("Soaking for %s before checking `%s`.", soakText(v.Soak), code(rec.Alert)))
 }
 
@@ -163,6 +169,7 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 	switch status {
 	case http.StatusCreated, http.StatusOK:
 		delete(v.evidence, rec.TriggerKey)
+		v.log().Info("factory verifier: verdict posted", "key", rec.TriggerKey, "alert", rec.Alert, "verdict", verdict, "status", status, "reason", reason)
 		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.Verdict = verdict }); err != nil {
 			v.log().Error("factory verifier: recording the verdict failed", "err", err)
 			return

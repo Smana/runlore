@@ -3,9 +3,11 @@
 package factory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -308,5 +310,25 @@ func TestSoakText(t *testing.T) {
 		if got := soakText(d); got != want {
 			t.Fatalf("%v: %q, want %q", d, got, want)
 		}
+	}
+}
+
+func TestVerifierLogsSoakVerdictAndEarlyReturn(t *testing.T) {
+	r := newVerifierRig(t, 201)
+	var buf bytes.Buffer
+	r.v.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	r.v.OnMerged(context.Background(), "k1")
+	if out := buf.String(); !strings.Contains(out, "level=INFO") || !strings.Contains(out, "soak scheduled") || !strings.Contains(out, "k1") {
+		t.Fatalf("soak not logged: %s", out)
+	}
+	r.now = r.now.Add(soak + time.Minute)
+	r.v.Once(context.Background())
+	if out := buf.String(); !strings.Contains(out, "verdict posted") || !strings.Contains(out, "status=201") {
+		t.Fatalf("verdict not logged: %s", out)
+	}
+	buf.Reset()
+	r.v.OnMerged(context.Background(), "nope")
+	if out := buf.String(); !strings.Contains(out, "no ledger record") {
+		t.Fatalf("early return not logged: %s", out)
 	}
 }

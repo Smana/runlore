@@ -231,6 +231,7 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 		rec, ok = rc.Ledger.ByRoom(ev.Origin)
 	}
 	if !ok {
+		rc.log().Info("factory webhook: the event matches no incident; ignored", "type", ev.Type, "room", ev.Room, "origin", ev.Origin)
 		return nil
 	}
 	if ev.Room != rec.Room && rec.FixRoom != "" && rec.FixRoom != ev.Room {
@@ -257,6 +258,9 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 		if err := rc.Replier.ReplyInThread(ctx, rec.SlackRoot, rec.SlackChannel, line); err != nil {
 			rc.log().Warn("factory webhook: the thread post failed", "err", err, "type", ev.Type)
 		}
+	}
+	if newlyMerged {
+		rc.log().Info("factory webhook: fix merge seen", "key", rec.TriggerKey, "fix_room", rec.FixRoom, "pr", rec.PR, "merged_at", rec.MergedAt)
 	}
 	if newlyMerged && rc.OnMerged != nil {
 		key := rec.TriggerKey
