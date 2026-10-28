@@ -68,6 +68,7 @@ type Ledger struct {
 	mu      sync.Mutex
 	records map[string]Record
 	seen    map[string]time.Time
+	claimed map[string]struct{} // webhook ids being handled right now
 	lines   int
 }
 
@@ -216,6 +217,35 @@ func (l *Ledger) HasSeen(id string, at time.Time) bool {
 	defer l.mu.Unlock()
 	t, ok := l.seen[id]
 	return ok && at.Sub(t) < seenWindow
+}
+
+// Claim takes the right to handle webhook id: it is false when id was already seen or another
+// request is handling it, so a broker resend that overlaps the first delivery cannot be handled
+// twice. Pair a true Claim with Release; call MarkSeen first when the handling succeeded.
+func (l *Ledger) Claim(id string, at time.Time) bool {
+	if l.path == "" {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.seen[id]; ok && at.Sub(t) < seenWindow {
+		return false
+	}
+	if _, busy := l.claimed[id]; busy {
+		return false
+	}
+	if l.claimed == nil {
+		l.claimed = map[string]struct{}{}
+	}
+	l.claimed[id] = struct{}{}
+	return true
+}
+
+// Release gives up a Claim, after MarkSeen on success or alone on failure (so a retry can claim).
+func (l *Ledger) Release(id string) {
+	l.mu.Lock()
+	delete(l.claimed, id)
+	l.mu.Unlock()
 }
 
 // MarkSeen records id as seen at at (persisted).

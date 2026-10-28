@@ -191,9 +191,14 @@ func (rc *Receiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if rc.Ledger != nil && rc.Ledger.HasSeen(id, now) {
-		w.WriteHeader(http.StatusNoContent)
-		return
+	if rc.Ledger != nil {
+		// Claim is atomic with the seen check: a resend that overlaps the first delivery is
+		// acknowledged without being handled.
+		if !rc.Ledger.Claim(id, now) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		defer rc.Ledger.Release(id)
 	}
 	var ev Event
 	if err := json.Unmarshal(body, &ev); err != nil {
