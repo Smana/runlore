@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/factory"
+	"github.com/Smana/runlore/internal/investigate"
 )
 
 func factoryCfg(dir string) *config.Config {
@@ -88,5 +90,48 @@ func TestBuildFactoryReceiverReadsTheKeyAtEachRequest(t *testing.T) {
 	off.Factory.URL = ""
 	if BuildFactoryReceiver(off, nil, nil, slog.New(slog.DiscardHandler)) != nil {
 		t.Fatal("off: no receiver")
+	}
+}
+
+func TestBuildFactoryVerifier(t *testing.T) {
+	t.Setenv("FT_ID", "runlore")
+	t.Setenv("FT_SECRET", "s")
+	t.Setenv("FT_PROJ", "p")
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	cfg := factoryCfg(t.TempDir())
+	cfg.Factory.Soak, cfg.Factory.Verify.MaxSteps = config.Duration(30*time.Minute), 6
+	ledger, client, err := BuildFactory(cfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No alertmanager_url: verification is off.
+	if v := BuildFactoryVerifier(cfg, nil, ledger, client, nil, nil, log); v != nil {
+		t.Fatal("verification needs factory.verify.alertmanager_url")
+	}
+	cfg.Factory.Verify.AlertmanagerURL = "http://alertmanager:9093"
+	v := BuildFactoryVerifier(cfg, nil, ledger, client, nil, nil, log)
+	if v == nil || v.Soak != 30*time.Minute || v.Firing == nil || v.Ledger != ledger {
+		t.Fatalf("%+v", v)
+	}
+	// No model (nil deps): the verdict is still taken, with fixed evidence.
+	if v.Reinvestigate != nil {
+		t.Fatal("no model, no re-investigation")
+	}
+	// A disabled client builds nothing.
+	t.Setenv("FT_SECRET", "")
+	if _, c2, _ := BuildFactory(cfg, log); BuildFactoryVerifier(cfg, nil, ledger, c2, nil, nil, log) != nil {
+		t.Fatal("a disabled client verifies nothing")
+	}
+}
+
+func TestVerifyRequest(t *testing.T) {
+	req := verifyRequest(factory.Record{TriggerKey: "k1", Alert: "KubePodCrashLooping", Namespace: "apps", Workload: "Deployment/web", PR: 77})
+	if req.TriggerKey != "k1" || req.Title != "Verify the fix for KubePodCrashLooping" || req.Source != investigate.SourceAlert ||
+		req.Workload.Kind != "Deployment" || req.Workload.Name != "web" || req.Workload.Namespace != "apps" ||
+		req.Reason != "the fix merged in #77 should have resolved this alert; check whether it still fires and why" {
+		t.Fatalf("%+v", req)
+	}
+	if r := verifyRequest(factory.Record{TriggerKey: "k2", Alert: "A"}); r.Workload.Name != "" {
+		t.Fatalf("no workload in the record: %+v", r.Workload)
 	}
 }

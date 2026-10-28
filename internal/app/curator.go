@@ -146,6 +146,14 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 		log.Info("reinvestigate poller disabled: no model configured")
 		return nil
 	}
+	run := reinvestigateRun(cfg, deps, metrics, log, cfg.Investigation.MaxSteps)
+	return &investigate.Reinvestigator{Forge: client, Run: run, Log: log}
+}
+
+// reinvestigateRun returns the closure that runs one full paid re-investigation with the
+// investigator's own model, tools, recall and catalog, capped at maxSteps: the reinvestigate
+// poller passes investigation.max_steps, the factory verifier its shorter factory.verify.max_steps.
+func reinvestigateRun(cfg *config.Config, deps *Deps, metrics *telemetry.Metrics, log *slog.Logger, maxSteps int) func(context.Context, investigate.Request) (providers.Investigation, error) {
 	// The SAME model, tools, recall and catalog the investigator uses — not a second
 	// copy. See Deps: a second catalog means a second git-sync goroutine on the same
 	// directory, and an index that disagrees with the investigator's.
@@ -154,7 +162,7 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 	// same ceilings as the serve path — without Pricing the cost ceiling below would
 	// be handed through and then be structurally unable to fire.
 	loopPricing, verifyPricing := investigationPricing(cfg)
-	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
+	return func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool
 		// No TriggerHistory here: this run exists to reach a verdict INDEPENDENTLY of the
@@ -170,7 +178,7 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 			ModelProvider:             cfg.Model.Provider,
 			Pricing:                   loopPricing,
 			Verifier:                  investigate.VerifyOn(BuildVerifyModel(cfg), verifyPricing),
-			MaxSteps:                  cfg.Investigation.MaxSteps,
+			MaxSteps:                  maxSteps,
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 			MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
@@ -187,5 +195,4 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 		}
 		return res, nil
 	}
-	return &investigate.Reinvestigator{Forge: client, Run: run, Log: log}
 }

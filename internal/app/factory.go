@@ -3,6 +3,8 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,7 +14,10 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/factory"
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/notify"
+	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // factoryHTTPTimeout bounds each call to the identity provider and the factory API.
@@ -82,4 +87,57 @@ func BuildFactoryReceiver(cfg *config.Config, ledger *factory.Ledger, notifier *
 		}
 	}
 	return rc
+}
+
+// BuildFactoryVerifier builds the leader-only soak check; nil unless the factory client is on and
+// factory.verify.alertmanager_url is set. Without a model (nil deps) it still takes the verdict
+// from Alertmanager and sends fixed evidence, rather than not verifying at all. notifier (nil-safe)
+// supplies the Slack replier.
+func BuildFactoryVerifier(cfg *config.Config, deps *Deps, ledger *factory.Ledger, client *factory.Client,
+	notifier *notify.Multi, metrics *telemetry.Metrics, log *slog.Logger) *factory.Verifier {
+	f := cfg.Factory
+	if !f.Enabled() || ledger == nil || !client.Enabled() || f.Verify.AlertmanagerURL == "" {
+		return nil
+	}
+	hc := httpx.SecureClient(factoryHTTPTimeout)
+	v := &factory.Verifier{
+		Ledger: ledger, Client: client, Soak: f.Soak.Std(), Now: time.Now, Log: log,
+		Firing: func(ctx context.Context, alert, ns string) (bool, error) {
+			return factory.Firing(ctx, hc, f.Verify.AlertmanagerURL, alert, ns)
+		},
+	}
+	if deps != nil {
+		run := reinvestigateRun(cfg, deps, metrics, log, f.Verify.MaxSteps)
+		v.Reinvestigate = func(ctx context.Context, r factory.Record) (string, error) {
+			inv, err := run(ctx, verifyRequest(r))
+			if err != nil {
+				return "", err
+			}
+			return notify.Format(inv), nil
+		}
+	} else {
+		log.Info("factory verification runs without a model: the verdict is Alertmanager's, the evidence a fixed line")
+	}
+	if notifier != nil {
+		if r, ok := notifier.ThreadRepliers()["slack"]; ok {
+			v.Replier = r
+		}
+	}
+	log.Info("factory verification enabled", "soak", f.Soak.Std(), "max_steps", f.Verify.MaxSteps)
+	return v
+}
+
+// verifyRequest is the short re-investigation of a merged fix, on the incident's own TriggerKey.
+func verifyRequest(r factory.Record) investigate.Request {
+	var w providers.Workload
+	if kind, name, ok := strings.Cut(r.Workload, "/"); ok {
+		w = providers.Workload{Kind: kind, Name: name, Namespace: r.Namespace}
+	}
+	return investigate.Request{
+		Source:     investigate.SourceAlert,
+		Title:      "Verify the fix for " + r.Alert,
+		Workload:   w,
+		Reason:     fmt.Sprintf("the fix merged in #%d should have resolved this alert; check whether it still fires and why", r.PR),
+		TriggerKey: r.TriggerKey,
+	}
 }
