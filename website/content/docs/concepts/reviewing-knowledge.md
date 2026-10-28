@@ -152,6 +152,12 @@ see is closer to the ~28% worth keeping:
   RunLore's own "benign / self-healed / synthetic; nothing to do" classification.
   Skipping it keeps those findings out of the review queue entirely while still
   notifying chat, so nobody's blind to them — they just don't become PRs.
+  `no_action` is reserved for genuine noise (transient, already resolved, expected
+  behaviour). A false positive whose root cause is a fixable defect in a rule or config
+  held in Git (say a typo in an alert expression) is `action_suggested`: the fix is a PR
+  to that file, and the suggested action names the file/rule and the correction. RunLore
+  enforces this: a `no_action` verdict whose leading cause has category `rule_defect` or
+  `config_defect` is raised to `action_suggested`.
 - **`min_confidence`** (default `0.75`) — the quality bar. Findings the model
   isn't confident about stay chat-only, never a PR.
 - **`dup_score`** (default `5.0`) — the dedup threshold. A finding that closely

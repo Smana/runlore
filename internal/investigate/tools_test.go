@@ -376,3 +376,39 @@ func TestRequiredFieldsCarryGuidance(t *testing.T) {
 		}
 	}
 }
+
+func TestRuleDefectNoActionRaisedToActionSuggested(t *testing.T) {
+	args := `{"title":"ImageGalleryDown","verdict":"no_action","confidence":0.88,
+		"root_causes":[{"summary":"false positive: alert rule has a typo (image-galery vs image-gallery); deployment is healthy",
+		"confidence":0.88,"category":"rule_defect","evidence":["alert_rule: deployment=\"image-galery\""]}]}`
+	inv, err := parseFindings(args)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Verdict != providers.VerdictActionSuggested {
+		t.Fatalf("Verdict = %q, want action_suggested", inv.Verdict)
+	}
+	if inv.RootCauses[0].SuggestedAction == "" {
+		t.Fatal("a raised verdict must carry a suggested action")
+	}
+}
+
+func TestRuleDefectKeepsModelSuggestedAction(t *testing.T) {
+	inv, err := parseFindings(`{"verdict":"no_action","root_causes":[{"summary":"s","category":"config_defect","suggested_action":"fix X in a.yaml"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.Verdict != providers.VerdictActionSuggested || inv.RootCauses[0].SuggestedAction != "fix X in a.yaml" {
+		t.Fatalf("got %q / %q", inv.Verdict, inv.RootCauses[0].SuggestedAction)
+	}
+}
+
+func TestTransientNoActionStaysNoAction(t *testing.T) {
+	inv, err := parseFindings(`{"verdict":"no_action","root_causes":[{"summary":"transient spike, self-healed","category":"transient","evidence":["e"]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.Verdict != providers.VerdictNoAction {
+		t.Fatalf("Verdict = %q, want no_action", inv.Verdict)
+	}
+}
