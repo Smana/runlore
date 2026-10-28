@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -204,5 +205,87 @@ func TestCreateTaskRetriesAFailingTokenEndpoint(t *testing.T) {
 	c.hc.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) { dials++; return nil, errors.New("refused") })
 	if _, err := c.CreateTask(context.Background(), "k1", req); err == nil || dials != 3 {
 		t.Fatalf("a token transport error is retried like a task one: %d dials, %v", dials, err)
+	}
+}
+
+// verifyServer is the factory's verification endpoint behind the same token endpoint: it records
+// each body and path and answers from script, one status per call.
+type verifyServer struct {
+	script []int
+	bodies []string
+	paths  []string
+	auth   []string
+}
+
+func (v *verifyServer) client(t *testing.T, clock *time.Time) *Client {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/v2/token" {
+			_, _ = w.Write([]byte(`{"access_token":"tok","expires_in":3600}`))
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		v.bodies, v.paths, v.auth = append(v.bodies, string(b)), append(v.paths, r.URL.Path), append(v.auth, r.Header.Get("Authorization"))
+		code := v.script[0]
+		v.script = v.script[1:]
+		w.WriteHeader(code)
+		switch code {
+		case 201:
+			_, _ = w.Write([]byte(`{"task":"fixt0001","verdict":"resolved","recordedAt":"2026-10-27T10:00:00Z"}`))
+		case 200:
+			_, _ = w.Write([]byte(`{"task":"fixt0001","verdict":"resolved","duplicate":true}`))
+		case 409:
+			_, _ = w.Write([]byte(`{"error":"window_closed"}`))
+		default:
+			_, _ = w.Write([]byte(`{"error":"tasks_unavailable"}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	env := map[string]string{"ID": "runlore", "SECRET": "s3cret", "PROJ": "proj1"}
+	return NewClient(config.Factory{URL: srv.URL, TokenURL: srv.URL + "/oauth/v2/token", ClientIDEnv: "ID",
+		ClientSecretEnv: "SECRET", ProjectIDEnv: "PROJ", Repository: "Smana/cloud-native-ref", MaxCostUSD: 2}, // pragma: allowlist secret
+		func(k string) string { return env[k] }, srv.Client(), func() time.Time { return *clock })
+}
+
+func TestPostVerification(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	vv := Verification{Verdict: "resolved", Alert: VerifiedAlert{Name: "KubePodCrashLooping", FiringAtMerge: true},
+		CheckedAt: clock.UTC(), Evidence: "pods stable for 30m"}
+	want := `{"verdict":"resolved","alert":{"name":"KubePodCrashLooping","firingAtMerge":true,"firingNow":false},"checkedAt":"` +
+		clock.UTC().Format(time.RFC3339) + `","evidence":"pods stable for 30m"}`
+	for name, tc := range map[string]struct {
+		script []int
+		status int
+		reason string
+		calls  int
+	}{
+		"created":          {[]int{201}, 201, "", 1},
+		"duplicate":        {[]int{200}, 200, "", 1},
+		"window closed":    {[]int{409}, 409, "window_closed", 1},
+		"503 then created": {[]int{503, 201}, 201, "", 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			vs := &verifyServer{script: tc.script}
+			c := vs.client(t, &clock)
+			status, reason, err := c.PostVerification(context.Background(), "fixt0001", vv)
+			if err != nil || status != tc.status || reason != tc.reason {
+				t.Fatalf("got %d %q %v", status, reason, err)
+			}
+			if len(vs.bodies) != tc.calls {
+				t.Fatalf("calls %d, want %d", len(vs.bodies), tc.calls)
+			}
+			for i := range vs.bodies {
+				if vs.bodies[i] != want+"\n" && vs.bodies[i] != want {
+					t.Fatalf("body %s\nwant %s", vs.bodies[i], want)
+				}
+				if vs.paths[i] != "/v1/tasks/fixt0001/verification" || vs.auth[i] != "Bearer tok" {
+					t.Fatalf("path %q auth %q", vs.paths[i], vs.auth[i])
+				}
+			}
+		})
+	}
+	// A 503 that never clears is an error, so the entry stays due.
+	vs := &verifyServer{script: []int{503, 503, 503}}
+	if _, _, err := vs.client(t, &clock).PostVerification(context.Background(), "fixt0001", vv); err == nil {
+		t.Fatal("three 503s are an error")
 	}
 }

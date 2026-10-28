@@ -233,6 +233,8 @@ func RunServe(version string, args []string) error {
 		notifier.Add(&factory.Notifier{Client: factoryClient, Ledger: factoryLedger,
 			Repository: cfg.Factory.Repository, MaxCostUSD: cfg.Factory.MaxCostUSD, Log: log})
 	}
+	// The soak check: leader-only (started in startWork), and told of each merge by the receiver.
+	factoryVerifier := BuildFactoryVerifier(cfg, deps, factoryLedger, factoryClient, notifier, metrics, log)
 	// One responder, two transports: built ONCE and shared by both Slack's and
 	// Matrix's thread-capture wiring below, so the per-hour forge-write budget
 	// (buildThreadResponder) bounds forge writes system-wide rather than once
@@ -414,6 +416,11 @@ func RunServe(version string, args []string) error {
 				log.Warn("factory ledger reload on leadership failed; serving prior state", "err", rerr)
 			}
 		}
+		// Resume the soak checks the previous leader left in the file (the deadline is in the
+		// ledger, reloaded above).
+		if factoryVerifier != nil {
+			go factoryVerifier.Run(workCtx, time.Minute)
+		}
 		go queue.Run(workCtx)
 		// The gitops watcher source is built only when sources.gitops.enabled, so
 		// RunWatchers no-ops when no watcher source is present.
@@ -543,6 +550,9 @@ func RunServe(version string, args []string) error {
 	// The agent factory's webhook receiver, assigned through a nil-checked variable for the
 	// same typed-nil reason as acts.Threads above.
 	if rc := BuildFactoryReceiver(cfg, factoryLedger, notifier, log); rc != nil {
+		if factoryVerifier != nil {
+			rc.OnMerged = factoryVerifier.OnMerged
+		}
 		acts.Factory = rc
 		log.Info("agent factory webhook enabled", "endpoint", "/factory/webhook")
 	}

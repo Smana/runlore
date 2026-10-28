@@ -46,6 +46,8 @@ type Record struct {
 	PR            int       `json:"pr,omitempty"`
 	MergedAt      time.Time `json:"merged_at,omitzero"`
 	FiringAtMerge bool      `json:"firing_at_merge,omitempty"`
+	// FiringAssumed is why FiringAtMerge was not read from Alertmanager ("" when it was).
+	FiringAssumed string    `json:"firing_assumed,omitempty"`
 	SoakUntil     time.Time `json:"soak_until,omitzero"`
 	Verdict       string    `json:"verdict,omitempty"`
 	Outcome       string    `json:"outcome,omitempty"`
@@ -196,6 +198,21 @@ func (l *Ledger) Due(at time.Time) []Record {
 		}
 	}
 	slices.SortFunc(out, func(a, b Record) int { return a.SoakUntil.Compare(b.SoakUntil) })
+	return out
+}
+
+// Unscheduled returns the records merged whose soak deadline was never written (the process died
+// between the receiver recording the merge and OnMerged recording the deadline), with no verdict
+// and no terminal outcome.
+func (l *Ledger) Unscheduled() []Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Record
+	for _, r := range l.records {
+		if !r.MergedAt.IsZero() && r.SoakUntil.IsZero() && r.Verdict == "" && r.Outcome == "" {
+			out = append(out, r)
+		}
+	}
 	return out
 }
 

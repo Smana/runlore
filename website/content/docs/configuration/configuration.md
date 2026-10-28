@@ -1023,6 +1023,10 @@ factory:
   repository: Smana/cloud-native-ref
   max_cost_usd: 2
   webhook: {secret_env: FACTORY_WEBHOOK_KEY}
+  soak: 30m                                       # optional; default 30m, at least 5m
+  verify:                                         # optional; empty alertmanager_url leaves verification off
+    alertmanager_url: http://alertmanager.monitoring.svc.cluster.local:9093
+    max_steps: 6                                  # default 6
 ```
 
 - **Credentials are env var names, never values.** The client authenticates to the identity
@@ -1049,6 +1053,18 @@ factory:
   off.
 - **State** is `factory.jsonl`, an append-only ledger beside `outcome.ledger_path` (without that
   path the ledger is off and webhooks cannot be matched to incidents).
+
+- **Verification (opt-in).** With `verify.alertmanager_url` set, once the fix is merged RunLore
+  waits `soak` (measured from the merge, stored in the ledger so a new leader resumes it), then asks
+  Alertmanager whether the alert is still firing (`GET /api/v2/alerts` with `active=true`,
+  `silenced=false`, `inhibited=false`, filtered on `alertname` and, when the incident has one,
+  `namespace`). **The verdict is Alertmanager's**: `persisting` when the alert fires, `resolved`
+  when it does not. A short re-investigation (`verify.max_steps`, under the usual cost ceiling)
+  supplies the evidence text, redacted and cut to 16 KiB; if it fails the verdict is still sent,
+  with a fixed line. RunLore posts both to the factory (`POST /v1/tasks/{task}/verification`) and
+  tells the incident thread. An unreachable Alertmanager sends nothing and is retried every minute
+  until the factory answers `409 window_closed`; a refusal the factory will not change (400, 403,
+  404, 409) is recorded and not retried.
 
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook). The listen address is the

@@ -247,3 +247,90 @@ func (c *Client) postTask(ctx context.Context, key string, payload []byte) (Crea
 	}
 	return out, false, nil
 }
+
+// VerifiedAlert is the alert a verdict is about.
+type VerifiedAlert struct {
+	Name          string `json:"name"`
+	FiringAtMerge bool   `json:"firingAtMerge"`
+	FiringNow     bool   `json:"firingNow"`
+}
+
+// Verification is the body of POST /v1/tasks/{task}/verification: resolved or persisting, the
+// alert's state at the merge and now, when it was checked, and the (redacted) evidence.
+type Verification struct {
+	Verdict   string        `json:"verdict"`
+	Alert     VerifiedAlert `json:"alert"`
+	CheckedAt time.Time     `json:"checkedAt"`
+	Evidence  string        `json:"evidence"`
+}
+
+// PostVerification posts the verdict on the fix task. It returns the status and, for a refusal,
+// the factory's reason (409 window_closed, 403 not_own_task, ...). A 503 or a transport error is
+// retried twice more with the same body, after 1 s and 3 s, then returned as an error.
+func (c *Client) PostVerification(ctx context.Context, task string, v Verification) (int, string, error) {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return 0, "", fmt.Errorf("factory: marshal verification: %w", err)
+	}
+	path := "/v1/tasks/" + url.PathEscape(task) + "/verification"
+	var lastErr error
+	refreshed := false
+	for attempt := 0; attempt <= len(retryDelays); attempt++ {
+		if attempt > 0 {
+			if err := retrySleep(ctx, retryDelays[attempt-1]); err != nil {
+				return 0, "", fmt.Errorf("factory: %w (last: %w)", err, lastErr)
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, "", err
+		}
+		status, reason, retry, err := c.postVerification(ctx, path, payload)
+		if err == nil && status == http.StatusUnauthorized && !refreshed {
+			refreshed = true
+			c.dropToken()
+			attempt--
+			continue
+		}
+		if !retry {
+			return status, reason, err
+		}
+		lastErr = err
+	}
+	return 0, "", fmt.Errorf("factory: verification not accepted after %d attempts: %w", len(retryDelays)+1, lastErr)
+}
+
+// postVerification makes one attempt; retry is true for a 503 or a transport error.
+func (c *Client) postVerification(ctx context.Context, path string, payload []byte) (int, string, bool, error) {
+	tok, retry, err := c.accessToken(ctx)
+	if err != nil {
+		return 0, "", retry, err
+	}
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.URL, "/")+path, bytes.NewReader(payload))
+	if err != nil {
+		return 0, "", false, httpx.SanitizeURLError(err)
+	}
+	hreq.Header.Set("Authorization", "Bearer "+tok)
+	hreq.Header.Set("Content-Type", "application/json")
+	resp, err := c.hc.Do(hreq)
+	if err != nil {
+		return 0, "", true, fmt.Errorf("factory: %w", httpx.SanitizeURLError(err))
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return 0, "", true, fmt.Errorf("factory: read: %w", err)
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return 0, "", true, errors.New("factory: 503")
+	}
+	var a struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(body, &a) // a body that is not JSON leaves the reason empty; the status stands
+	reason := a.Reason
+	if reason == "" {
+		reason = a.Error
+	}
+	return resp.StatusCode, reason, false, nil
+}
