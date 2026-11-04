@@ -5,6 +5,7 @@ package curator
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/providers"
@@ -111,6 +112,9 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Fingerprint:   DupFingerprint(inv),
 		Confidence:    inv.Confidence,
 		Provenance:    refs,
+		Origin:        "runlore",
+		Verdict:       string(inv.Verdict),
+		EvidenceLine:  evidenceLine(inv),
 		// Recurrence facts for the PR body's related-knowledge section — stamped
 		// on the Investigation BEFORE curation runs (see onInvestigationComplete).
 		Occurrences:    inv.Occurrences,
@@ -278,4 +282,24 @@ func changeRefs(inv providers.Investigation) []string {
 		}
 	}
 	return refs
+}
+
+// evidenceLineMax bounds the one evidence line shown in the PR review card.
+const evidenceLineMax = 200
+
+// evidenceLine is the top root cause's first evidence, cut to evidenceLineMax
+// bytes on a rune boundary.
+func evidenceLine(inv providers.Investigation) string {
+	if len(inv.RootCauses) == 0 || len(inv.RootCauses[0].Evidence) == 0 {
+		return ""
+	}
+	s := inv.RootCauses[0].Evidence[0]
+	if len(s) <= evidenceLineMax {
+		return s
+	}
+	cut := evidenceLineMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

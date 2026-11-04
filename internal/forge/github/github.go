@@ -21,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // TokenFunc returns a valid installation token (minted/cached by the caller).
@@ -454,6 +455,12 @@ func (c *Client) prBody(e providers.KBEntry) string {
 	if s := c.relatedSection(e); s != "" {
 		body += "\n\n" + s
 	}
+	if e.Verdict != "" {
+		body += "\n\n" + providers.CardMarker(e.Verdict, e.Confidence)
+	}
+	if ev := cardEvidence(e.EvidenceLine); ev != "" {
+		body += "\n\n**Evidence:** " + ev
+	}
 	if m := providers.FingerprintMarker(e.Fingerprint); m != "" {
 		body += "\n\n" + m
 	}
@@ -556,3 +563,14 @@ func entryPath(e providers.KBEntry, slug string, now int64) string {
 }
 
 func slugify(s string) string { return okf.Slugify(s) }
+
+// cardEvidence makes the model-authored evidence line safe for the PR body: one
+// line, secrets redacted, no HTML comment delimiters (a copied marker could
+// pre-empt a real one), images neutralized by prBody.
+func cardEvidence(s string) string {
+	s = strings.Join(strings.Fields(redact.Secrets(s)), " ")
+	for strings.Contains(s, "<!--") || strings.Contains(s, "-->") {
+		s = strings.NewReplacer("<!--", "", "-->", "").Replace(s)
+	}
+	return s
+}

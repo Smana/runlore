@@ -704,3 +704,24 @@ func TestTokenNeverAppearsInErrors(t *testing.T) {
 		t.Fatalf("stripping must not swallow the diagnostic body:\n%s", err.Error())
 	}
 }
+
+func TestPRBodyCarriesReviewCard(t *testing.T) {
+	c := &Client{}
+	body := c.prBody(providers.KBEntry{Title: "T", Description: "d", Verdict: "action_required", Confidence: 0.86, EvidenceLine: "pod crashloops"})
+	for _, want := range []string{providers.CardMarker("action_required", 0.86), "**Evidence:** pod crashloops"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q:\n%s", want, body)
+		}
+	}
+	v, conf, ok := providers.ParseCardMarker(body)
+	if !ok || v != "action_required" || conf != 0.86 {
+		t.Fatalf("round trip: %q %v %v", v, conf, ok)
+	}
+	bad := c.prBody(providers.KBEntry{Title: "T", Verdict: "x --> <b>", Confidence: 0.5})
+	if v, _, ok := providers.ParseCardMarker(bad); !ok || v != "unknown" {
+		t.Fatalf("invalid verdict must be unknown: %q", v)
+	}
+	if _, _, ok := providers.ParseCardMarker(c.prBody(providers.KBEntry{Title: "T"})); ok {
+		t.Fatal("no card without a verdict")
+	}
+}

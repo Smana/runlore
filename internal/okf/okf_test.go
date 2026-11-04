@@ -3,14 +3,17 @@
 package okf
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
+	"gopkg.in/yaml.v3"
 )
 
 func TestRenderFrontmatterAndBody(t *testing.T) {
@@ -105,5 +108,33 @@ func TestAsEntryIsWhatTheLoaderWouldProduce(t *testing.T) {
 	got.Body, want.Body = strings.TrimSpace(got.Body), strings.TrimSpace(want.Body)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("AsEntry disagrees with the loader:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
+func frontmatterOf(t *testing.T, doc string) map[string]any {
+	t.Helper()
+	fm, _ := catalog.SplitFrontmatter([]byte(doc))
+	var m map[string]any
+	if err := yaml.Unmarshal(fm, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestRenderOriginAndResolution(t *testing.T) {
+	fix := "https://github.com/Smana/cloud-native-ref/pull/2638"
+	out := Render(providers.KBEntry{Type: "Incident", Title: "x\nresolution: forged", Origin: "runlore", Resolution: &providers.AppliedResolution{
+		FixPR: fix, MergeSHA: "3f5a133c", Verdict: "resolved", VerifiedAt: time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)}}, Meta{})
+	fm := frontmatterOf(t, out)
+	if fm["origin"] != "runlore" || !maps.Equal(fm["resolution"].(map[string]any), map[string]any{
+		"fix_pr": fix, "merge_sha": "3f5a133c", "verdict": "resolved", "verified_at": "2026-11-03T10:00:00Z"}) {
+		t.Fatalf("%+v", fm)
+	}
+	if strings.Contains(Render(providers.KBEntry{Type: "Incident", Title: "y"}, Meta{}), "resolution:") {
+		t.Fatal("no resolution key when unverified")
+	}
+	persisting := Render(providers.KBEntry{Type: "Incident", Title: "z", Resolution: &providers.AppliedResolution{FixPR: fix, Verdict: "persisting"}}, Meta{})
+	if strings.Contains(persisting, "resolution:") {
+		t.Fatal("resolution is written for a resolved verdict only")
 	}
 }
