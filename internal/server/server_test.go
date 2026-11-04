@@ -566,3 +566,20 @@ func TestFactoryWebhookIsForwardedByAFollower(t *testing.T) {
 		t.Fatalf("%d %q %q", w.Code, gotSig, gotBody)
 	}
 }
+
+func TestMCPIsAnsweredByAFollowerItself(t *testing.T) {
+	// /mcp reads the replica's own catalog: a follower must not relay it to the leader.
+	leader := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("the leader was reached")
+	}))
+	defer leader.Close()
+	fwd := &Forward{IsLeader: func() bool { return false }, LeaderAddr: func() string { return strings.TrimPrefix(leader.URL, "http://") },
+		SelfName: "me", LeaderName: func() string { return "other" }, Log: discardLog}
+	mcp := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })
+	s := New(nil, Actions{MCP: mcp}, nil, nil, nil, fwd, discardLog)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{}`)))
+	if w.Code != http.StatusTeapot {
+		t.Fatalf("%d", w.Code)
+	}
+}
