@@ -5,7 +5,11 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 func factoryCfg(dir string) *config.Config {
@@ -178,9 +183,6 @@ func TestBuildFactoryCuration(t *testing.T) {
 			cu.Outcome == nil || cu.Pulls == nil || cu.Drafts == nil || cu.Resolve == nil || cu.FindEntry == nil {
 			t.Errorf("unwired: %+v", cu)
 		}
-		if cu.Promote != nil {
-			t.Error("Promote stays nil until the Queue's PromoteOne exists")
-		}
 		if !cu.DryRun {
 			t.Error("curate.sweeps.mode unset is dry-run, and Curation.DryRun follows it")
 		}
@@ -195,6 +197,16 @@ func TestBuildFactoryCuration(t *testing.T) {
 			t.Fatalf("apply: DryRun must be false: %+v", cu)
 		}
 	})
+	for mode, want := range map[string]bool{"": false, config.SweepOff: false, config.SweepDryRun: false, config.SweepApply: true} {
+		t.Run("Promote under mode "+mode, func(t *testing.T) {
+			cfg := curationCfg(t)
+			cfg.Curate.Sweeps.Mode = mode
+			cu, _ := curationRig(t, cfg, discardLog())
+			if cu == nil || (cu.Promote != nil) != want {
+				t.Fatalf("Promote set: want %v: %+v", want, cu)
+			}
+		})
+	}
 	t.Run("off: nothing changes", func(t *testing.T) {
 		cfg := curationCfg(t)
 		cfg.Factory.Curation.Defer = false
@@ -266,5 +278,56 @@ func TestWithFactoryCurationSetsInner(t *testing.T) {
 				t.Errorf("Inner set = %v, want %v", cu.Inner != nil, withForge)
 			}
 		})
+	}
+}
+
+// The wiring end to end: under apply, Promote reads the ledger the verification wrote, lists the KB
+// repo through the forge, and lays the label on the PR.
+func TestBuildFactoryCurationPromoteLabelsFromTheLedger(t *testing.T) {
+	var labelled []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"t","expires_at":"2099-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/kb/issues":
+			if r.URL.Query().Get("labels") != "runlore" {
+				t.Errorf("listed label %q", r.URL.Query().Get("labels"))
+			}
+			body, _ := json.Marshal(providers.FingerprintMarker("fp"))
+			_, _ = w.Write([]byte(`[{"number":7,"title":"KB: x","body":` + string(body) +
+				`,"labels":[{"name":"runlore"}],"pull_request":{"url":"u"}}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/kb/issues/7/labels":
+			b, _ := io.ReadAll(r.Body)
+			labelled = append(labelled, string(b))
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusTeapot)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := curationCfg(t)
+	cfg.Forge.GitHubAPIURL = srv.URL
+	cfg.Curate.Sweeps.Mode = config.SweepApply
+	outcomes, err := outcome.New(cfg.Outcome.LedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := outcomes.Verify(outcome.Verification{Entry: "incidents/x.md", DupFingerprint: "fp", Room: "r", Held: true, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := factory.OpenLedger(filepath.Join(t.TempDir(), "factory.jsonl"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := factory.NewClient(cfg.Factory, func(string) string { return "x" }, nil, time.Now)
+	cu := BuildFactoryCuration(cfg, ledger, client, outcomes, nil, audit.Nop{}, discardLog())
+	if err := cu.Promote(context.Background(), 7); err != nil {
+		t.Fatal(err)
+	}
+	if len(labelled) != 1 || !strings.Contains(labelled[0], "ready-to-merge") {
+		t.Fatalf("want ready-to-merge on PR 7: %v", labelled)
 	}
 }

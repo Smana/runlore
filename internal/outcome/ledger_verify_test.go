@@ -3,6 +3,7 @@
 package outcome
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -133,5 +134,30 @@ func TestMeasures(t *testing.T) {
 	must(t, err)
 	if want := (Measures{Incidents: 2, InstantRecalls: 1, RecallsResolved: 1, TokensPerIncident: 23000}); got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// A compaction folds the oldest opens into a checkpoint, so a window reaching back past the
+// retained tail undercounts: Measures says so rather than reporting a clean number.
+func TestMeasuresFlagsAWindowThePartialTailCannotCover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	l, err := NewWithMaxEvents(path, 4)
+	must(t, err)
+	at := time.Unix(1_800_000_000, 0)
+	for i := 0; i < 6; i++ {
+		must(t, l.Open(Event{Fingerprint: fmt.Sprintf("f%d", i), TriggerKey: fmt.Sprintf("k%d", i), Kind: "fresh", At: at.Add(time.Duration(i) * time.Hour)}))
+	}
+	l, err = NewWithMaxEvents(path, 4) // the reload compacts
+	must(t, err)
+	if m, err := l.Measures(time.Time{}); err != nil || !m.Partial || m.Incidents >= 6 {
+		t.Fatalf("the whole history asked of a compacted ledger: %+v %v", m, err)
+	}
+	if m, err := l.Measures(at.Add(5 * time.Hour)); err != nil || m.Partial || m.Incidents != 1 {
+		t.Fatalf("a window inside the retained tail is exact: %+v %v", m, err)
+	}
+	fresh := mustNew(t, filepath.Join(t.TempDir(), "o.jsonl"))
+	must(t, fresh.Open(Event{Fingerprint: "a", TriggerKey: "k", Kind: "fresh", At: at}))
+	if m, _ := fresh.Measures(time.Time{}); m.Partial {
+		t.Fatal("a ledger never compacted is complete")
 	}
 }

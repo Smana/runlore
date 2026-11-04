@@ -85,6 +85,17 @@ func TestContestedCommentsOnOpenKBPR(t *testing.T) {
 	}
 }
 
+func TestContestedJoinsAKBRepoInAnotherCase(t *testing.T) {
+	f := &contestedForge{openPRs: map[int]bool{7: true}}
+	p := contested(t, f, outcome.ContestedTrigger{TriggerKey: "k", CuratedURL: "https://github.com/O/R/pull/7", Downs: 1})
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(f.posted[7]) != 1 {
+		t.Fatalf("a link differing from kb_repo in case only is still kb_repo's: %+v", f.posted)
+	}
+}
+
 func TestContestedCommentRendersConfirmations(t *testing.T) {
 	ct := outcome.ContestedTrigger{TriggerKey: "trig-1", CuratedURL: "https://github.com/o/r/pull/7", Downs: 1, Confirms: 2}
 	body := contestedComment(ct, contestedMarker(ct.TriggerKey))

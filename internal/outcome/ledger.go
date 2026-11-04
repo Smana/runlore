@@ -1880,9 +1880,15 @@ func (l *Ledger) applyLinkLocked(e Event) {
 // per incident.
 type Measures struct {
 	Incidents, InstantRecalls, RecallsResolved, TokensPerIncident int
+	// Partial is set when a compaction has folded away events the window may reach: the file
+	// starts with a checkpoint and its first retained event is later than the window's start.
+	// The counts then cover the retained tail only and undercount.
+	Partial bool
 }
 
-// Measures counts the opens carrying a TriggerKey since the given instant.
+// Measures counts the opens carrying a TriggerKey since the given instant. It reads the
+// retained events only (a compaction folds the oldest into a checkpoint), and says so with
+// Partial when the window reaches back past them.
 func (l *Ledger) Measures(since time.Time) (Measures, error) {
 	var m Measures
 	if !l.enabled() {
@@ -1893,6 +1899,17 @@ func (l *Ledger) Measures(since time.Time) (Measures, error) {
 	events, _, err := l.readEvents()
 	if err != nil {
 		return m, err
+	}
+	if len(events) > 0 && events[0].Event == "checkpoint" {
+		for _, e := range events[1:] {
+			if !e.At.IsZero() {
+				m.Partial = e.At.After(since)
+				break
+			}
+		}
+		if len(events) == 1 {
+			m.Partial = true
+		}
 	}
 	eps := episodesOf(events)
 	tokens, i := 0, 0

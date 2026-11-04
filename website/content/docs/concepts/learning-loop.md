@@ -14,8 +14,9 @@ weight: 30
 > once a human merges it the entry **compounds** (recall-able next time). What makes
 > this *learning* and not note-taking: a note's trust is **derived from its real-world
 > resolve-rate** (plus 👍/👎 votes), so a note that stops working **decays** and can be
-> overturned. And the human stays in the loop throughout — **RunLore drafts, a human
-> merges; nothing is auto-written.** (Deep dives: §3 Retrieve, §4 Capture, §6 Decay,
+> overturned. And the human owns the merge policy — **RunLore drafts. A human owns the
+> merge policy; an entry whose fix a machine verified may be merged by the
+> adopter's automation, and the rest wait in the queue.** (Deep dives: §3 Retrieve, §4 Capture, §6 Decay,
 > §8 Validation.)
 
 > **Terminology.** On this page a **note** always means a *curated entry* — the
@@ -467,6 +468,13 @@ ledger, so they stay source-neutral):
   merge-ready queue regardless of the LLM's re-worded title. Exact title match
   (`"KB: " + the incident title`) is only a legacy fallback for markerless,
   hand-filed PRs. A human still merges.
+  With `factory.curation.defer` on, the Queue also reads the factory's verification: an open
+  entry PR whose fix's latest observation held becomes *ready-to-merge* without waiting for a
+  sweep (after the verification itself, when `curate.sweeps.mode` is `apply`), and the label is
+  withdrawn when the evidence flips: a later failed observation, a standing 👎, a possible-duplicate
+  section or a human's `security` label. A human's `accepted` label overrides. RunLore never
+  merges; the label is what an adopter's own automation may trust. See
+  [Reviewing knowledge]({{< relref "reviewing-knowledge.md#8-the-knowledge-queue" >}}).
 - **Recurrence** — open one *knowledge-gap* issue when an unresolved pattern (the
   affected resource) recurs past `recurrence_threshold`. Idempotent by an existing-issue
   check (the forge's open gap issues are the "already-opened" record), so re-running

@@ -225,3 +225,28 @@ func TestWithNoteMarkerRoundTripsThroughHasNoteMarker(t *testing.T) {
 		t.Errorf("WithNoteMarker with no key = %q, want the block untouched", got)
 	}
 }
+
+// A rebuilt entry PR is admitted only as additions: neither file may lose the blank lines it ends with.
+func TestBundleUpdatesKeepTheTail(t *testing.T) {
+	const date = "2026-07-03"
+	e := bundleEntry()
+	cases := []struct {
+		name string
+		got  []byte
+		want string
+	}{
+		{"a log whose only section ends the file, as one H1-only draft leaves it",
+			UpdateLog([]byte("# Log\n## "+date+"\n\n* old\n\n"), e, "incidents/h.md", date),
+			"# Log\n## " + date + "\n\n* **Creation**: Added [" + e.Title + "](incidents/h.md).\n\n* old\n\n"},
+		{"an index with trailing blank lines",
+			UpdateIndex([]byte("# Index\n\n## Incidents\n\n- a\n\n## Other\n\n- b\n\n\n"), e, "incidents/h.md"),
+			"# Index\n\n## Incidents\n\n- a\n- [" + e.Title + "](incidents/h.md) — " + e.Description + "\n\n## Other\n\n- b\n\n\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if string(tc.got) != tc.want {
+				t.Fatalf("got %q\nwant %q", tc.got, tc.want)
+			}
+		})
+	}
+}

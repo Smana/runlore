@@ -28,8 +28,9 @@ import (
 
 // maintainBundle updates index.md (only when the bundle already has one — its
 // structure is the owner's choice) and creates/appends log.md (whose shape OKF §7
-// fully specifies) on the PR branch. Best-effort by contract: a failure here must
-// never lose the entry PR, so the caller ignores the returned error beyond logging.
+// fully specifies) on the branch. It returns the first failure, and the caller decides:
+// OpenPR ignores it (a failure must never lose the entry PR), RebuildEntryPR stops on it
+// (a missing companion would change the shape of a PR that already exists).
 func (c *Client) maintainBundle(ctx context.Context, e providers.KBEntry, entryPath, branch string) error {
 	date := time.Now().UTC().Format("2006-01-02")
 
@@ -75,7 +76,7 @@ func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sh
 		return nil, "", false, nil
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, "", false, fmt.Errorf("github GET %s: status %d", path, resp.StatusCode)
+		return nil, "", false, &statusError{code: resp.StatusCode, msg: fmt.Sprintf("github GET %s: status %d", path, resp.StatusCode)}
 	}
 	var out struct {
 		SHA      string `json:"sha"`

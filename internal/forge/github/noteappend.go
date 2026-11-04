@@ -87,20 +87,23 @@ func (c *Client) EditEntryOnPR(ctx context.Context, number int, message string, 
 
 // prHead is what the one read of a pull request returns.
 type prHead struct {
-	state, branch, repo string
-	merged              bool
-	labels              []string
+	state, branch, repo, headSHA string
+	merged                       bool
+	mergeable                    *bool // null while GitHub computes it
+	labels                       []string
 }
 
 func (c *Client) readPR(ctx context.Context, number int) (prHead, error) {
 	var pr struct {
-		State    string  `json:"state"`
-		MergedAt *string `json:"merged_at"`
-		Labels   []struct {
+		State     string  `json:"state"`
+		MergedAt  *string `json:"merged_at"`
+		Mergeable *bool   `json:"mergeable"`
+		Labels    []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
 		Head struct {
 			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
 			Repo struct {
 				FullName string `json:"full_name"`
 			} `json:"repo"`
@@ -109,7 +112,7 @@ func (c *Client) readPR(ctx context.Context, number int) (prHead, error) {
 	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", c.owner, c.repo, number), nil, &pr); err != nil {
 		return prHead{}, err
 	}
-	out := prHead{state: pr.State, branch: pr.Head.Ref, repo: pr.Head.Repo.FullName, merged: pr.MergedAt != nil}
+	out := prHead{state: pr.State, branch: pr.Head.Ref, repo: pr.Head.Repo.FullName, headSHA: pr.Head.SHA, merged: pr.MergedAt != nil, mergeable: pr.Mergeable}
 	for _, l := range pr.Labels {
 		out.labels = append(out.labels, l.Name)
 	}

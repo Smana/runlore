@@ -64,6 +64,11 @@ type statusError struct {
 
 func (e *statusError) Error() string { return e.msg }
 
+// Is makes a 403 or 429 read as providers.ErrRateLimited, for a loop over many pull requests.
+func (e *statusError) Is(target error) bool {
+	return target == providers.ErrRateLimited && (e.code == http.StatusForbidden || e.code == http.StatusTooManyRequests)
+}
+
 // isNotFound reports whether err is a 404 from do.
 func isNotFound(err error) bool {
 	var se *statusError
@@ -137,11 +142,14 @@ func (c *Client) OpenIssue(ctx context.Context, inv providers.Investigation) (pr
 	return providers.Ref{URL: out.HTMLURL}, nil
 }
 
+// kbBranchPrefix names the branches OpenPR creates, the only ones RebuildEntryPR moves.
+const kbBranchPrefix = "runlore/kb-"
+
 // OpenPR drafts the KB entry on a new branch and opens a PR.
 func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref, error) {
 	slug := slugify(e.Title)
 	now := time.Now().Unix()
-	branch := fmt.Sprintf("runlore/kb-%s-%d", slug, now)
+	branch := fmt.Sprintf("%s%s-%d", kbBranchPrefix, slug, now)
 	path := entryPath(e, slug, now)
 
 	// 1. base ref SHA
@@ -200,6 +208,7 @@ type rawIssue struct {
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
 	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -216,7 +225,7 @@ func (ri rawIssue) curated() providers.CuratedIssue {
 	for _, l := range ri.Labels {
 		labels = append(labels, l.Name)
 	}
-	return providers.CuratedIssue{Number: ri.Number, URL: ri.HTMLURL, Title: ri.Title, Body: ri.Body, Labels: labels, UpdatedAt: ri.UpdatedAt}
+	return providers.CuratedIssue{Number: ri.Number, URL: ri.HTMLURL, Title: ri.Title, Body: ri.Body, Labels: labels, UpdatedAt: ri.UpdatedAt, CreatedAt: ri.CreatedAt}
 }
 
 // listIssues fetches ALL pages of issues+PRs carrying the label in the given state
@@ -480,7 +489,7 @@ func (c *Client) suspectedDuplicateSection(e providers.KBEntry) string {
 	}
 	r := e.SuspectedDuplicate
 	var b strings.Builder
-	b.WriteString("## Possible duplicate\n\n")
+	b.WriteString(providers.PossibleDuplicateHeading + "\n\n")
 	fmt.Fprintf(&b, "The decision model flagged this finding as a probable duplicate of [%s](%s)", r.Title, c.blobURL(r.Path))
 	if r.Resource != "" {
 		fmt.Fprintf(&b, " · resource %s", r.Resource)

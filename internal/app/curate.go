@@ -15,6 +15,7 @@ import (
 	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/providers"
 
 	github "github.com/Smana/runlore/internal/forge/github"
 )
@@ -23,16 +24,39 @@ import (
 // backlog-dedup pass (collapses duplicate open PRs across history) and the
 // lifecycle sweep (closes stale, unprotected PRs by forge age). When
 // outcome.ledger_path is configured, it also runs the Queue pass (promotes
-// solved→ready-to-merge when the incident resolves), the Recurrence pass
+// solved→ready-to-merge when the incident resolves and, under factory.curation.defer,
+// labels or withdraws from the factory's verified evidence), the Recurrence pass
 // (opens a knowledge-gap issue for repeatedly-unresolved patterns), and the
 // Contested pass (warns the open KB PR when humans 👎'd the investigation
 // behind it).
+//
+// `lore curate queue-issue` does not groom. It reconciles labels through the Queue pass, rebuilds the
+// conflicting entry PRs that can use it, then rewrites the Knowledge queue issue at once, whatever
+// curate.queue_issue.schedule says. So it can force-push RunLore's own runlore/kb- branches and add or
+// strip ready-to-merge, unless --dry-run. `lore curate refresh-entries` only rebuilds: a PR labelled
+// ready-to-merge or with held evidence, at most 10 a run, or with --pr the one named.
 func RunCurate(args []string) error {
 	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
 	dry := fs.Bool("dry-run", false, "log and audit what the passes would do without writing to the forge")
+	onlyPR := fs.Int("pr", 0, "refresh-entries: rebuild this one PR, whatever its label or evidence")
+	sub := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub, args = args[0], args[1:]
+		if sub != "queue-issue" && sub != "refresh-entries" {
+			return fmt.Errorf("unknown curate subcommand %q (want queue-issue, refresh-entries, or none to groom)", sub)
+		}
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// A positional left after the flags would be ignored and the run would groom the whole KB in
+	// apply: refuse it rather than guess what was meant.
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q: a subcommand comes first (lore curate queue-issue --config <path>)", fs.Arg(0))
+	}
+	if *onlyPR < 0 || *onlyPR != 0 && sub != "refresh-entries" {
+		return fmt.Errorf("--pr takes a pull request number, with refresh-entries only")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -84,9 +108,93 @@ func RunCurate(args []string) error {
 		LogLedgerStartup(log, outcome.Status{}) // disabled: a plain info, no warning
 	}
 
+	line := queueLine(cfg, *dry, log)
+	if sub == "queue-issue" {
+		log.Info("curate: reconciling labels, rebuilding conflicting entry PRs, rewriting the Knowledge queue issue", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
+		return runQueueIssue(context.Background(), buildQueueIssue(cfg, guarded, ledger, line, log))
+	}
+	if sub == "refresh-entries" {
+		log.Info("curate: rebuilding conflicting entry PRs", "repo", cfg.Forge.KBRepo, "pr", *onlyPR, "dry_run", *dry)
+		refresh := buildRefresh(cfg, guarded, ledger, log)
+		refresh.Only = *onlyPR
+		return runRefresh(context.Background(), refresh)
+	}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
-	BuildCurateAgent(cfg, guarded, ledger, log).Run(context.Background())
+	runGroom(context.Background(), cfg, guarded, ledger, line, log)
 	return nil
+}
+
+// runGroom, runQueueIssue and runRefresh are what RunCurate runs, package variables so a test can tell which
+// of them a command line reached.
+var (
+	runGroom = func(ctx context.Context, cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, line providers.LineNotifier, log *slog.Logger) {
+		BuildCurateAgent(cfg, forge, ledger, line, log).Run(ctx)
+	}
+	runQueueIssue = func(ctx context.Context, q curate.QueueIssue) error { return q.RunNow(ctx) }
+	runRefresh    = func(ctx context.Context, r curate.RefreshEntries) error { return r.Run(ctx) }
+)
+
+// queueLine is the Slack line sink of the Knowledge queue: the configured notifiers when
+// curate.queue_issue.slack is set and the run writes (a dry-run posts nothing), else nil. The
+// interface is nil, never a typed nil, when no notifier can carry a line.
+func queueLine(cfg *config.Config, dryRun bool, log *slog.Logger) providers.LineNotifier {
+	if !cfg.Curate.QueueIssue.Slack || dryRun {
+		return nil
+	}
+	m, err := BuildNotifier(cfg, nil, log)
+	if err != nil {
+		log.Warn("curate: queue_issue.slack is set but the notifiers did not build; no Slack line", "err", err)
+		return nil
+	}
+	if m == nil || m.Len() == 0 {
+		log.Warn("curate: queue_issue.slack is set but no notifier is configured; no Slack line")
+		return nil
+	}
+	return m
+}
+
+// buildQueueIssue assembles the Knowledge queue pass, shared by `lore curate queue-issue` and the
+// agent so the two cannot drift. Evidence and Stats are set only with a ledger: a nil ledger must
+// not become a typed-nil interface.
+func buildQueueIssue(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, line providers.LineNotifier, log *slog.Logger) curate.QueueIssue {
+	refresh := buildRefresh(cfg, forge, ledger, log)
+	q := curate.QueueIssue{Forge: forge, Line: line, KBRepo: cfg.Forge.KBRepo, Refresh: &refresh, Log: log}
+	if ledger != nil {
+		q.Evidence, q.Stats = ledger, ledger
+		q.Reconcile = buildQueue(cfg, forge, ledger, log)
+	}
+	if cfg.Curate.QueueIssue.Enabled() {
+		wd, h, m, err := config.ParseSchedule(cfg.Curate.QueueIssue.Schedule)
+		if err == nil {
+			q.Weekday, q.Hour, q.Minute = wd, h, m
+			return q
+		}
+		log.Warn("curate: queue_issue.schedule ignored", "err", err)
+	}
+	q.Unscheduled = true
+	return q
+}
+
+// buildQueue assembles the Queue pass over a ledger. Under factory.curation.defer the ledger holds
+// the factory's verifications, and the label follows them. Otherwise Evidence stays nil and adopters
+// keep the resolution path.
+func buildQueue(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, log *slog.Logger) curate.Queue {
+	queue := curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log}
+	if cfg.Factory.Curation.Defer {
+		queue.Evidence, queue.KBRepo = ledger, cfg.Forge.KBRepo
+	}
+	return queue
+}
+
+// buildRefresh assembles the refresh a caller that does not run the Queue right after uses: with a
+// ledger, a rebuilt PR goes straight back through the Queue's evidence check.
+func buildRefresh(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, log *slog.Logger) curate.RefreshEntries {
+	r := curate.RefreshEntries{Forge: forge, Log: log}
+	if ledger != nil {
+		queue := buildQueue(cfg, forge, ledger, log)
+		r.Evidence, r.Promote = queue.Evidence, queue.PromoteOne
+	}
+	return r
 }
 
 // buildGuardedForge constructs the KB forge client and wraps it in the dry-run +
@@ -115,7 +223,10 @@ func buildGuardedForge(cfg *config.Config, tok ForgeToken, dryRun bool, aud audi
 // StaleAfter is honoured as-is: 0/unset disables the lifecycle sweep (Lifecycle.Run
 // returns early). The Helm chart ships config.curate.stale_after: 720h, so scheduled
 // runs sweep at 30 days; a bare `lore curate` with no config does suppress+dedup only.
-func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, log *slog.Logger) curate.Agent {
+//
+// line posts the Knowledge queue's Slack line; nil in dry-run, or when queue_issue.slack is off.
+// The queue pass is added whenever queue_issue.schedule is set, last, with or without a ledger.
+func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, line providers.LineNotifier, log *slog.Logger) curate.Agent {
 	agent := curate.Agent{Log: log, Passes: []curate.Pass{
 		// Suppress runs FIRST: a re-draft of a rejected entry must not survive long
 		// enough for Dedup to bless it as a cluster canonical.
@@ -123,11 +234,30 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 		curate.Dedup{Forge: forge, Log: log},
 		curate.Lifecycle{Forge: forge, StaleAfter: cfg.Curate.StaleAfter.Std(), Log: log},
 	}}
+	addQueueIssue := func() {
+		if cfg.Curate.QueueIssue.Enabled() {
+			qi := buildQueueIssue(cfg, forge, ledger, line, log)
+			// The Queue pass just ran in this agent. And the refresh force-pushes, so a schedule alone
+			// does not switch it on: it takes the same gate as Queue.Refresh.
+			qi.Reconcile = nil
+			if !cfg.Factory.Curation.Defer {
+				qi.Refresh = nil
+			}
+			agent.Passes = append(agent.Passes, qi)
+		}
+	}
 	if ledger == nil {
+		addQueueIssue()
 		return agent
 	}
+	queue := buildQueue(cfg, forge, ledger, log)
+	// The rebuild force-pushes, so an adopter who has not opted in keeps today's Queue. No Promote:
+	// Queue.Run lists right after.
+	if cfg.Factory.Curation.Defer {
+		queue.Refresh = &curate.RefreshEntries{Forge: forge, Evidence: queue.Evidence, Log: log}
+	}
 	agent.Passes = append(agent.Passes,
-		curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log},
+		queue,
 		// Recurrence escalates recurring UNRESOLVED patterns AND recurring
 		// closed-unmerged (human-rejected) entries: the latter via a knowledge-gap
 		// issue that links the closed PR — never reopening it. The suppression set is
@@ -179,6 +309,7 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 			Log:         log,
 		})
 	}
+	addQueueIssue()
 	return agent
 }
 

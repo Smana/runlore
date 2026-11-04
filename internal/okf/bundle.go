@@ -36,7 +36,8 @@ func UpdateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte 
 	section := "## " + e.Type + "s"
 	line := fmt.Sprintf("- [%s](%s) — %s", linkText(e.Title), entryPath, e.Description)
 
-	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
+	cur, tail := splitTail(existing)
+	lines := strings.Split(cur, "\n")
 	start := -1
 	for i, l := range lines {
 		if strings.TrimSpace(l) == section {
@@ -46,7 +47,7 @@ func UpdateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte 
 	}
 	if start == -1 {
 		lines = append(lines, "", section, "", line)
-		return []byte(strings.Join(lines, "\n") + "\n")
+		return []byte(strings.Join(lines, "\n") + tail)
 	}
 	// Insert at the section's end: just before the next heading, or at EOF.
 	end := len(lines)
@@ -60,7 +61,20 @@ func UpdateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte 
 	for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
 		end--
 	}
-	return []byte(strings.Join(slices.Insert(lines, end, line), "\n") + "\n")
+	return []byte(strings.Join(slices.Insert(lines, end, line), "\n") + tail)
+}
+
+// splitTail separates a file from the newlines it ends with. The updates below only insert, and
+// put the tail back as it was: a blank last line they dropped would be a deleted line in the diff,
+// and an entry PR with a deletion in log.md is not the shape the merge gate admits. A file with no
+// final newline gets one, which is the one change an append cannot avoid.
+func splitTail(existing []byte) (cur, tail string) {
+	cur = strings.TrimRight(string(existing), "\n")
+	tail = string(existing[len(cur):])
+	if tail == "" {
+		tail = "\n"
+	}
+	return cur, tail
 }
 
 // reservedBundleFiles are the OKF bundle files a curation PR touches ALONGSIDE
@@ -218,7 +232,7 @@ func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []b
 	heading := "## " + date
 	line := fmt.Sprintf("* **Creation**: Added [%s](%s).", linkText(e.Title), entryPath)
 
-	cur := strings.TrimRight(string(existing), "\n")
+	cur, tail := splitTail(existing)
 	if strings.TrimSpace(cur) == "" {
 		return []byte("# Knowledge catalog update log\n\n" + heading + "\n\n" + line + "\n")
 	}
@@ -229,7 +243,7 @@ func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []b
 		}
 		// Today's heading exists (it is the newest — logs are newest-first):
 		// slot the line right under it.
-		return []byte(strings.Join(slices.Insert(lines, i+1, "", line), "\n") + "\n")
+		return []byte(strings.Join(slices.Insert(lines, i+1, "", line), "\n") + tail)
 	}
 	// New (newest) date: insert the heading after the H1 title, before older dates.
 	at := len(lines)
@@ -239,7 +253,7 @@ func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []b
 			break
 		}
 	}
-	return []byte(strings.Join(slices.Insert(lines, at, heading, "", line, ""), "\n") + "\n")
+	return []byte(strings.Join(slices.Insert(lines, at, heading, "", line, ""), "\n") + tail)
 }
 
 // linkTextEscaper escapes the three characters that let an entry TITLE break out

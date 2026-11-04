@@ -1199,9 +1199,21 @@ mcp:
   - `interval` — sweep cadence; **default `6h`**, must be `>= 10m`. The first sweep runs one full
     interval after startup (leadership flaps never trigger immediate re-sweeps).
 
+- `queue_issue` — the **Knowledge queue** issue (see
+  [Reviewing knowledge]({{< relref "reviewing-knowledge.md#8-the-knowledge-queue" >}})). Keys:
+  - `schedule` — `"<Day> HH:MM"` in UTC, a three-letter capitalised day and a zero-padded 24-hour
+    time (`"Mon 08:00"`); **default empty, off**. Anything else fails validation. The rewrite comes
+    from the first sweep past that time, so `sweeps.mode` applies to it. Under
+    `factory.curation.defer` it also rebuilds conflicting entry PRs: it can force-push RunLore's own
+    `runlore/kb-` branches and strip `ready-to-merge`. `lore curate queue-issue` rewrites the issue
+    at once whatever the schedule, the `defer` setting or `sweeps.mode` says, and first reconciles
+    labels and rebuilds in the same way, unless given `--dry-run`.
+  - `slack` — **default `false`**; post one line linking the issue after each rewrite, through the
+    configured notifiers (none in a dry-run).
+
   Every write (or dry-run skip) is appended to the `actions.audit_log_path` hash chain as
   `actor: curate` with `op` `kb.close` / `kb.comment` / `kb.relabel` / `kb.open-issue` /
-  `kb.retire-pr` and decision `executed` / `dry-run` / `failed`.
+  `kb.retire-pr` / `kb.queue-issue` / `kb.refresh-entry` and decision `executed` / `dry-run` / `failed`.
 
 ### `gitops.mirror` — persistent what_changed clone mirror
 `what_changed` diffs a GitOps source repo between two revisions. By default it now keeps a

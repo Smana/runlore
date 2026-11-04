@@ -13,6 +13,17 @@ var (
 	ErrNotRunLorePR = errors.New("pull request is not a RunLore entry PR")
 	// ErrPullNotFound means the forge has no such pull request (a 404).
 	ErrPullNotFound = errors.New("pull request not found")
+	// ErrHeadMoved means a pull request's head is not the one a rebuild was decided on, so
+	// the rebuild would overwrite commits nobody looked at. Nothing moved; decide again.
+	ErrHeadMoved = errors.New("pull request head moved")
+	// ErrRateLimited means the forge answered 403 or 429. A pass that keeps writing past it only makes
+	// the limit last longer and fails the server's own writes to the repository in the same window, so
+	// a loop over many pull requests stops on it. A 403 can also be a missing permission, which a next
+	// pull request would fail on the same way.
+	ErrRateLimited = errors.New("forge refused the request: 403 or 429")
+	// ErrEntryOnBase means the base branch already has the entry a rebuild would add: the
+	// same path merged from another pull request, so the rebuild cannot keep the PR's shape.
+	ErrEntryOnBase = errors.New("entry already on the base branch")
 )
 
 // PermanentError marks a provider/model failure that will not succeed on retry —
