@@ -3,8 +3,13 @@
 package factory
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +110,125 @@ func TestLedgerTornLastLineIsSkipped(t *testing.T) {
 	third, _ := OpenLedger(p, clock)
 	if _, ok := third.Get("k3"); !ok {
 		t.Fatal("an append after a torn line is readable")
+	}
+}
+
+// poisoned writes seven holds and one line of size over the limit, second in the file.
+func poisoned(t *testing.T, p string, size int) []string {
+	t.Helper()
+	var lines, keys []string
+	for i := range 7 {
+		key := fmt.Sprintf("k%d", i)
+		keys = append(keys, key)
+		b, err := json.Marshal(line{Record: &Record{TriggerKey: key, Curation: &Hold{Fingerprint: "fp" + key}}})
+		must(t, err)
+		lines = append(lines, string(b))
+	}
+	poison := `{"record":{"trigger_key":"poison","task":"` + strings.Repeat("x", size) + `"}}`
+	lines = slices.Insert(lines, 1, poison)
+	must(t, os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o600))
+	return keys
+}
+
+func assertHolds(t *testing.T, l *Ledger, keys []string) {
+	t.Helper()
+	held := l.Held()
+	if len(held) != len(keys) {
+		t.Fatalf("%d holds, want %d", len(held), len(keys))
+	}
+	for i, r := range held {
+		if r.TriggerKey != keys[i] || r.Curation.Fingerprint != "fp"+keys[i] {
+			t.Fatalf("%+v", r)
+		}
+	}
+}
+
+func TestLedgerAnOversizedLineIsTorn(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.jsonl")
+	now := func() time.Time { return time.Unix(1_800_000_000, 0) }
+	l, err := OpenLedger(p, now)
+	must(t, err)
+	keys := poisoned(t, p, 5<<20)
+
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	must(t, l.Reload())
+	assertHolds(t, l, keys)
+	if !strings.Contains(logs.String(), "level=WARN") {
+		t.Fatalf("the skipped line is logged: %q", logs.String())
+	}
+	if _, ok := l.Get("poison"); ok {
+		t.Fatal("the oversized line is skipped")
+	}
+
+	// A start reads it too, and the compaction has made the skip durable.
+	again, err := OpenLedger(p, now)
+	must(t, err)
+	assertHolds(t, again, keys)
+	for range 70 {
+		must(t, again.Upsert("k0", func(r *Record) { r.Task = "abcdefgh" }))
+	}
+	third, err := OpenLedger(p, now)
+	must(t, err)
+	assertHolds(t, third, keys)
+}
+
+func TestLedgerAnOversizedLineStopsNoStart(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.jsonl")
+	keys := poisoned(t, p, 5<<20)
+	l, err := OpenLedger(p, func() time.Time { return time.Unix(1_800_000_000, 0) })
+	if err != nil {
+		t.Fatalf("one line does not stop serve: %v", err)
+	}
+	assertHolds(t, l, keys)
+}
+
+func TestLedgerALineAtTheLimitIsRead(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f.jsonl")
+	keys := poisoned(t, p, maxLineBytes-1024)
+	l, err := OpenLedger(p, func() time.Time { return time.Unix(1_800_000_000, 0) })
+	must(t, err)
+	if _, ok := l.Get("poison"); !ok || len(l.Held()) != len(keys) {
+		t.Fatalf("a big line under the limit is an ordinary line: %d holds", len(l.Held()))
+	}
+}
+
+func TestLedgerAFailedReloadKeepsThePriorState(t *testing.T) {
+	for name, breakIt := range map[string]func(t *testing.T, p string){
+		"a read error": func(t *testing.T, p string) { // reading a directory fails after the open
+			t.Helper()
+			must(t, os.Remove(p))
+			must(t, os.Mkdir(p, 0o700))
+		},
+		"an open error": func(t *testing.T, p string) {
+			t.Helper()
+			if os.Geteuid() == 0 {
+				t.Skip("root opens any file")
+			}
+			must(t, os.Chmod(p, 0))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "f.jsonl")
+			at := time.Unix(1_800_000_000, 0)
+			l, err := OpenLedger(p, func() time.Time { return at })
+			must(t, err)
+			keys := []string{"k0", "k1"}
+			for _, k := range keys {
+				must(t, l.Upsert(k, func(r *Record) { r.Curation = &Hold{Fingerprint: "fp" + k} }))
+			}
+			must(t, l.MarkSeen("evt1", at))
+			breakIt(t, p)
+			if err := l.Reload(); err == nil {
+				t.Fatal("the reload failed")
+			}
+			assertHolds(t, l, keys)
+			if !l.HasSeen("evt1", at) {
+				t.Fatal("a failed reload keeps the seen ids")
+			}
+		})
 	}
 }
 

@@ -30,16 +30,26 @@ var (
 
 var ctx = context.Background()
 
-// countingInner is the curator: it counts its calls and answers ref and err.
+// countingInner is the curator: it counts its calls, answers ref and err, and remembers the
+// fingerprint of each PR it opened. weak is what its bar refuses.
 type countingInner struct {
-	calls int
-	ref   providers.Ref
-	err   error
+	calls  int
+	ref    providers.Ref
+	err    error
+	opened []string
+	weak   func(providers.Investigation) bool
 }
 
-func (c *countingInner) Curate(context.Context, providers.Investigation) (providers.Ref, error) {
+func (c *countingInner) Curate(_ context.Context, inv providers.Investigation) (providers.Ref, error) {
 	c.calls++
+	if c.ref.URL != "" {
+		c.opened = append(c.opened, curator.DupFingerprint(inv))
+	}
 	return c.ref, c.err
+}
+
+func (c *countingInner) MeetsBar(inv providers.Investigation) bool {
+	return c.weak == nil || !c.weak(inv)
 }
 
 func scriptOf(t *testing.T, script string) []int {
@@ -88,6 +98,8 @@ func snapshotTitle(t *testing.T, h *Hold) string {
 	must(t, json.Unmarshal(h.Investigation, &inv))
 	return inv.Title
 }
+
+func weakByTitle(inv providers.Investigation) bool { return inv.Title == "weak" }
 
 func TestCurateHoldsOnAccept(t *testing.T) {
 	for script, held := range map[string]bool{"201": true, "200": true, "202": false, "429": false, "503,503,503": false} {
@@ -230,6 +242,7 @@ func TestCurateADraftedHoldIsFrozen(t *testing.T) {
 	}{
 		{"url, 201", pr, pr, 201},
 		{"url, 200", pr, pr, 200},
+		{"none, 200", "none", "", 200},
 		{"none, 201", "none", "", 201},
 		{"url, 202", pr, pr, 202},
 		{"none, 429", "none", "", 429},
@@ -324,6 +337,227 @@ func TestCurateWithNothingFiledTakesTodaysPath(t *testing.T) {
 		_, err := cu.Curate(ctx, incident("k1"))
 		if r, _ := l.Get("k1"); err != nil || inner.calls != 1 || r.Curation != nil {
 			t.Fatalf("inner %d, %+v, %v", inner.calls, r.Curation, err)
+		}
+	})
+}
+
+func TestCurateA200WithAHoldTouchesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first providers.Investigation
+	}{
+		{"an ordinary hold", incident("k1")},
+		{"an observe-only hold", recall("k1", "incidents/web.md")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cu, inner, l := newCuration(t, "201")
+			_, err := cu.Curate(ctx, tc.first)
+			must(t, err)
+			before, _ := l.Get("k1")
+			cu.Filer.Client = clientAnswering(t, 200, "")
+			next := incident("k1")
+			next.Title, next.Resource.Name = "a reworded title", "another-workload"
+			ref, err := cu.Curate(ctx, next)
+			must(t, err)
+			r, _ := l.Get("k1")
+			if ref.URL != "" || inner.calls != 0 || !reflect.DeepEqual(r.Curation, before.Curation) {
+				t.Fatalf("ref %+v, inner %d, %+v", ref, inner.calls, r.Curation)
+			}
+		})
+	}
+}
+
+func TestCurateA200WithNoHoldHolds(t *testing.T) {
+	cu, inner, l := newCuration(t, "200")
+	_, err := cu.Curate(ctx, incident("k1"))
+	must(t, err)
+	if r, _ := l.Get("k1"); r.Curation == nil || inner.calls != 0 {
+		t.Fatalf("the crash recovery of a filing with no hold: inner %d, %+v", inner.calls, r.Curation)
+	}
+}
+
+func TestCurateA201ReplacesTheSnapshotOnlyWhenItMeetsTheBar(t *testing.T) {
+	for _, tc := range []struct{ name, newest, want string }{
+		{"it meets the bar", "stronger", "stronger"},
+		{"it does not", "weak", "web crash loops"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cu, inner, l := newCuration(t, "201")
+			inner.weak = weakByTitle
+			_, err := cu.Curate(ctx, incident("k1"))
+			must(t, err)
+			before, _ := l.Get("k1")
+			must(t, l.Upsert("k1", func(r *Record) { r.FixRoom, r.Verdict = "fix1", "persisting" }))
+			cu.Filer.Client = clientAnswering(t, 201, "room0002")
+			next := incident("k1")
+			next.Title = tc.newest
+			ref, err := cu.Curate(ctx, next)
+			must(t, err)
+			r, _ := l.Get("k1")
+			h := r.Curation
+			if ref.URL != "" || inner.calls != 0 || snapshotTitle(t, h) != tc.want {
+				t.Fatalf("ref %+v, inner %d, snapshot %q", ref, inner.calls, snapshotTitle(t, h))
+			}
+			if r.Room != "room0002" || r.FixRoom != "" || len(h.Generations) != 1 || h.Generations[0].FixRoom != "fix1" {
+				t.Fatalf("the generation is recorded either way: %+v", r)
+			}
+			if h.Fingerprint != before.Curation.Fingerprint || !h.AcceptedAt.Equal(before.Curation.AcceptedAt) {
+				t.Fatalf("%+v", h)
+			}
+		})
+	}
+}
+
+// A weak first investigation still holds: the factory took it, and only the bar at draft time decides.
+func TestCurateAWeakFirstInvestigationHolds(t *testing.T) {
+	cu, inner, l := newCuration(t, "201")
+	inner.weak = weakByTitle
+	inv := incident("k1")
+	inv.Title = "weak"
+	_, err := cu.Curate(ctx, inv)
+	must(t, err)
+	if r, _ := l.Get("k1"); r.Curation == nil || snapshotTitle(t, r.Curation) != "weak" || inner.calls != 0 {
+		t.Fatalf("inner %d, %+v", inner.calls, r.Curation)
+	}
+}
+
+func TestCurateTheCuratorsOwnBarDecides(t *testing.T) {
+	cu, _, l := newCuration(t, "201")
+	cu.Inner = &curator.Curator{MinConfidence: 0.7}
+	good := incident("k1")
+	good.RootCauses = []providers.Hypothesis{{Summary: "s", Evidence: []string{"e"}, SuggestedAction: "a"}}
+	_, err := cu.Curate(ctx, good)
+	must(t, err)
+	cu.Filer.Client = clientAnswering(t, 201, "room0002")
+	weak := good
+	weak.Title, weak.Verified = "unverified", false
+	_, err = cu.Curate(ctx, weak)
+	must(t, err)
+	if r, _ := l.Get("k1"); snapshotTitle(t, r.Curation) != good.Title {
+		t.Fatalf("an unverified finding replaced a verified one: %q", snapshotTitle(t, r.Curation))
+	}
+}
+
+// Whatever opened today's PR, the hold that follows carries that PR's fingerprint, so the draft
+// adopts the PR: one PR per incident, however far the model-written resource moved.
+func TestCurateAHoldAfterTodaysPRCarriesItsFingerprint(t *testing.T) {
+	const pr = "https://github.com/o/kb/pull/9"
+	drifted := func() providers.Investigation {
+		inv := incident("k1")
+		inv.Title, inv.Resource.Name = "a reworded title", "another-workload"
+		return inv
+	}
+	huge := incident("k1")
+	huge.Fingerprint = strings.Repeat("x", maxSnapshotBytes) // a field the filing does not render, so the test stays fast
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, cu *Curation)
+		first providers.Investigation
+		code  int
+	}{
+		{name: "no hold, a 429", first: incident("k1"), code: 429},
+		{name: "no hold, a 202", first: incident("k1"), code: 202},
+		{name: "no hold, a 503", first: incident("k1"), code: 503},
+		{name: "a hold lost to its size", first: huge, code: 201},
+		{name: "observe-only, a 429", first: incident("k1"), code: 429, setup: func(t *testing.T, cu *Curation) {
+			t.Helper()
+			cu.Filer.Client = clientAnswering(t, 201, "abcdefgh")
+			_, err := cu.Curate(ctx, recall("k1", "incidents/web.md"))
+			must(t, err)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cu, inner, l := newCuration(t, "201")
+			if tc.setup != nil {
+				tc.setup(t, cu)
+			}
+			inner.ref = providers.Ref{URL: pr}
+			clock := time.Unix(1_800_000_000, 0)
+			script := []int{tc.code}
+			if tc.code == 503 {
+				script = []int{503, 503, 503}
+			}
+			cu.Filer.Client = newTestClient(t, &fakeFactory{ttl: time.Hour, script: script, newRoom: "abcdefgh"}, &clock)
+			ref, err := cu.Curate(ctx, tc.first)
+			must(t, err)
+			if ref.URL != pr || len(inner.opened) != 1 {
+				t.Fatalf("today's path opened the PR: %+v, %v", ref, inner.opened)
+			}
+			must(t, l.Upsert("k1", func(r *Record) { r.FixRoom, r.Verdict = "fix1", "persisting" }))
+
+			cu.Filer.Client = clientAnswering(t, 201, "room0002") // the reset keeps the fingerprint
+			next := drifted()
+			ref, err = cu.Curate(ctx, next)
+			must(t, err)
+			r, _ := l.Get("k1")
+			h := r.Curation
+			if ref.URL != "" || len(inner.opened) != 1 || h == nil || h.ObserveOnly {
+				t.Fatalf("ref %+v, opened %v, %+v", ref, inner.opened, h)
+			}
+			if h.Fingerprint != inner.opened[0] || h.Fingerprint == curator.DupFingerprint(next) {
+				t.Fatalf("the hold adopts the PR opened under %s, got %s", inner.opened[0], h.Fingerprint)
+			}
+			if snapshotTitle(t, h) != next.Title {
+				t.Fatalf("the snapshot is still this investigation: %q", snapshotTitle(t, h))
+			}
+		})
+	}
+}
+
+func TestCurateAnOpenedPRDoesNotMoveTheDraftFingerprint(t *testing.T) {
+	cu, inner, l := newCuration(t, "429")
+	inner.ref = providers.Ref{URL: "https://github.com/o/kb/pull/9"}
+	_, err := cu.Curate(ctx, incident("k1"))
+	must(t, err)
+	first, _ := l.Get("k1")
+	cu.Filer.Client = clientAnswering(t, 429, "")
+	next := incident("k1")
+	next.Resource.Name = "another-workload"
+	_, err = cu.Curate(ctx, next)
+	must(t, err)
+	if r, _ := l.Get("k1"); first.DraftFingerprint == "" || r.DraftFingerprint != first.DraftFingerprint {
+		t.Fatalf("first %q, now %q", first.DraftFingerprint, r.DraftFingerprint)
+	}
+}
+
+func TestCurateNoPRRecordsNoDraftFingerprint(t *testing.T) {
+	cu, _, l := newCuration(t, "429")
+	_, err := cu.Curate(ctx, incident("k1"))
+	must(t, err)
+	if r, ok := l.Get("k1"); ok && r.DraftFingerprint != "" {
+		t.Fatalf("no PR, no fingerprint: %+v", r)
+	}
+	cu, inner, l := newCuration(t, "429")
+	inner.ref = providers.Ref{URL: "https://github.com/o/kb/pull/9"}
+	cu.Filer.Client = nil
+	_, err = cu.Curate(ctx, incident(""))
+	must(t, err)
+	if _, ok := l.Get(""); ok {
+		t.Fatal("no key, no record")
+	}
+}
+
+func TestCurateAnOversizedSnapshotIsNotHeld(t *testing.T) {
+	huge := incident("k1")
+	huge.Fingerprint = strings.Repeat("x", maxSnapshotBytes) // a field the filing does not render, so the test stays fast
+	t.Run("no hold: drafts at once", func(t *testing.T) {
+		cu, inner, l := newCuration(t, "201")
+		ref, err := cu.Curate(ctx, huge)
+		must(t, err)
+		if r, _ := l.Get("k1"); r.Curation != nil || inner.calls != 1 || ref != inner.ref {
+			t.Fatalf("inner %d, %+v", inner.calls, r.Curation)
+		}
+	})
+	t.Run("a standing hold keeps its snapshot", func(t *testing.T) {
+		cu, inner, l := newCuration(t, "201")
+		_, err := cu.Curate(ctx, incident("k1"))
+		must(t, err)
+		before, _ := l.Get("k1")
+		cu.Filer.Client = clientAnswering(t, 201, "room0002")
+		_, err = cu.Curate(ctx, huge)
+		must(t, err)
+		if r, _ := l.Get("k1"); inner.calls != 0 || !reflect.DeepEqual(r.Curation, before.Curation) {
+			t.Fatalf("inner %d, %+v", inner.calls, r.Curation)
 		}
 	})
 }

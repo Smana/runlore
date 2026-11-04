@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -26,6 +27,8 @@ const (
 	seenWindow = 10 * time.Minute
 	// maxEvents is how many event types a Record keeps.
 	maxEvents = 20
+	// maxLineBytes is the longest line Reload reads; a longer one is treated as torn.
+	maxLineBytes = 4 << 20
 	// compactFactor and compactFloor decide when the file is rewritten: once it holds
 	// compactFactor times the live lines, and at least compactFloor lines.
 	compactFactor = 4
@@ -67,6 +70,9 @@ type Record struct {
 	Reverted bool   `json:"reverted,omitempty"`
 	// Curation is the hold the deferral keeps for this incident; nil without one.
 	Curation *Hold `json:"curation,omitempty"`
+	// DraftFingerprint is the fingerprint of the first PR today's path opened for this incident. It
+	// survives the reset and seeds a later hold, so that hold's draft adopts the PR.
+	DraftFingerprint string `json:"draft_fingerprint,omitempty"`
 }
 
 // Generation is one fix attempt of an incident: what the soak, the factory's monitor and a revert
@@ -121,14 +127,14 @@ func (g Generation) Outcome() string {
 }
 
 // startGeneration resets r for a new generation of its TriggerKey (the incident re-fired after the
-// old task ended), or a stale merge would trigger the old soak. The hold survives, first archiving a
-// generation that had a fix; the Slack root stays unless clearSlack.
+// old task ended), or a stale merge would trigger the old soak. The hold and the draft's fingerprint
+// survive, the hold first archiving a generation that had a fix; the Slack root stays unless clearSlack.
 func (r *Record) startGeneration(clearSlack bool) {
 	hold := r.Curation
 	if hold != nil && r.FixRoom != "" {
 		hold.Generations = append(hold.Generations, r.Generation())
 	}
-	next := Record{TriggerKey: r.TriggerKey, Curation: hold}
+	next := Record{TriggerKey: r.TriggerKey, Curation: hold, DraftFingerprint: r.DraftFingerprint}
 	if !clearSlack {
 		next.SlackRoot, next.SlackChannel = r.SlackRoot, r.SlackChannel
 	}
@@ -183,19 +189,19 @@ func OpenLedger(path string, now func() time.Time) (*Ledger, error) {
 }
 
 // Reload replays the file, replacing the in-memory state: a replica that becomes leader must see
-// what another replica appended. A torn line is skipped with a warning and the file is rewritten
-// clean, so the next append cannot fuse with the torn bytes.
+// what another replica appended. A failed read leaves that state as it was. A torn or oversized line
+// is skipped with a warning and the file is rewritten clean, so the next append cannot fuse with the
+// torn bytes and one line never costs the rest of the ledger.
 func (l *Ledger) Reload() error {
 	if l.path == "" {
 		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.records = map[string]Record{}
-	l.seen = map[string]time.Time{}
-	l.lines = 0
+	records, seen, lines := map[string]Record{}, map[string]time.Time{}, 0
 	f, err := os.Open(l.path)
 	if errors.Is(err, fs.ErrNotExist) {
+		l.records, l.seen, l.lines = records, seen, lines
 		return nil
 	}
 	if err != nil {
@@ -203,31 +209,37 @@ func (l *Ledger) Reload() error {
 	}
 	defer func() { _ = f.Close() }()
 	torn := false
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	br := bufio.NewReaderSize(f, 64<<10)
 	cutoff := l.now().Add(-seenWindow)
-	for sc.Scan() {
-		raw := bytes.TrimSpace(sc.Bytes())
-		if len(raw) == 0 {
-			continue
+	for {
+		raw, rerr := br.ReadBytes('\n')
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return fmt.Errorf("factory ledger: read: %w", rerr)
 		}
-		var ln line
-		if err := json.Unmarshal(raw, &ln); err != nil || (ln.Record == nil && ln.Seen == "") {
-			slog.Warn("factory ledger: skipping an unreadable line", "path", l.path)
-			torn = true
-			continue
+		if raw = bytes.TrimSpace(raw); len(raw) > 0 {
+			var ln line
+			switch {
+			case len(raw) > maxLineBytes:
+				slog.Warn("factory ledger: skipping an oversized line", "path", l.path, "bytes", len(raw))
+				torn = true
+			case json.Unmarshal(raw, &ln) != nil || (ln.Record == nil && ln.Seen == ""):
+				slog.Warn("factory ledger: skipping an unreadable line", "path", l.path)
+				torn = true
+			default:
+				lines++
+				switch {
+				case ln.Record != nil && ln.Record.TriggerKey != "":
+					records[ln.Record.TriggerKey] = *ln.Record
+				case ln.Seen != "" && ln.At != nil && ln.At.After(cutoff):
+					seen[ln.Seen] = *ln.At
+				}
+			}
 		}
-		l.lines++
-		switch {
-		case ln.Record != nil && ln.Record.TriggerKey != "":
-			l.records[ln.Record.TriggerKey] = *ln.Record
-		case ln.Seen != "" && ln.At != nil && ln.At.After(cutoff):
-			l.seen[ln.Seen] = *ln.At
+		if rerr != nil {
+			break
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return fmt.Errorf("factory ledger: read: %w", err)
-	}
+	l.records, l.seen, l.lines = records, seen, lines
 	if torn {
 		return l.compactLocked()
 	}

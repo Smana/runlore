@@ -285,6 +285,12 @@ func (c *Curator) duplicateOpenPR(ctx context.Context, inv providers.Investigati
 	return 0, false, nil
 }
 
+// MeetsBar reports whether inv passes Curate's first two gates, the verdict and the quality bar: a
+// finding that fails either is never drafted, whatever the dedup gates would say.
+func (c *Curator) MeetsBar(inv providers.Investigation) bool {
+	return !c.SkipVerdicts[inv.Verdict] && meetsBar(inv, c.MinConfidence)
+}
+
 // meetsBar is the file-time QUALITY gate (not the merge condition): an
 // adversarially-reviewed, confident root cause with cited evidence AND a provenance
 // anchor (a causing change or a fixing action). The resolved/accepted MERGE

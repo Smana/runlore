@@ -3,8 +3,10 @@
 package factory
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -19,9 +21,14 @@ import (
 // draftedNone is Hold.Drafted when the hold is settled and yielded no PR.
 const draftedNone = "none"
 
-// Curator writes a finding to the knowledge base: today's path, *curator.Curator.
+// maxSnapshotBytes is the largest investigation a hold keeps, well inside the ledger's line limit.
+const maxSnapshotBytes = 1 << 20
+
+// Curator writes a finding to the knowledge base: today's path, *curator.Curator. MeetsBar says
+// whether it would draft inv at all.
 type Curator interface {
 	Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error)
+	MeetsBar(inv providers.Investigation) bool
 }
 
 // Observer records what a fix did to an entry, and links a trigger to its drafted PR.
@@ -64,9 +71,10 @@ type Curation struct {
 	Log        *slog.Logger
 }
 
-// Curate files inv with the factory. On a 201 or a 200 it holds the entry and drafts nothing; any
-// other answer takes today's path at once, unless a hold already owns the incident's entry. A recall
-// is filed and observed, never drafted.
+// Curate files inv with the factory. On a 201, or a 200 with no hold yet, it holds the entry and
+// drafts nothing; any other answer takes today's path at once, unless a hold already owns the
+// incident's entry. A 200 with a hold standing is no new generation and touches nothing. A recall is
+// filed and observed, never drafted.
 func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
 	got, err := c.Filer.File(ctx, inv)
 	if err != nil {
@@ -82,14 +90,21 @@ func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (pro
 		}
 		return providers.Ref{}, nil
 	}
-	if h := c.ownedHold(inv.TriggerKey); h != nil && (!accepted || h.Drafted != "") {
+	h := c.standingHold(inv.TriggerKey)
+	owned := h != nil && !h.ObserveOnly
+	switch {
+	case owned && (!accepted || h.Drafted != ""):
 		// A refused detection is no generation, and a set Drafted freezes the snapshot.
 		return h.ref(), nil
-	}
-	if !accepted {
+	case h != nil && accepted && got.Status == http.StatusOK:
+		return h.ref(), nil
+	case !accepted:
 		return c.draft(ctx, inv)
 	}
 	snapshot, err := json.Marshal(inv)
+	if err == nil && len(snapshot) > maxSnapshotBytes {
+		err = fmt.Errorf("the investigation is %d bytes, past the %d a hold keeps", len(snapshot), maxSnapshotBytes)
+	}
 	if err != nil {
 		return c.lostHold(ctx, inv, err)
 	}
@@ -102,18 +117,23 @@ func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (pro
 
 // hold writes a fresh investigation the factory accepted into r: a new hold, or the newest snapshot
 // of one not yet drafted. The fingerprint is frozen at the first hold, since the text it derives
-// from is model-written and moves between generations. An observe-only hold had a recall behind it;
-// a fresh investigation means the recall did not fire, so the incident now needs its draft.
+// from is model-written and moves between generations, and it is the fingerprint of the PR today's
+// path already opened, if any, so the draft adopts that PR. An observe-only hold had a recall behind
+// it; a fresh investigation means the recall did not fire, so the incident now needs its draft. A
+// newest snapshot that fails the bar does not replace the older one: the draft would drop the entry
+// for good, and the verified fix with it.
 func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte) providers.Ref {
 	switch h := r.Curation; {
 	case h == nil || h.ObserveOnly:
-		fresh := &Hold{AcceptedAt: c.now(), Investigation: snapshot, Fingerprint: curator.DupFingerprint(inv)}
+		fresh := &Hold{AcceptedAt: c.now(), Investigation: snapshot, Fingerprint: cmp.Or(r.DraftFingerprint, curator.DupFingerprint(inv))}
 		if h != nil {
 			fresh.Generations = h.Generations
 		}
 		r.Curation = fresh
 	case h.Drafted == "":
-		h.Investigation = snapshot
+		if c.meetsBar(inv) {
+			h.Investigation = snapshot
+		}
 	default: // drafted since Curate looked
 		return h.ref()
 	}
@@ -132,10 +152,10 @@ func (c *Curation) holdRecall(inv providers.Investigation) {
 	}
 }
 
-// ownedHold is the hold of key that owns the entry's draft, nil without one.
-func (c *Curation) ownedHold(key string) *Hold {
+// standingHold is the hold of key, nil without one.
+func (c *Curation) standingHold(key string) *Hold {
 	r, ok := c.Ledger.Get(key)
-	if !ok || r.Curation == nil || r.Curation.ObserveOnly {
+	if !ok {
 		return nil
 	}
 	return r.Curation
@@ -144,7 +164,7 @@ func (c *Curation) ownedHold(key string) *Hold {
 // lostHold answers a hold that could not be written: a standing hold still drafts later, and with
 // none the entry drafts now, since a lost hold never loses the entry.
 func (c *Curation) lostHold(ctx context.Context, inv providers.Investigation, err error) (providers.Ref, error) {
-	if h := c.ownedHold(inv.TriggerKey); h != nil {
+	if h := c.standingHold(inv.TriggerKey); h != nil && !h.ObserveOnly {
 		c.log().Warn("updating the hold failed; it keeps its older snapshot", "alert", inv.AlertName, "err", err)
 		return h.ref(), nil
 	}
@@ -152,12 +172,29 @@ func (c *Curation) lostHold(ctx context.Context, inv providers.Investigation, er
 	return c.draft(ctx, inv)
 }
 
-// draft is today's path. A nil Inner drafts nothing.
+// draft is today's path. A nil Inner drafts nothing. A PR it opens leaves its fingerprint on the
+// record, so a hold started later adopts it instead of opening a second one.
 func (c *Curation) draft(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
 	if c.Inner == nil {
 		return providers.Ref{}, nil
 	}
-	return c.Inner.Curate(ctx, inv)
+	ref, err := c.Inner.Curate(ctx, inv)
+	if err != nil || ref.URL == "" || inv.TriggerKey == "" {
+		return ref, err
+	}
+	werr := c.Ledger.Upsert(inv.TriggerKey, func(r *Record) {
+		r.DraftFingerprint = cmp.Or(r.DraftFingerprint, curator.DupFingerprint(inv))
+	})
+	if werr != nil {
+		c.log().Warn("recording the draft's fingerprint failed; a later hold may open a second PR", "alert", inv.AlertName, "err", werr)
+	}
+	return ref, nil
+}
+
+// meetsBar reports whether Inner would draft inv. A nil Inner drafts nothing, so no snapshot is worse
+// than another.
+func (c *Curation) meetsBar(inv providers.Investigation) bool {
+	return c.Inner == nil || c.Inner.MeetsBar(inv)
 }
 
 // ref is the link a detection carries: the drafted PR, when there is one.
