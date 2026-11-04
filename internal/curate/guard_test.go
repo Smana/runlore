@@ -20,6 +20,7 @@ var (
 	_ RevalidateForge = Guard{}
 	_ ClosedPRLister  = Guard{}
 	_ ContestedForge  = Guard{}
+	_ QueueIssueForge = Guard{}
 )
 
 // fakeGuarded extends the shared fakeForge with the wider GuardedForge surface.
@@ -32,6 +33,8 @@ type fakeGuarded struct {
 	edited        int
 	resolvePRs    int
 	resolveErr    error
+	issuesCreated int
+	issuesEdited  int
 }
 
 func (f *fakeGuarded) PREntry(context.Context, int) (providers.PREntry, error) {
@@ -70,6 +73,18 @@ func (f *fakeGuarded) Close(ctx context.Context, n int) error {
 		return f.closeErr
 	}
 	return f.fakeForge.Close(ctx, n)
+}
+
+func (f *fakeGuarded) ListMergedPRsByLabel(context.Context, string, time.Time) ([]providers.CuratedIssue, error) {
+	return nil, nil
+}
+func (f *fakeGuarded) CreateIssue(context.Context, string, string, []string) (int, providers.Ref, error) {
+	f.issuesCreated++
+	return 7, providers.Ref{URL: "https://forge/issues/7"}, nil
+}
+func (f *fakeGuarded) EditIssue(context.Context, int, string) error {
+	f.issuesEdited++
+	return nil
 }
 
 // recAudit records audit entries in memory.
@@ -222,5 +237,30 @@ func TestGuardResolveWrites(t *testing.T) {
 func TestResolveLabelIsAnEntryEdit(t *testing.T) {
 	if !isEntryEditProposal([]string{"runlore", "runlore-resolve"}) {
 		t.Fatal("a resolve PR is never an entry (KP17)")
+	}
+}
+
+func TestGuardAuditsTheQueueIssueWrites(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		inner, aud := &fakeGuarded{}, &recAudit{}
+		g := Guard{Inner: inner, DryRun: dry, Audit: aud, Log: discardLog()}
+		n, ref, err := g.CreateIssue(context.Background(), "Knowledge queue", "body", []string{"runlore-queue"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := g.EditIssue(context.Background(), 7, "body"); err != nil {
+			t.Fatal(err)
+		}
+		want, wantWrites := audit.DecisionExecuted, 1
+		if dry {
+			want, wantWrites = audit.DecisionDryRun, 0
+		}
+		if inner.issuesCreated != wantWrites || inner.issuesEdited != wantWrites || (dry && (n != 0 || ref.URL != "")) || (!dry && n != 7) {
+			t.Fatalf("dry=%v: created %d edited %d -> %d %+v", dry, inner.issuesCreated, inner.issuesEdited, n, ref)
+		}
+		if len(aud.recs) != 2 || aud.recs[0].Op != "kb.queue-issue" || aud.recs[1].Op != "kb.queue-issue" ||
+			aud.recs[0].Decision != want || aud.recs[0].Target != "issue/Knowledge queue" || aud.recs[1].Target != "issue/7" {
+			t.Fatalf("dry=%v: %+v", dry, aud.recs)
+		}
 	}
 }

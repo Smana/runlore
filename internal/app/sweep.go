@@ -46,7 +46,7 @@ func BuildSweeper(cfg *config.Config, ledger *outcome.Ledger, aud audit.Auditor,
 		l = ledger
 	}
 	return &curate.Sweeper{
-		Agent:    BuildCurateAgent(cfg, guarded, l, log),
+		Agent:    BuildCurateAgent(cfg, guarded, l, queueLine(cfg, cfg.Curate.Sweeps.DryRun(), log), log),
 		Interval: cfg.Curate.Sweeps.Interval.Std(),
 		Log:      log,
 	}

@@ -4,7 +4,12 @@ package app
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/curate"
 	github "github.com/Smana/runlore/internal/forge/github"
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // The retirement and revalidation passes are wired in RunCurate with
@@ -102,7 +108,7 @@ func TestBuildCurateAgentPassComposition(t *testing.T) {
 	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
 
 	// No ledger: forge-only passes (Suppress, Dedup, Lifecycle).
-	agent := BuildCurateAgent(&config.Config{}, forge, nil, discardLog())
+	agent := BuildCurateAgent(&config.Config{}, forge, nil, nil, discardLog())
 	if len(agent.Passes) != 3 {
 		t.Fatalf("no-ledger agent: want 3 passes, got %d", len(agent.Passes))
 	}
@@ -114,7 +120,7 @@ func TestBuildCurateAgentPassComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent = BuildCurateAgent(cfg, forge, ledger, discardLog())
+	agent = BuildCurateAgent(cfg, forge, ledger, nil, discardLog())
 	if len(agent.Passes) != 7 {
 		t.Fatalf("full agent: want 7 passes (suppress dedup lifecycle queue recurrence contested retirement), got %d", len(agent.Passes))
 	}
@@ -129,7 +135,7 @@ func TestBuildCurateAgentWiresTheQueuesEvidence(t *testing.T) {
 	}
 	queue := func(cfg *config.Config) curate.Queue {
 		t.Helper()
-		for _, p := range BuildCurateAgent(cfg, forge, ledger, discardLog()).Passes {
+		for _, p := range BuildCurateAgent(cfg, forge, ledger, nil, discardLog()).Passes {
 			if q, ok := p.(curate.Queue); ok {
 				return q
 			}
@@ -160,14 +166,14 @@ func TestBuildCurateAgentWiresRevalidation(t *testing.T) {
 
 	// Default (disabled): the ledger-backed set stops at Contested.
 	cfg := &config.Config{}
-	if n := len(BuildCurateAgent(cfg, forge, ledger, discardLog()).Passes); n != 6 {
+	if n := len(BuildCurateAgent(cfg, forge, ledger, nil, discardLog()).Passes); n != 6 {
 		t.Fatalf("revalidation must be opt-in: want 6 passes, got %d", n)
 	}
 
 	cfg.Curate.Revalidation = config.Revalidation{
 		Enabled: true, MinInterval: config.Duration(168 * time.Hour), MaxOpen: 3, Floor: 0.5, Prior: 2.0,
 	}
-	passes := BuildCurateAgent(cfg, forge, ledger, discardLog()).Passes
+	passes := BuildCurateAgent(cfg, forge, ledger, nil, discardLog()).Passes
 	if len(passes) != 7 {
 		t.Fatalf("want 7 passes with revalidation enabled, got %d", len(passes))
 	}
@@ -212,5 +218,108 @@ forge:
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error must name the real limitation (missing %q): %q", want, msg)
 		}
+	}
+}
+
+// With curate.queue_issue.schedule set the Knowledge queue pass is the last pass, whether or not
+// there is a ledger; unset, nothing is added.
+func TestBuildCurateAgentAddsTheQueueIssuePass(t *testing.T) {
+	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := func(cfg *config.Config, l *outcome.Ledger) curate.Pass {
+		t.Helper()
+		ps := BuildCurateAgent(cfg, forge, l, nil, discardLog()).Passes
+		return ps[len(ps)-1]
+	}
+	cfg := &config.Config{}
+	cfg.Forge.KBRepo = "acme/kb"
+	if _, ok := last(cfg, nil).(curate.QueueIssue); ok {
+		t.Fatal("no schedule: no queue-issue pass")
+	}
+	cfg.Curate.QueueIssue = config.QueueIssue{Schedule: "Tue 09:30"}
+	for name, l := range map[string]*outcome.Ledger{"no ledger": nil, "ledger": ledger} {
+		qi, ok := last(cfg, l).(curate.QueueIssue)
+		if !ok {
+			t.Fatalf("%s: the queue-issue pass must be the last one", name)
+		}
+		if qi.Weekday != time.Tuesday || qi.Hour != 9 || qi.Minute != 30 || qi.Unscheduled || qi.KBRepo != "acme/kb" {
+			t.Fatalf("%s: %+v", name, qi)
+		}
+		if (l == nil) != (qi.Stats == nil) || (l == nil) != (qi.Evidence == nil) {
+			t.Fatalf("%s: a nil ledger must not become a typed-nil interface: %+v", name, qi)
+		}
+	}
+}
+
+// writeCurateConfig writes a config with working GitHub App credentials and returns its path.
+func writeCurateConfig(t *testing.T, extra string) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_CURATE_SUB_KEY", string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})))
+	p := filepath.Join(t.TempDir(), "runlore.yaml")
+	body := "forge:\n  kb_repo: acme/kb\n  github_app: {app_id: 1, installation_id: 2, private_key_env: TEST_CURATE_SUB_KEY}\n" + extra
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestRunCurateSubcommand(t *testing.T) {
+	var groomed, issued int
+	var gotDry bool
+	oldGroom, oldIssue := runGroom, runQueueIssue
+	t.Cleanup(func() { runGroom, runQueueIssue = oldGroom, oldIssue })
+	runGroom = func(context.Context, *config.Config, curate.GuardedForge, *outcome.Ledger, providers.LineNotifier, *slog.Logger) {
+		groomed++
+	}
+	runQueueIssue = func(_ context.Context, q curate.QueueIssue) error {
+		issued++
+		gotDry = q.Forge.(curate.Guard).DryRun
+		return nil
+	}
+	f := writeCurateConfig(t, "")
+	reset := func() { groomed, issued, gotDry = 0, 0, false }
+
+	if err := RunCurate([]string{"--config", f}); err != nil || groomed != 1 || issued != 0 {
+		t.Fatalf("plain curate grooms and writes no issue: %v groomed=%d issued=%d", err, groomed, issued)
+	}
+	reset()
+	if err := RunCurate([]string{"queue-issue", "--config", f}); err != nil || groomed != 0 || issued != 1 || gotDry {
+		t.Fatalf("queue-issue runs that pass alone: %v groomed=%d issued=%d dry=%v", err, groomed, issued, gotDry)
+	}
+	reset()
+	if err := RunCurate([]string{"queue-issue", "--dry-run", "--config", f}); err != nil || groomed != 0 || issued != 1 || !gotDry {
+		t.Fatalf("queue-issue --dry-run passes DryRun: %v groomed=%d issued=%d dry=%v", err, groomed, issued, gotDry)
+	}
+	for _, args := range [][]string{{"--config", f, "queue-issue"}, {"bogus", "--config", f}, {"--config", f, "bogus"}} {
+		reset()
+		if err := RunCurate(args); err == nil || groomed != 0 || issued != 0 {
+			t.Fatalf("%v: a positional that is not the first argument is an error and runs nothing: %v groomed=%d issued=%d", args, err, groomed, issued)
+		}
+	}
+}
+
+func TestQueueLine(t *testing.T) {
+	cfg := &config.Config{}
+	t.Setenv("TEST_QUEUE_HOOK", "https://hooks.invalid/x")
+	cfg.Notify.Slack.WebhookURLEnv = "TEST_QUEUE_HOOK"
+	if queueLine(cfg, false, discardLog()) != nil {
+		t.Fatal("slack off: no line")
+	}
+	cfg.Curate.QueueIssue.Slack = true
+	if queueLine(cfg, true, discardLog()) != nil {
+		t.Fatal("dry-run: no line")
+	}
+	if queueLine(cfg, false, discardLog()) == nil {
+		t.Fatal("slack on and a notifier configured: a line")
+	}
+	if queueLine(&config.Config{Curate: config.Curate{QueueIssue: config.QueueIssue{Slack: true}}}, false, discardLog()) != nil {
+		t.Fatal("no notifier configured: no line, not a typed nil")
 	}
 }

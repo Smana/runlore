@@ -1577,6 +1577,13 @@ type ProgressNotifier interface {
 	DeliverProgress(ctx context.Context, up ProgressUpdate) error
 }
 
+// LineNotifier is the optional capability of posting one plain line of text to the channel,
+// with no investigation behind it: the Knowledge queue's "rewritten, here is the link".
+// Implemented by the Slack notifiers and by the fan-out over them.
+type LineNotifier interface {
+	DeliverLine(ctx context.Context, text string) error
+}
+
 // ThreadNotifier is the optional capability of carrying a conversation back into
 // a delivered notification's thread. A notifier that cannot — an incoming
 // webhook, the generic HTTP sink — simply does not implement it, and thread
@@ -1800,6 +1807,7 @@ type CuratedIssue struct {
 	Body      string
 	Labels    []string
 	UpdatedAt time.Time // forge last-update time; used by the curate lifecycle sweep
+	CreatedAt time.Time // forge creation time; the Knowledge queue compares it with its last rewrite
 }
 
 // ReinvestForge lists curated issues flagged for re-investigation and posts results
@@ -2498,6 +2506,31 @@ type ToolCall struct {
 // dedup decider flags the finding (KBEntry.SuspectedDuplicate). The curate Queue reads it
 // as a refusal, so a PR carrying it never gets ready-to-merge on evidence alone.
 const PossibleDuplicateHeading = "## Possible duplicate"
+
+// cardEvidencePrefix opens the evidence line a forge writes right after the card marker.
+const cardEvidencePrefix = "\n\n**Evidence:** "
+
+// ParseCardEvidence reads the evidence line of a PR body: the one that follows the LAST card
+// marker directly, which is where RunLore writes it. A body with no evidence there returns "".
+// A line elsewhere is not RunLore's: a newline in a model-written related-entry resource can
+// forge a "**Evidence:**" line anywhere before the marker, so the last such line is no proof.
+func ParseCardEvidence(body string) string {
+	i := strings.LastIndex(body, cardMarkerPrefix)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(cardMarkerPrefix):]
+	j := strings.Index(rest, " -->")
+	if j < 0 {
+		return ""
+	}
+	rest = rest[j+len(" -->"):]
+	if !strings.HasPrefix(rest, cardEvidencePrefix) {
+		return ""
+	}
+	line, _, _ := strings.Cut(strings.TrimPrefix(rest, cardEvidencePrefix), "\n")
+	return strings.TrimSpace(line)
+}
 
 const fingerprintMarkerPrefix = "<!-- runlore-fingerprint: "
 

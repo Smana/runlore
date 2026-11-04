@@ -2746,6 +2746,11 @@ func (c *Config) Validate() error {
 	if iv := c.Curate.Sweeps.Interval.Std(); iv != 0 && iv < 10*time.Minute {
 		return fmt.Errorf("curate.sweeps.interval must be >= 10m (forge-listing rate protection), got %v", iv)
 	}
+	if c.Curate.QueueIssue.Enabled() {
+		if _, _, _, err := ParseSchedule(c.Curate.QueueIssue.Schedule); err != nil {
+			return err
+		}
+	}
 	// logs.provider is a small enum; reject typos at startup rather than silently
 	// falling back to the wrong client against a live backend.
 	switch c.Logs.Provider {
@@ -2845,6 +2850,39 @@ type Curate struct {
 	// no forge write happens until the operator sets mode: apply. mode: off disables
 	// the loop entirely (the opt-in CronJob remains the out-of-server alternative).
 	Sweeps Sweeps `yaml:"sweeps"`
+	// QueueIssue rewrites the Knowledge queue issue on a schedule: the entries waiting for a
+	// human decision, the audit sample and the measures. Empty schedule is off; `lore curate
+	// queue-issue` rewrites it at once whatever the schedule.
+	QueueIssue QueueIssue `yaml:"queue_issue"`
+}
+
+// QueueIssue configures the scheduled rewrite of the Knowledge queue issue.
+type QueueIssue struct {
+	Schedule string `yaml:"schedule"` // "<Day> HH:MM" in UTC ("Mon 08:00"); empty is off
+	Slack    bool   `yaml:"slack"`    // post one line linking the issue after each rewrite
+}
+
+// Enabled reports whether a schedule is set.
+func (q QueueIssue) Enabled() bool { return q.Schedule != "" }
+
+var weekdays = map[string]time.Weekday{"Sun": time.Sunday, "Mon": time.Monday, "Tue": time.Tuesday,
+	"Wed": time.Wednesday, "Thu": time.Thursday, "Fri": time.Friday, "Sat": time.Saturday}
+
+// ParseSchedule reads "<Day> HH:MM" (UTC): a three-letter capitalised day, then a zero-padded
+// 24-hour time.
+func ParseSchedule(s string) (time.Weekday, int, int, error) {
+	bad := fmt.Errorf(`curate.queue_issue.schedule must be "<Day> HH:MM" (UTC)`)
+	day, clock, ok := strings.Cut(s, " ")
+	wd, known := weekdays[day]
+	if !ok || !known || len(clock) != 5 || clock[2] != ':' {
+		return 0, 0, 0, bad
+	}
+	h, herr := strconv.Atoi(clock[:2])
+	m, merr := strconv.Atoi(clock[3:])
+	if herr != nil || merr != nil || clock[0] == '+' || clock[0] == '-' || clock[3] == '+' || clock[3] == '-' || h > 23 || m > 59 {
+		return 0, 0, 0, bad
+	}
+	return wd, h, m, nil
 }
 
 // Retirement configures the curate retirement pass (opt-in KB garbage collection).

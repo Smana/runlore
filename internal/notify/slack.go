@@ -124,6 +124,8 @@ var (
 	_ providers.Notifier         = (*Slack)(nil)
 	_ providers.ProgressNotifier = (*Slack)(nil)
 	_ providers.KBUpdateNotifier = (*Slack)(nil)
+	_ providers.LineNotifier     = (*Slack)(nil)
+	_ providers.LineNotifier     = (*SlackBot)(nil)
 )
 
 // Deliver posts the formatted investigation to the webhook. When an action carries
@@ -135,6 +137,12 @@ func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error 
 // DeliverProgress posts an interim progress ping to the webhook (ProgressNotifier).
 func (s *Slack) DeliverProgress(ctx context.Context, up providers.ProgressUpdate) error {
 	return s.post(ctx, slackProgressMessage(up))
+}
+
+// DeliverLine posts one plain line to the webhook (providers.LineNotifier). The text is the
+// caller's own, never model-written: counts, a date and a URL.
+func (s *Slack) DeliverLine(ctx context.Context, text string) error {
+	return s.post(ctx, map[string]any{"text": text})
 }
 
 // post marshals a Slack payload and POSTs it to the incoming webhook, surfacing
@@ -225,6 +233,12 @@ func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) err
 		return fmt.Errorf("slack detail thread (summary delivered): %w", err)
 	}
 	return nil
+}
+
+// DeliverLine posts one plain line to the channel (providers.LineNotifier).
+func (s *SlackBot) DeliverLine(ctx context.Context, text string) error {
+	_, err := s.post(ctx, map[string]any{"text": text})
+	return err
 }
 
 // DeliverProgress posts an interim progress ping to the channel (ProgressNotifier).
@@ -1285,6 +1299,24 @@ func (m *Multi) DeliverProgress(ctx context.Context, up providers.ProgressUpdate
 		}
 	}
 	return nil
+}
+
+// DeliverLine posts one plain line through every wrapped notifier that implements
+// LineNotifier. A failing sink is logged and joined into the returned error, so the caller can
+// tell the line did not land everywhere; no line-capable sink is not an error.
+func (m *Multi) DeliverLine(ctx context.Context, text string) error {
+	var errs []error
+	for _, n := range m.notifiers {
+		ln, ok := n.(providers.LineNotifier)
+		if !ok {
+			continue
+		}
+		if err := ln.DeliverLine(ctx, text); err != nil {
+			m.log.Error("line delivery failed", "err", err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // DeliverKBUpdate announces a knowledge-base write to every wrapped notifier

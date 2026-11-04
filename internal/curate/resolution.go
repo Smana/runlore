@@ -99,14 +99,16 @@ func (q Queue) PromoteOne(ctx context.Context, number int) error {
 
 // contestedPRs is the set of kb_repo PRs a standing 👎 links to. A malformed kb_repo is an
 // error rather than an empty set: a contest that cannot be joined must not read as none.
-func (q Queue) contestedPRs() (map[int]bool, error) {
-	triggers := q.Evidence.ContestedTriggers()
+func (q Queue) contestedPRs() (map[int]bool, error) { return contestedPRs(q.Evidence, q.KBRepo) }
+
+func contestedPRs(ev Evidence, kbRepo string) (map[int]bool, error) {
+	triggers := ev.ContestedTriggers()
 	if len(triggers) == 0 {
 		return nil, nil
 	}
-	owner, repo, ok := strings.Cut(q.KBRepo, "/")
+	owner, repo, ok := strings.Cut(kbRepo, "/")
 	if !ok {
-		return nil, fmt.Errorf("queue: kb_repo %q must be owner/name", q.KBRepo)
+		return nil, fmt.Errorf("queue: kb_repo %q must be owner/name", kbRepo)
 	}
 	contested := map[int]bool{}
 	for _, ct := range triggers {

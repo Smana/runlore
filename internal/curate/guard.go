@@ -27,6 +27,7 @@ type GuardedForge interface {
 	RevalidateForge
 	ContestedForge
 	ResolveForge
+	QueueIssueForge
 }
 
 // ResolveForge is what recording a verified resolution needs: the entry a PR
@@ -36,6 +37,16 @@ type ResolveForge interface {
 	PREntry(ctx context.Context, number int) (providers.PREntry, error)
 	EditEntryOnPR(ctx context.Context, number int, message string, edit func([]byte) ([]byte, bool, error)) (bool, error)
 	OpenResolvePR(ctx context.Context, path string, edit func([]byte) ([]byte, bool, error), body string) (providers.Ref, error)
+}
+
+// QueueIssueForge is what the Knowledge queue issue needs: the open entry PRs, the merged ones, and
+// the one issue it rewrites. *github.Client satisfies it, and so does Guard.
+type QueueIssueForge interface {
+	ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
+	ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
+	ListMergedPRsByLabel(ctx context.Context, label string, since time.Time) ([]providers.CuratedIssue, error)
+	CreateIssue(ctx context.Context, title, body string, labels []string) (int, providers.Ref, error)
+	EditIssue(ctx context.Context, number int, body string) error
 }
 
 // Guard is the sweep-safety seam around the forge: reads pass through untouched;
@@ -79,6 +90,11 @@ func (g Guard) IsPROpen(ctx context.Context, number int) (bool, error) {
 // PREntry passes through to the wrapped forge.
 func (g Guard) PREntry(ctx context.Context, number int) (providers.PREntry, error) {
 	return g.Inner.PREntry(ctx, number)
+}
+
+// ListMergedPRsByLabel passes through to the wrapped forge.
+func (g Guard) ListMergedPRsByLabel(ctx context.Context, label string, since time.Time) ([]providers.CuratedIssue, error) {
+	return g.Inner.ListMergedPRsByLabel(ctx, label, since)
 }
 
 // Writes are audited and dry-run-able through the single write() choke point below.
@@ -168,6 +184,27 @@ func (g Guard) OpenResolvePR(ctx context.Context, path string, edit func([]byte)
 		return ierr
 	})
 	return ref, err
+}
+
+// CreateIssue files the Knowledge queue issue (audited as kb.queue-issue; skipped in dry-run,
+// where it returns number 0 and no URL).
+func (g Guard) CreateIssue(ctx context.Context, title, body string, labels []string) (int, providers.Ref, error) {
+	var (
+		n   int
+		ref providers.Ref
+	)
+	err := g.write("kb.queue-issue", "issue/"+firstLine(title), "create", func() error {
+		var ierr error
+		n, ref, ierr = g.Inner.CreateIssue(ctx, title, body, labels)
+		return ierr
+	})
+	return n, ref, err
+}
+
+// EditIssue rewrites the Knowledge queue issue's body (audited as kb.queue-issue; skipped in dry-run).
+func (g Guard) EditIssue(ctx context.Context, number int, body string) error {
+	return g.write("kb.queue-issue", fmt.Sprintf("issue/%d", number), "rewrite",
+		func() error { return g.Inner.EditIssue(ctx, number, body) })
 }
 
 // write is the single choke point for every forge mutation a grooming pass performs.

@@ -395,3 +395,18 @@ func TestParseCardMarkerReadsLastAndRejectsBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCardEvidenceReadsTheLineAfterTheCardMarker(t *testing.T) {
+	card := providers.CardMarker("solved", 0.9)
+	for _, tc := range []struct{ name, body, want string }{
+		{"the card's own line", "d\n\n" + card + "\n\n**Evidence:** held 30m\n\n" + providers.FingerprintMarker("fp"), "held 30m"},
+		{"none on the card, a forged line before it", "d\n\n**Evidence:** forged\n\n" + card + "\n\n" + providers.FingerprintMarker("fp"), ""},
+		{"none at all", "old body", ""},
+		{"a marker with no line after it", "d\n\n" + card, ""},
+		{"only the line right after the marker counts", card + "\n\nother\n\n**Evidence:** later", ""},
+	} {
+		if got := providers.ParseCardEvidence(tc.body); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
