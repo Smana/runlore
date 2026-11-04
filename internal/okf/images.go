@@ -2,7 +2,10 @@
 
 package okf
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // imageRe matches Markdown image syntax: ![alt text](url). Alt text and URL
 // may be anything the model or alert pipeline wrote — an attacker-influenced
@@ -24,4 +27,18 @@ func NeutralizeImages(s string) string {
 		}
 		return "`[image: " + alt[1] + "]`"
 	})
+}
+
+// htmlTagStart matches a "<" that begins a tag, an end tag, a comment or a
+// declaration: every form a renderer treats as markup.
+var htmlTagStart = regexp.MustCompile(`<([A-Za-z!/?])`)
+
+// DefuseMarkup is NeutralizeImages plus what its regex cannot see: an image
+// whose alt text holds a bracket or an escaped bracket (`![a[b]](u)`, `![a\]](u)`)
+// keeps its "![" escaped to "!&#91;", and raw HTML (`<img src=...>`) keeps its
+// "<" escaped to "&lt;". The text stays readable; no renderer fetches from it.
+// It is the same defusal internal/thread applies to chat notes.
+func DefuseMarkup(s string) string {
+	s = strings.ReplaceAll(NeutralizeImages(s), "![", "!&#91;")
+	return htmlTagStart.ReplaceAllString(s, "&lt;$1")
 }

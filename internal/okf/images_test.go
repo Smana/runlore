@@ -2,7 +2,10 @@
 
 package okf
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestNeutralizeImages is the unit test for the image-beacon neutralizer (S2).
 func TestNeutralizeImages(t *testing.T) {
@@ -23,5 +26,16 @@ func TestNeutralizeImages(t *testing.T) {
 				t.Errorf("NeutralizeImages(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDefuseMarkup(t *testing.T) {
+	for _, in := range []string{"![a[b]](https://attacker/b)", "![a\\]](https://attacker/b)", "<img src=https://attacker/b>", "x <!-- c --> y", "![x](u)"} {
+		if got := DefuseMarkup(in); strings.Contains(got, "![") || strings.Contains(got, "<img") || strings.Contains(got, "<!") {
+			t.Errorf("%q -> %q", in, got)
+		}
+	}
+	if got := DefuseMarkup("replicas < 3 ![x](u)"); got != "replicas < 3 `[image: x]`" {
+		t.Errorf("got %q", got)
 	}
 }

@@ -25,10 +25,10 @@ const (
 )
 
 var (
-	fixPRRe   = regexp.MustCompile(`^https://[^/\s]+/[^/\s]+/[^/\s]+/pull/[0-9]+$`)
-	mergeSHAe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
-	spaceRe   = regexp.MustCompile(`\s+`)
-	headingRe = regexp.MustCompile(`^(#{1,6})\s+(.*?)\s*#*\s*$`)
+	fixPRRe    = regexp.MustCompile(`^https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[0-9]+$`)
+	mergeSHARe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+	spaceRe    = regexp.MustCompile(`\s+`)
+	headingRe  = regexp.MustCompile(`^(#{1,6})\s+(.*?)\s*#*\s*$`)
 )
 
 // Validate refuses a resolution that could not be written safely: the fix must
@@ -38,7 +38,7 @@ func Validate(r providers.AppliedResolution) error {
 	switch {
 	case !fixPRRe.MatchString(r.FixPR):
 		return fmt.Errorf("fix %q is not a pull request URL", r.FixPR)
-	case r.MergeSHA != "" && !mergeSHAe.MatchString(r.MergeSHA):
+	case r.MergeSHA != "" && !mergeSHARe.MatchString(r.MergeSHA):
 		return fmt.Errorf("merge sha %q is not 7 to 40 hex characters", r.MergeSHA)
 	case r.Verdict != "resolved" && r.Verdict != "persisting":
 		return fmt.Errorf("verdict %q is neither resolved nor persisting", r.Verdict)
@@ -52,32 +52,42 @@ func Validate(r providers.AppliedResolution) error {
 // pieces of another), whitespace collapses again, the result is trimmed, and it
 // is cut to 2 KiB on a rune boundary. The cut comes last so the 2 KiB is of what
 // is kept.
-func FlattenEvidence(s string) string {
+func FlattenEvidence(s string) string { return cut(strip(s)) }
+
+// strip is FlattenEvidence without the cut.
+func strip(s string) string {
 	s = spaceRe.ReplaceAllString(s, " ")
 	for strings.Contains(s, "<!--") || strings.Contains(s, "-->") {
 		s = strings.ReplaceAll(strings.ReplaceAll(s, "<!--", ""), "-->", "")
 	}
-	s = strings.TrimSpace(spaceRe.ReplaceAllString(s, " "))
-	if len(s) <= maxEvidenceBytes {
-		return s
-	}
-	cut := maxEvidenceBytes
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return strings.TrimSpace(s[:cut])
-}
-
-// oneLine is the full treatment untrusted text gets before it enters an entry:
-// flatten, redact, neutralize images, and a last collapse in case a rewrite
-// introduced whitespace.
-func oneLine(s string) string {
-	s = okf.NeutralizeImages(redact.Secrets(FlattenEvidence(s)))
 	return strings.TrimSpace(spaceRe.ReplaceAllString(s, " "))
 }
 
-func marker(r providers.AppliedResolution) string {
-	sum := sha256.Sum256([]byte(r.FixPR + "|" + r.Verdict))
+func cut(s string) string {
+	if len(s) <= maxEvidenceBytes {
+		return s
+	}
+	n := maxEvidenceBytes
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return strings.TrimSpace(s[:n])
+}
+
+// oneLine is the full treatment untrusted text gets before it enters an entry,
+// in this order: redact (on the whole text, so a secret is never cut before it
+// is recognised), strip comments and flatten to one line, redact again (removing
+// a comment can join the halves of a token), defuse images and HTML, and cut to
+// 2 KiB last so the bound holds on what is written.
+func oneLine(s string) string {
+	s = redact.Secrets(strip(redact.Secrets(s)))
+	return cut(strings.TrimSpace(spaceRe.ReplaceAllString(okf.DefuseMarkup(s), " ")))
+}
+
+func marker(r providers.AppliedResolution) string { return markerFor(r.FixPR, r.Verdict) }
+
+func markerFor(fixPR, verdict string) string {
+	sum := sha256.Sum256([]byte(fixPR + "|" + verdict))
 	return markerPrefix + hex.EncodeToString(sum[:])[:8] + " -->"
 }
 
@@ -118,7 +128,10 @@ func splice(body, name, content string) (string, bool) {
 		return "", false
 	}
 	head := strings.Join(lines[:start+1], "\n")
-	out := head + "\n\n" + content + "\n"
+	out := head + "\n"
+	if content != "" {
+		out = head + "\n\n" + content + "\n"
+	}
 	if rest := strings.TrimSpace(strings.Join(lines[end:], "\n")); rest != "" {
 		out += "\n" + strings.Join(lines[end:], "\n")
 	}
@@ -134,6 +147,74 @@ func sectionContent(body, name string) (string, bool) {
 	return strings.TrimSpace(strings.Join(lines[start+1:end], "\n")), true
 }
 
+// withdrawApplied removes fixPR's Applied record from "## Resolution": its three
+// lines and marker, and the "Suggested" heading above the old suggestion, which
+// is then the section's content again.
+func withdrawApplied(body, fixPR string) string {
+	lines := strings.Split(body, "\n")
+	start, end, ok := section(lines, "Resolution")
+	if !ok {
+		return body
+	}
+	m := markerFor(fixPR, "resolved")
+	idx := -1
+	for i := start + 1; i < end; i++ {
+		if strings.TrimSpace(lines[i]) == m {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return body
+	}
+	a, applied := idx, "- **Applied:** "+prLink(fixPR)
+	for a > start && !strings.HasPrefix(lines[a], applied) {
+		a--
+	}
+	if a == start {
+		a = idx
+	}
+	b := idx + 1
+	for b < end && strings.TrimSpace(lines[b]) == "" {
+		b++
+	}
+	if b < end && strings.TrimSpace(lines[b]) == suggestedHeading {
+		for b++; b < end && strings.TrimSpace(lines[b]) == ""; b++ {
+		}
+	}
+	rest := lines[b:]
+	if b >= end && end < len(lines) {
+		rest = append([]string{""}, rest...)
+	}
+	return strings.Join(append(lines[:a:a], rest...), "\n")
+}
+
+// withdrawUnresolved removes fixPR's "did not hold" bullet and marker.
+func withdrawUnresolved(body, fixPR string) string {
+	m := markerFor(fixPR, "persisting")
+	lines := strings.Split(body, "\n")
+	idx := -1
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) == m {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return body
+	}
+	a, bullet := idx, "- The fix "+prLink(fixPR)
+	for a > 0 && !strings.HasPrefix(lines[a], bullet) {
+		a--
+	}
+	if !strings.HasPrefix(lines[a], bullet) {
+		a = idx
+	}
+	b := idx + 1
+	for b < len(lines) && strings.TrimSpace(lines[b]) == "" && a > 0 && strings.TrimSpace(lines[a-1]) == "" {
+		b++
+	}
+	return strings.Join(append(lines[:a:a], lines[b:]...), "\n")
+}
+
 // ApplyBody records r in the entry body. It is a no-op when r's marker is
 // already there. A resolved verdict rewrites "## Resolution" (or appends it) as
 // the three lines recall quotes, then the marker after the blank that ends them
@@ -144,6 +225,12 @@ func ApplyBody(body string, r providers.AppliedResolution) string {
 	m := marker(r)
 	if strings.Contains(body, m) {
 		return body
+	}
+	// A fix has one latest verdict: recording the other one withdraws its record.
+	if r.Verdict == "persisting" {
+		body = withdrawApplied(body, r.FixPR)
+	} else {
+		body = withdrawUnresolved(body, r.FixPR)
 	}
 	if r.Verdict == "persisting" {
 		line := "- The fix " + prLink(r.FixPR)
@@ -199,15 +286,17 @@ func Apply(raw []byte, r providers.AppliedResolution) (out []byte, changed bool,
 		return nil, false, fmt.Errorf("the entry has no frontmatter")
 	}
 	fm, body := catalog.SplitFrontmatter(raw)
-	if strings.Contains(string(body), marker(r)) {
-		return raw, false, nil
-	}
 	var doc yaml.Node
 	if err := yaml.Unmarshal(fm, &doc); err != nil {
 		return nil, false, fmt.Errorf("frontmatter: %w", err)
 	}
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
 		return nil, false, fmt.Errorf("frontmatter is not a mapping")
+	}
+	// A repeat is a no-op when the body already holds this verdict for this fix
+	// and the frontmatter agrees; either one out of step is reconciled.
+	if strings.Contains(string(body), marker(r)) && resolvedFix(doc.Content[0], r.FixPR) == (r.Verdict == "resolved") {
+		return raw, false, nil
 	}
 	setResolution(doc.Content[0], r)
 	enc, err := yaml.Marshal(&doc)
@@ -216,6 +305,22 @@ func Apply(raw []byte, r providers.AppliedResolution) (out []byte, changed bool,
 	}
 	out = []byte("---\n" + string(enc) + "---\n" + ApplyBody(string(body), r))
 	return out, true, nil
+}
+
+// resolvedFix reports whether the frontmatter's resolution records fixPR.
+func resolvedFix(m *yaml.Node, fixPR string) bool {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value != "resolution" {
+			continue
+		}
+		v := m.Content[i+1]
+		for j := 0; j+1 < len(v.Content); j += 2 {
+			if v.Content[j].Value == "fix_pr" && v.Content[j+1].Value == fixPR {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // setResolution writes the resolution block for a resolved verdict, or deletes
@@ -235,6 +340,7 @@ func setResolution(m *yaml.Node, r providers.AppliedResolution) {
 		for i := 0; i+1 < len(v.Content); i += 2 {
 			if v.Content[i].Value == "fix_pr" && v.Content[i+1].Value == r.FixPR {
 				m.Content = append(m.Content[:idx], m.Content[idx+2:]...)
+				return
 			}
 		}
 		return
