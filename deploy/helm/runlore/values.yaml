@@ -473,7 +473,8 @@ env: []
 #     - name: factory-ca
 #       configMap: { name: factory-ca }
 #   extraVolumeMounts:
-#     - { name: factory-ca, mountPath: /etc/runlore/factory-ca, readOnly: true }
+#     - { name: factory-ca, mountPath: /etc/runlore-factory-ca, readOnly: true }
+#   # Not under /etc/runlore: that is the config's read-only mount, and a pod cannot create a mount inside it.
 extraVolumes: []
 extraVolumeMounts: []
 
