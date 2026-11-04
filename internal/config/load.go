@@ -52,6 +52,9 @@ func ApplyDefaults(c *Config) {
 		if c.Factory.Verify.MaxSteps == 0 {
 			c.Factory.Verify.MaxSteps = 6
 		}
+		if c.Factory.Curation.Window == 0 {
+			c.Factory.Curation.Window = Duration(7 * 24 * time.Hour)
+		}
 	}
 	// Coalesce defaults: when enabled without explicit tuning, choose conservative
 	// values that reduce storm noise without introducing too much investigation lag.

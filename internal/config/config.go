@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,16 +82,52 @@ type Logging struct {
 // webhooks. Secrets are env var NAMES, never values. An empty URL turns the
 // whole integration off.
 type Factory struct {
-	URL             string         `yaml:"url"`               // factory API base URL; empty disables the integration
-	TokenURL        string         `yaml:"token_url"`         // OAuth2 token endpoint (client credentials); https only
-	ClientIDEnv     string         `yaml:"client_id_env"`     // env var holding the client id
-	ClientSecretEnv string         `yaml:"client_secret_env"` // env var holding the client secret
-	ProjectIDEnv    string         `yaml:"project_id_env"`    // env var holding the identity provider project id (token audience)
-	Repository      string         `yaml:"repository"`        // owner/name the factory works on
-	MaxCostUSD      float64        `yaml:"max_cost_usd"`      // per-task cost ceiling sent with each task; must be above 0
-	Webhook         FactoryWebhook `yaml:"webhook"`           // the inbound webhook receiver
-	Soak            Duration       `yaml:"soak"`              // how long after a merge before the alert is checked; 0 => 30m (ApplyDefaults), at least 5m
-	Verify          FactoryVerify  `yaml:"verify"`            // the post-merge check; an empty alertmanager_url leaves verification off
+	URL             string          `yaml:"url"`               // factory API base URL; empty disables the integration
+	TokenURL        string          `yaml:"token_url"`         // OAuth2 token endpoint (client credentials); https only
+	ClientIDEnv     string          `yaml:"client_id_env"`     // env var holding the client id
+	ClientSecretEnv string          `yaml:"client_secret_env"` // env var holding the client secret
+	ProjectIDEnv    string          `yaml:"project_id_env"`    // env var holding the identity provider project id (token audience)
+	Repository      string          `yaml:"repository"`        // owner/name the factory works on
+	MaxCostUSD      float64         `yaml:"max_cost_usd"`      // per-task cost ceiling sent with each task; must be above 0
+	Webhook         FactoryWebhook  `yaml:"webhook"`           // the inbound webhook receiver
+	Soak            Duration        `yaml:"soak"`              // how long after a merge before the alert is checked; 0 => 30m (ApplyDefaults), at least 5m
+	Verify          FactoryVerify   `yaml:"verify"`            // the post-merge check; an empty alertmanager_url leaves verification off
+	Curation        FactoryCuration `yaml:"curation"`          // defers an incident's KB entry until its fix is verified
+}
+
+// FactoryCuration configures deferring the curated entry of an incident the factory
+// is fixing: the entry is drafted once the fix has an outcome, or the window ends.
+type FactoryCuration struct {
+	Defer  bool     `yaml:"defer"`  // hold the entry until the fix is verified; needs the ledger, Alertmanager and a GitHub KB repo
+	Window Duration `yaml:"window"` // how long to wait for an outcome after the factory accepts the task; 0 => 7d (ApplyDefaults), at least 24h
+}
+
+// minCurationWindow covers a 30m soak, alert-rules' 2h and a same-day publish and merge.
+const minCurationWindow = 24 * time.Hour
+
+// validateCuration checks factory.curation against the blocks validateFactory cannot see.
+func (c *Config) validateCuration() error {
+	cu := c.Factory.Curation
+	if cu.Window != 0 && cu.Window.Std() < minCurationWindow {
+		return fmt.Errorf("factory.curation.window must be at least 24h, got %v", cu.Window.Std())
+	}
+	if !cu.Defer {
+		return nil
+	}
+	for _, need := range []struct{ key, val string }{
+		{"factory.url", c.Factory.URL},
+		{"outcome.ledger_path", c.Outcome.LedgerPath},
+		{"factory.verify.alertmanager_url", c.Factory.Verify.AlertmanagerURL},
+		{"forge.kb_repo", c.Forge.KBRepo},
+	} {
+		if need.val == "" {
+			return fmt.Errorf("factory.curation.defer needs %s", need.key)
+		}
+	}
+	if c.Forge.Provider != "" && c.Forge.Provider != "github" {
+		return fmt.Errorf("factory.curation.defer needs forge.provider github, got %q", c.Forge.Provider)
+	}
+	return nil
 }
 
 // FactoryVerify configures the check RunLore makes once a fix has soaked.
@@ -1624,7 +1661,8 @@ func globAny(patterns []string, s string) bool {
 	return false
 }
 
-// Duration is a time.Duration that unmarshals from a Go duration string ("30m").
+// Duration is a time.Duration that unmarshals from a Go duration string ("30m"),
+// with a leading whole-day unit: "7d", "7d12h".
 type Duration time.Duration
 
 // Std returns the standard library duration.
@@ -1636,12 +1674,38 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&s); err != nil {
 		return err
 	}
-	parsed, err := time.ParseDuration(s)
+	parsed, err := parseDuration(s)
 	if err != nil {
 		return err
 	}
 	*d = Duration(parsed)
 	return nil
+}
+
+// parseDuration is time.ParseDuration plus a leading "<n>d" of whole days. Anything
+// else with a "d" (1.5d, a bare d, -1d) stays an error from time.ParseDuration.
+func parseDuration(s string) (time.Duration, error) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(s) || s[i] != 'd' {
+		return time.ParseDuration(s)
+	}
+	days, err := strconv.Atoi(s[:i])
+	if err != nil || days > 36500 {
+		return time.ParseDuration(s)
+	}
+	var rest time.Duration
+	if tail := s[i+1:]; tail != "" {
+		if rest, err = time.ParseDuration(tail); err != nil {
+			return 0, err
+		}
+		if tail[0] < '0' || tail[0] > '9' {
+			return time.ParseDuration(s)
+		}
+	}
+	return time.Duration(days)*24*time.Hour + rest, nil
 }
 
 // ActionMode controls how far RunLore may go when acting on the cluster.
@@ -2102,6 +2166,9 @@ var (
 // it. Returns an error that should abort startup.
 func (c *Config) Validate() error {
 	if err := validateFactory(c.Factory); err != nil {
+		return err
+	}
+	if err := c.validateCuration(); err != nil {
 		return err
 	}
 	if c.Server.MCP.Enabled && c.Catalog.Dir == "" {
