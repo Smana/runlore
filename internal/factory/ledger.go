@@ -120,6 +120,21 @@ func (g Generation) Outcome() string {
 	return ""
 }
 
+// startGeneration resets r for a new generation of its TriggerKey (the incident re-fired after the
+// old task ended), or a stale merge would trigger the old soak. The hold survives, first archiving a
+// generation that had a fix; the Slack root stays unless clearSlack.
+func (r *Record) startGeneration(clearSlack bool) {
+	hold := r.Curation
+	if hold != nil && r.FixRoom != "" {
+		hold.Generations = append(hold.Generations, r.Generation())
+	}
+	next := Record{TriggerKey: r.TriggerKey, Curation: hold}
+	if !clearSlack {
+		next.SlackRoot, next.SlackChannel = r.SlackRoot, r.SlackChannel
+	}
+	*r = next
+}
+
 // clone is a deep copy: nothing in it aliases r.
 func (r Record) clone() Record {
 	r.Events = slices.Clone(r.Events)
@@ -269,7 +284,7 @@ func (l *Ledger) ByRoom(room string) (Record, bool) {
 	return Record{}, false
 }
 
-// Held returns the records that carry a curation hold, oldest key first.
+// Held returns clones of the records that carry a curation hold, in key order.
 func (l *Ledger) Held() []Record {
 	l.mu.Lock()
 	defer l.mu.Unlock()
