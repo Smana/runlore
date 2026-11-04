@@ -3,22 +3,27 @@
 package curate
 
 import (
+	"context"
+	"log/slog"
 	"slices"
 	"strings"
 
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/threatcheck"
 )
 
 // securityLabel is applied by humans only: nothing in RunLore writes it.
 const securityLabel = "security"
 
-// Risk is why an open entry PR needs a human rather than the merge gate, riskiest first.
+// Risk is why an open entry PR needs a human rather than the merge gate, riskiest first. A threat
+// ranks first because Decide shows one risk a row, and only a threat's row withholds the PR's text.
 type Risk int
 
 // The risks, in their order.
 const (
-	RiskContested   Risk = iota // a standing 👎 whose KB link is the PR
+	RiskThreat      Risk = iota // the threat check hit on the PR's entry, or could not read it
+	RiskContested               // a standing 👎 whose KB link is the PR
 	RiskContradicts             // the PR carries the decider's possible-duplicate section
 	RiskSecurity                // a human labelled it security
 	RiskConflict                // it conflicts and RunLore refused to rebuild it; Risks does not report it (RefreshEntries does)
@@ -28,6 +33,8 @@ const (
 // String names the risk.
 func (r Risk) String() string {
 	switch r {
+	case RiskThreat:
+		return "threat"
 	case RiskContested:
 		return "contested"
 	case RiskContradicts:
@@ -51,9 +58,13 @@ type Evidence interface {
 }
 
 // Risks lists every risk that applies to pr, riskiest first. contested is keyed by PR number and
-// verified by dedup fingerprint. Empty means the PR's fix held and nothing stands against it.
-func Risks(pr providers.CuratedIssue, contested map[int]bool, verified map[string]bool) []Risk {
+// verified by dedup fingerprint; threats are the threat check's rules for pr's entry (entryThreats).
+// Empty means the PR's fix held and nothing stands against it.
+func Risks(pr providers.CuratedIssue, contested map[int]bool, verified map[string]bool, threats []string) []Risk {
 	var risks []Risk
+	if len(threats) > 0 {
+		risks = append(risks, RiskThreat)
+	}
 	if contested[pr.Number] {
 		risks = append(risks, RiskContested)
 	}
@@ -67,4 +78,27 @@ func Risks(pr providers.CuratedIssue, contested map[int]bool, verified map[strin
 		risks = append(risks, RiskUnverified)
 	}
 	return risks
+}
+
+// ruleEntryUnreadable names a threat that is no rule of the check: the entry could not be read.
+const ruleEntryUnreadable = "entry-unreadable"
+
+// entryThreats runs the threat check on the entry pr carries at its head, and returns the rules it
+// broke. A human's accepted label is the override, so an accepted PR is not read. An entry that
+// cannot be read is withheld too: the check fails closed. What is logged is the rules' names, never
+// the text they matched.
+func entryThreats(ctx context.Context, f EntryReader, log *slog.Logger, pr providers.CuratedIssue) []string {
+	if slices.Contains(pr.Labels, acceptedLabel) {
+		return nil
+	}
+	text, err := f.PREntryText(ctx, pr.Number)
+	if err != nil {
+		log.Warn("threat check: the entry could not be read, so it is withheld", "pr", pr.Number, "rules", ruleEntryUnreadable, "err", err)
+		return []string{ruleEntryUnreadable}
+	}
+	rules := threatcheck.Check(string(text))
+	if len(rules) > 0 {
+		log.Warn("threat check: the entry is withheld", "pr", pr.Number, "rules", strings.Join(rules, ","))
+	}
+	return rules
 }

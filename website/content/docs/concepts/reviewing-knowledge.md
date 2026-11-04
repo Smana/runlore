@@ -351,9 +351,9 @@ issue titled **Knowledge queue** in the KB repository, rewritten by the first sw
 (`curate.queue_issue.slack: true` also posts one line linking it). It has three parts:
 
 - **Decide** — the open entry PRs a human must look at, riskiest first and oldest first within a
-  risk: `contested` (a standing 👎 links to the PR), `contradicts` (the PR carries the
-  possible-duplicate section), `security`, `conflict`, then `unverified` (the fix has no held
-  observation) and `verified`. A PR labelled `ready-to-merge` is not listed. Retire, revalidate
+  risk: `threat` (see The threat check below), `contested` (a standing 👎 links to the PR),
+  `contradicts` (the PR carries the possible-duplicate section), `security`, `conflict`, then
+  `unverified` (the fix has no held observation) and `verified`. A PR labelled `ready-to-merge` is not listed. Retire, revalidate
   and resolve PRs are entry edits and never appear.
 - **Audit** — the place for a sample of what automation merged. For now it reads "Nothing merged
   by automation to sample since the last rewrite."
@@ -378,6 +378,32 @@ incident resolves. It is withdrawn when the evidence flips, and `accepted` from 
 it. `security` is applied by a human in phase 1: no machine signal sets it. Removing the label by
 hand does not stick: the next sweep or verification puts it back while the evidence still holds, so
 to hold a PR back, label it `security` or 👎 it.
+
+**The threat check.** Entries quote logs and alert labels and every factory agent reads them, so a
+crafted log line could become a stored injection. With `factory.curation.defer` on, whenever a PR
+could earn or holds `ready-to-merge`, and for each row of Decide, RunLore reads the PR's entry at its
+head and runs a deterministic, offline check over the whole text, frontmatter included. No model is
+called: a model is what the text would attack. Each rule has a name:
+
+| Rule | What it looks for |
+|---|---|
+| `chat-markup` | Chat or role markup: `<\|im_start\|>`, `[INST]`, `<system>`, `</tool_result>`, `<function_calls>`, a line beginning `system:` or `assistant:` |
+| `instruction-override` | "ignore previous instructions" and close variants, "you are now", "disregard the above", "do not tell the user", in any case and spacing |
+| `hidden-character` | Unicode format characters and control characters other than tab and newline, anywhere |
+| `encoded-payload` | A long base64 or hex run outside a code span, unless it has the shape of a SHA or digest |
+| `exfiltration` | `curl ... \| sh`, a pipe to a shell, `gh auth token`, reading a credentials path |
+
+A hit keeps `ready-to-merge` off, withdraws it from a labelled PR, and lists the PR in Decide as
+`threat: <rule>`. That row names the PR by number and carries only the rule's name, never the title,
+the evidence or the matched text; open the PR to read the entry. An entry that cannot be read counts
+as a hit, `threat: entry-unreadable`, and the next pass reads it again. The check never edits or
+closes a PR, and blocks nothing a human decides: for a false positive, label the PR `accepted`, which
+skips the check for as long as the label stands, or merge it yourself. A rule that fires costs a
+human look, not an entry.
+
+It is a screen for obvious injection, not a proof of safety. Rewording, another language, lookalike
+letters or a payload inside a code span all pass it. The real boundary stays that every reader
+receives entries as quoted data. Without `defer` the check does not run.
 
 **Conflicts.** Each merged entry appends to `index.md` and `log.md`, so one merge can make every
 other open entry PR conflict. Rebuilding one costs six writes and a CI run and restarts its stale

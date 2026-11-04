@@ -21,3 +21,16 @@ type Forge interface {
 	Close(ctx context.Context, number int) error
 	OpenIssue(ctx context.Context, inv providers.Investigation) (providers.Ref, error)
 }
+
+// EntryReader reads the entry a PR carries, as it stands at the PR's head, for the threat check. An
+// error says nothing about the text, so a caller treats it as a hit. *github.Client satisfies it, and
+// so does Guard.
+type EntryReader interface {
+	PREntryText(ctx context.Context, number int) ([]byte, error)
+}
+
+// QueueForge is what the Queue pass needs: the groomer's forge, and the entry it screens.
+type QueueForge interface {
+	Forge
+	EntryReader
+}

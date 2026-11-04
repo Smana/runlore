@@ -74,6 +74,7 @@ package's `// Package …` doc comment for its contract before changing it.
 - **Knowledge.** `internal/okf` (OKF markdown serialisation) · `internal/catalog` (load and
   search) · `internal/embed` · `internal/kbvalidate` · `internal/kbimport` · `internal/kbmcp`
   · `internal/curator` (file-time learning gate) · `internal/curate` (backlog grooming) ·
+  `internal/threatcheck` (deterministic injection screen on an entry's text) ·
   `internal/forge/{github,gitlab}` · `internal/outcome` (append-only JSONL ledger).
 - **Delivery & chat.** `internal/notify` (Slack, Matrix, `webhook/`, `templated/`) ·
   `internal/slackcard` · `internal/thread` (a human reply in a thread becomes a KB note).

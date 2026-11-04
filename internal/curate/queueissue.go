@@ -198,11 +198,13 @@ type decideRow struct {
 	risk    string
 	rank    int
 	created time.Time
+	// withheld drops the PR's title and evidence from the row: either can hold what the check matched.
+	withheld bool
 }
 
 // decide lists the open entry PRs not labelled ready-to-merge, riskiest first and oldest first within
 // a risk. Retire, revalidate and resolve PRs are entry edits, never rows. refused holds the PRs the
-// refresh would not rebuild.
+// refresh would not rebuild. With Evidence set, each row's entry goes through the threat check.
 func (q QueueIssue) decide(ctx context.Context, refused map[int]string) ([]decideRow, error) {
 	prs, err := q.Forge.ListPRsByLabel(ctx, runloreLabel)
 	if err != nil {
@@ -222,13 +224,20 @@ func (q QueueIssue) decide(ctx context.Context, refused map[int]string) ([]decid
 			continue
 		}
 		row := decideRow{pr: pr, risk: "verified", rank: math.MaxInt, created: pr.CreatedAt}
-		risks := Risks(pr, contested, verified)
+		var threats []string
+		if q.Evidence != nil {
+			threats = entryThreats(ctx, q.Forge, q.Log, pr)
+		}
+		risks := Risks(pr, contested, verified, threats)
 		if _, ok := refused[pr.Number]; ok {
 			risks = append(risks, RiskConflict)
 			slices.Sort(risks)
 		}
 		if len(risks) > 0 {
 			row.risk, row.rank = risks[0].String(), int(risks[0])
+		}
+		if len(threats) > 0 {
+			row.risk, row.withheld = RiskThreat.String()+": "+strings.Join(threats, ", "), true
 		}
 		rows = append(rows, row)
 	}
@@ -278,10 +287,13 @@ func (q QueueIssue) render(now, last time.Time, rows []decideRow, merged int) st
 				verdict, conf = v, fmt.Sprintf("%d%%", int(math.Round(c*100)))
 			}
 			evidence := "—"
-			if ev := providers.ParseCardEvidence(r.pr.Body); ev != "" {
+			if ev := providers.ParseCardEvidence(r.pr.Body); ev != "" && !r.withheld {
 				evidence = cell(truncateRunes(ev, 200))
 			}
-			text := cell(truncateRunes(fmt.Sprintf("#%d %s", r.pr.Number, r.pr.Title), 160))
+			text := fmt.Sprintf("#%d", r.pr.Number)
+			if !r.withheld {
+				text = cell(truncateRunes(text+" "+r.pr.Title, 160))
+			}
 			if r.pr.URL != "" {
 				text = "[" + text + "](" + r.pr.URL + ")"
 			}

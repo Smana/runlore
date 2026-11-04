@@ -41,6 +41,9 @@ type fakeGuarded struct {
 func (f *fakeGuarded) PREntry(context.Context, int) (providers.PREntry, error) {
 	return providers.PREntry{Path: "incidents/a.md", State: "open"}, nil
 }
+func (f *fakeGuarded) PREntryText(context.Context, int) ([]byte, error) {
+	return []byte("entry"), nil
+}
 func (f *fakeGuarded) EditEntryOnPR(context.Context, int, string, func([]byte) ([]byte, bool, error)) (bool, error) {
 	f.edited++
 	return true, nil

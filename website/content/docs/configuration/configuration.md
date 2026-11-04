@@ -1107,6 +1107,13 @@ factory:
   those are logged and audited, not made, and no generation is marked resolved. The draft itself is
   the curator's own write, as without `defer`, so a verified entry still opens its pull request in
   `dry-run`. Set `apply` to let the outcome and the label be written too.
+
+  `defer` also turns on the threat check on an entry's text: a deterministic, offline screen that
+  only ever withholds `ready-to-merge` and lists the PR in the Knowledge queue with risk `threat`
+  and the rule's name. It has no key of its own. It screens for obvious injection and is no proof of
+  safety: the boundary stays that every reader receives entries as quoted data. See
+  [Reviewing knowledge]({{< relref "reviewing-knowledge.md#8-the-knowledge-queue" >}}).
+
   With `defer` on, the factory notifier is not added to the delivery list, since filing happens at
   curation. The Slack line of a new generation can be lost when the factory's first webhook beats
   the delivery.

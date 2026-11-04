@@ -4,6 +4,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -272,5 +273,51 @@ func TestRefusesAPRThatIsNotRunLores(t *testing.T) {
 	s := &stubPR{labels: []string{"runlore", "solved"}, branch: "runlore/kb-oom-1"}
 	if pe, err := s.start(t).PREntry(ctx, 84); err != nil || pe.State != "open" {
 		t.Fatal(pe, err)
+	}
+}
+
+func TestPREntryText(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("the entry at the head"))
+	serve := func(t *testing.T, files, contents string) *Client {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/o/r/pulls/84":
+				_, _ = w.Write([]byte(`{"state":"open","head":{"ref":"someone/branch","sha":"headsha"}}`))
+			case "/repos/o/r/pulls/84/files":
+				_, _ = w.Write([]byte(files))
+			case "/repos/o/r/contents/incidents/a.md":
+				if r.URL.Query().Get("ref") != "headsha" || contents == "" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(contents))
+			default:
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return New(srv.URL, "o", "r", "main", staticToken("tok"))
+	}
+	one := `[{"filename":"index.md"},{"filename":"log.md"},{"filename":"incidents/a.md"}]`
+	file := `{"sha":"blob","encoding":"base64","content":"` + encoded + `"}`
+
+	t.Run("the entry, at the PR's head, whoever opened it", func(t *testing.T) {
+		got, err := serve(t, one, file).PREntryText(context.Background(), 84)
+		if err != nil || string(got) != "the entry at the head" {
+			t.Fatal(string(got), err)
+		}
+	})
+	for name, tc := range map[string]struct{ files, contents string }{
+		"two entries":        {`[{"filename":"incidents/a.md"},{"filename":"b.md"}]`, file},
+		"no entry":           {`[{"filename":"index.md"}]`, file},
+		"gone from the head": {one, ""},
+		"too large to read":  {one, `{"sha":"blob","encoding":"none","content":""}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := serve(t, tc.files, tc.contents).PREntryText(context.Background(), 84); err == nil {
+				t.Fatal("a read that says nothing about the entry must fail: ", string(got))
+			}
+		})
 	}
 }

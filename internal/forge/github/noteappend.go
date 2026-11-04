@@ -181,6 +181,28 @@ func (c *Client) PREntry(ctx context.Context, number int) (providers.PREntry, er
 	return providers.PREntry{Path: path, State: state}, nil
 }
 
+// PREntryText reads the one catalog entry a pull request carries, as it stands at the head. It is
+// read-only and does not ask whose PR it is, since the Queue screens every PR it may label. Whatever
+// leaves the entry unknown is an error: more than one entry, none, gone from the head, too large.
+func (c *Client) PREntryText(ctx context.Context, number int) ([]byte, error) {
+	pr, err := c.readPR(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	path, err := c.prEntryPath(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	raw, _, found, err := c.getFile(ctx, path, pr.headSHA)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("github PR %d: %s is not on head %s", number, path, pr.headSHA)
+	}
+	return raw, nil
+}
+
 // editEntryOnPR is the shared read-edit-put. ownOnly makes it refuse a pull request
 // RunLore did not open (requireRunLorePR): set for EditEntryOnPR, whose number comes
 // from an operator, and not for a thread note, whose caller only holds a PR that

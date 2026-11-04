@@ -29,6 +29,14 @@ type fakeQueueForge struct {
 	url             string
 	mergedSince     time.Time
 	listErr         error
+	entries         map[int]string
+	readErr         error
+	reads           int
+}
+
+func (f *fakeQueueForge) PREntryText(_ context.Context, n int) ([]byte, error) {
+	f.reads++
+	return []byte(f.entries[n]), f.readErr
 }
 
 func (f *fakeQueueForge) ListPRsByLabel(_ context.Context, label string) ([]providers.CuratedIssue, error) {
