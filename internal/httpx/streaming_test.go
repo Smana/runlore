@@ -104,8 +104,9 @@ func TestStreamingContextCancelAborts(t *testing.T) {
 		done <- err
 	}()
 	select {
-	case <-done:
+	case err := <-done:
 		// aborted (with or without an error) — the read returned promptly
+		t.Logf("read returned: %v", err)
 	case <-time.After(2 * time.Second):
 		t.Fatal("context cancellation did not abort the streaming read promptly")
 	}
