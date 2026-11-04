@@ -93,7 +93,7 @@ type Curation struct {
 // incident's entry. A 200 with a hold standing is no new generation and touches nothing. A 201 on a
 // hold with no live artifact starts it again. A recall is filed and observed, never drafted.
 func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
-	if r, ok := c.Ledger.Get(inv.TriggerKey); ok && c.undecided(r) {
+	if r, ok := c.Ledger.Get(inv.TriggerKey); ok && c.undecided(ctx, r) {
 		c.log().Info("a generation is undecided; filing nothing for this re-detection", "alert", inv.AlertName, "key", inv.TriggerKey)
 		if inv.Recalled {
 			return providers.Ref{}, nil
@@ -179,14 +179,19 @@ func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte,
 // filing for good. A merged fix keeps its soak past the window: the verifier always reaches a verdict or
 // an outcome.
 // A hold not drafted, with no fix yet, is one stub waiting for its human until the window: a new triager
-// and stub each repeat buy nothing. An observe-only hold has nothing of its own to protect.
-func (c *Curation) undecided(r Record) bool {
+// and stub each repeat buy nothing. So is a drafted hold whose PR is live (open, merged, or unreadable)
+// with no fix bound, at any time; it files again once the PR is closed unmerged, or a fix is bound and
+// decided. An observe-only hold has nothing of its own to protect.
+func (c *Curation) undecided(ctx context.Context, r Record) bool {
 	h := r.Curation
 	switch {
 	case h == nil || h.ObserveOnly:
 		return false
 	case r.FixRoom == "":
-		return h.Drafted == "" && !c.windowPassed(h)
+		if h.Drafted == "" {
+			return !c.windowPassed(h)
+		}
+		return h.Drafted != draftedNone && !c.noLiveArtifact(ctx, h)
 	}
 	return r.Verdict == "" && r.Outcome == "" && !r.Reverted && r.Monitor != "regression" && !r.fixEndedUnmerged() && (!r.MergedAt.IsZero() || !c.windowPassed(h))
 }

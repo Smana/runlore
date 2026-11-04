@@ -1094,6 +1094,11 @@ factory:
      from the factory's first acceptance. The 24h floor covers a 30m soak, a 2h class and a
      same-day publish and merge. RunLore cannot read the factory's own follow-up window.
 
+  While an entry's pull request is open, or merged, or cannot be read, and no fix is bound to it, a
+  repeat of the alert files nothing with the factory and costs nothing: the entry waits for its
+  reviewer, at any age. Filing resumes when that pull request is closed unmerged, which starts the
+  hold again, and once a fix is bound and decided.
+
   `curate.sweeps.mode` gates only the writes that go through the audited forge guard: the outcome
   written into an entry (`kb resolve`) and the `ready-to-merge` label. In `dry-run`, the default,
   those are logged and audited, not made, and no generation is marked resolved. The draft itself is

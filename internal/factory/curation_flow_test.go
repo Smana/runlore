@@ -359,6 +359,47 @@ func TestCurateAHoldWithNoLiveArtifactStartsAgain(t *testing.T) {
 	}
 }
 
+// A drafted hold with a live PR and no bound fix is one entry waiting for its human: a repeat files
+// no triager and no stub. A merged entry is live too, as noLiveArtifact reads it, and an unreadable PR.
+func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		state    string
+		entryErr error
+		fixRoom  string
+		filed    bool
+	}{
+		{name: "an open PR, no fix", state: "open"},
+		{name: "a merged PR, no fix", state: "merged"},
+		{name: "a PR that cannot be read, no fix", entryErr: fmt.Errorf("a blip")},
+		{name: "a PR closed unmerged restarts", state: "closed", filed: true},
+		{name: "an open PR, a bound decided fix", state: "open", fixRoom: "fix1", filed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFlowRig(t)
+			f.g.cu.Drafts = f.g
+			f.g.entries[164] = providers.PREntry{Path: draftEntry, State: tc.state}
+			f.g.entryErr = func(int) error { return tc.entryErr }
+			f.detect("first", 201, "room0001")
+			must(t, f.g.l.Upsert("k1", func(r *Record) {
+				r.Curation.Drafted, r.Curation.Entry, r.Curation.Investigation = draftURL, draftEntry, nil
+				if tc.fixRoom != "" {
+					r.FixRoom, r.Verdict = tc.fixRoom, "resolved"
+				}
+			}))
+			f.g.now = f.g.now.Add(30 * 24 * time.Hour) // past the window
+			filed := len(f.factory.keys)
+			ref := f.detect("second", 201, "room0002")
+			if got := len(f.factory.keys) != filed; got != tc.filed {
+				t.Fatalf("filed %v, want %v", got, tc.filed)
+			}
+			if !tc.filed && (ref.URL != draftURL || f.record().Room != "room0001") {
+				t.Fatalf("ref %+v, %+v", ref, f.record())
+			}
+		})
+	}
+}
+
 // I2: a recall's held fix must not release a later investigation's draft naming it as Applied.
 func TestCurateThenOnceARecallsHeldGenerationReleasesNoDraft(t *testing.T) {
 	f := newFlowRig(t)
