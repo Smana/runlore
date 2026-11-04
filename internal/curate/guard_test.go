@@ -29,6 +29,24 @@ type fakeGuarded struct {
 	revalidated   []string
 	closeErr      error
 	revalidateErr error
+	edited        int
+	resolvePRs    int
+	resolveErr    error
+}
+
+func (f *fakeGuarded) PREntry(context.Context, int) (providers.PREntry, error) {
+	return providers.PREntry{Path: "incidents/a.md", State: "open"}, nil
+}
+func (f *fakeGuarded) EditEntryOnPR(context.Context, int, string, func([]byte) ([]byte, bool, error)) (bool, error) {
+	f.edited++
+	return true, nil
+}
+func (f *fakeGuarded) OpenResolvePR(context.Context, string, func([]byte) ([]byte, bool, error), string) (providers.Ref, error) {
+	if f.resolveErr != nil {
+		return providers.Ref{}, f.resolveErr
+	}
+	f.resolvePRs++
+	return providers.Ref{URL: "https://forge/pr/3"}, nil
 }
 
 func (f *fakeGuarded) ListClosedUnmergedPRsByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
@@ -152,5 +170,57 @@ func TestGuardReadsPassThrough(t *testing.T) {
 	prs, err := g.ListPRsByLabel(context.Background(), "runlore")
 	if err != nil || len(prs) != 1 {
 		t.Fatalf("reads must pass through even in dry-run: %v %v", prs, err)
+	}
+}
+
+var _ ResolveForge = Guard{}
+
+func TestGuardResolveWrites(t *testing.T) {
+	ctx := context.Background()
+	edit := func(raw []byte) ([]byte, bool, error) { return raw, true, nil }
+
+	t.Run("dry-run skips the inner forge and audits", func(t *testing.T) {
+		inner, aud := &fakeGuarded{}, &recAudit{}
+		g := Guard{Inner: inner, DryRun: true, Audit: aud, Log: discardLog()}
+		if _, err := g.EditEntryOnPR(ctx, 7, "m", edit); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.OpenResolvePR(ctx, "incidents/a.md", edit, "b"); err != nil {
+			t.Fatal(err)
+		}
+		if inner.edited != 0 || inner.resolvePRs != 0 {
+			t.Fatal("dry-run must not reach the forge")
+		}
+		if len(aud.recs) != 2 || aud.recs[0].Op != "kb.resolve" || aud.recs[1].Op != "kb.resolve" || aud.recs[0].Decision != audit.DecisionDryRun {
+			t.Fatalf("%+v", aud.recs)
+		}
+	})
+
+	t.Run("apply calls through, and PREntry passes through", func(t *testing.T) {
+		inner, aud := &fakeGuarded{}, &recAudit{}
+		g := Guard{Inner: inner, Audit: aud, Log: discardLog()}
+		if changed, err := g.EditEntryOnPR(ctx, 7, "m", edit); err != nil || !changed || inner.edited != 1 {
+			t.Fatal(changed, err)
+		}
+		if pe, err := g.PREntry(ctx, 7); err != nil || pe.State != "open" || len(aud.recs) != 1 {
+			t.Fatal("a read is not audited: ", pe, err, aud.recs)
+		}
+	})
+
+	t.Run("ErrAlreadyResolved is a skip", func(t *testing.T) {
+		inner, aud := &fakeGuarded{resolveErr: providers.ErrAlreadyResolved}, &recAudit{}
+		g := Guard{Inner: inner, Audit: aud, Log: discardLog()}
+		if _, err := g.OpenResolvePR(ctx, "incidents/a.md", edit, "b"); !errors.Is(err, providers.ErrAlreadyResolved) {
+			t.Fatal(err)
+		}
+		if len(aud.recs) != 1 || aud.recs[0].Decision != audit.DecisionSkipped {
+			t.Fatalf("%+v", aud.recs)
+		}
+	})
+}
+
+func TestResolveLabelIsAnEntryEdit(t *testing.T) {
+	if !isEntryEditProposal([]string{"runlore", "runlore-resolve"}) {
+		t.Fatal("a resolve PR is never an entry (KP17)")
 	}
 }

@@ -235,7 +235,7 @@ func withdrawUnresolved(body, fixPR string) string {
 // copied from r is untrusted and goes through oneLine.
 func ApplyBody(body string, r providers.AppliedResolution) string {
 	m := marker(r)
-	if strings.Contains(body, m) && !(r.Verdict == "resolved" && !newestApplied(body, m)) {
+	if strings.Contains(body, m) && (r.Verdict != "resolved" || newestApplied(body, m)) {
 		return body
 	}
 	// A fix has one latest verdict: recording the other one withdraws its record.

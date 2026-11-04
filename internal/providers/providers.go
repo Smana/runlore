@@ -2021,6 +2021,18 @@ type AppliedResolution struct {
 	VerifiedAt                                    time.Time
 }
 
+// PREntry is the catalog entry a knowledge-base pull request carries and the
+// state it is in: "open", "merged", or "closed" (closed without merging).
+type PREntry struct{ Path, State string }
+
+// PullSummary is what the forge says a merged fix changed: the PR's URL, the
+// merge commit, the first few files and the line counts.
+type PullSummary struct {
+	URL, MergeSHA        string
+	Files                []string
+	Additions, Deletions int
+}
+
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
 	Title      string

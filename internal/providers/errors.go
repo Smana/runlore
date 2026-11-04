@@ -4,6 +4,14 @@ package providers
 
 import "errors"
 
+var (
+	// ErrAlreadyResolved means a resolution edit would change nothing: the entry
+	// already records it.
+	ErrAlreadyResolved = errors.New("resolution already recorded on the entry")
+	// ErrPullNotFound means the forge has no such pull request (a 404).
+	ErrPullNotFound = errors.New("pull request not found")
+)
+
 // PermanentError marks a provider/model failure that will not succeed on retry —
 // e.g. an HTTP 4xx other than 429 (a malformed request, bad auth, not found). The
 // investigation workqueue drops these instead of requeuing with backoff, so a

@@ -22,7 +22,7 @@ import (
 const noteEntry = "---\ntype: Concept\ntitle: Operator note: OOM\n---\n\n### 📝 Operator note\n\nthe first note\n"
 
 // recordedPut is one contents-API PUT the client made.
-type recordedPut struct{ path, branch, sha, content string }
+type recordedPut struct{ path, branch, sha, content, message string }
 
 // stubPR is a configurable GitHub stub serving ONE note pull request. Every
 // field a guard in AppendToEntryOnPR reads is a knob, so each test breaks
@@ -47,7 +47,12 @@ type stubPR struct {
 	// appendLanded, and the case a fake that simply errors cannot express.
 	putLands bool
 
+	labels       []string // the PR's labels; none unless set
+	mergedAt     string   // the PR's merged_at; null unless set
+	deleteStatus int      // the status a label DELETE answers with; 200 unless set
+
 	mu      sync.Mutex
+	calls   []string // "DELETE <label>" and "PUT" in the order they arrived
 	content string
 	sha     string
 	puts    []recordedPut
@@ -77,7 +82,26 @@ func (s *stubPR) start(t *testing.T) *Client {
 		if repo := cmp.Or(s.headRepo, "o/r"); repo != "-" {
 			head += `,"repo":{"full_name":"` + repo + `"}`
 		}
-		_, _ = w.Write([]byte(`{"state":"` + cmp.Or(s.state, "open") + `",` + head + `}}`))
+		labels := make([]map[string]string, 0, len(s.labels))
+		for _, l := range s.labels {
+			labels = append(labels, map[string]string{"name": l})
+		}
+		lj, _ := json.Marshal(labels)
+		merged := "null"
+		if s.mergedAt != "" {
+			merged = `"` + s.mergedAt + `"`
+		}
+		_, _ = w.Write([]byte(`{"state":"` + cmp.Or(s.state, "open") + `","merged_at":` + merged + `,"labels":` + string(lj) + `,` + head + `}}`))
+	})
+	mux.HandleFunc("DELETE /repos/o/r/issues/84/labels/{label}", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.calls = append(s.calls, "DELETE "+r.PathValue("label"))
+		s.mu.Unlock()
+		if s.deleteStatus != 0 {
+			w.WriteHeader(s.deleteStatus)
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
 	})
 	mux.HandleFunc("GET /repos/o/r/pulls/84/files", func(w http.ResponseWriter, _ *http.Request) {
 		out := make([]map[string]string, 0, len(s.changed))
@@ -103,12 +127,13 @@ func (s *stubPR) start(t *testing.T) *Client {
 		_ = json.NewEncoder(w).Encode(body)
 	})
 	mux.HandleFunc("PUT /repos/o/r/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Content, SHA, Branch string }
+		var body struct{ Content, SHA, Branch, Message string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		raw, _ := base64.StdEncoding.DecodeString(body.Content)
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.puts = append(s.puts, recordedPut{path: r.PathValue("path"), branch: body.Branch, sha: body.SHA, content: string(raw)})
+		s.puts = append(s.puts, recordedPut{path: r.PathValue("path"), branch: body.Branch, sha: body.SHA, content: string(raw), message: body.Message})
+		s.calls = append(s.calls, "PUT")
 		if s.putLands {
 			s.content, s.sha = string(raw), s.sha+"x"
 		}

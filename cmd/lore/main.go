@@ -10,6 +10,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -31,6 +32,7 @@ Usage:
   lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
   lore kb show <entry> [--config <path>] [--dir <catalog>]   print one KB entry (frontmatter card + body)
   lore kb import <src-dir> [--into <kb-dir>] [--dry-run] [--model]   convert existing runbooks/postmortems into OKF entries (cold-start seeding)
+  lore kb resolve --pr <n> --fix <url> --verdict resolved|persisting [--merge-sha <sha>] [--evidence <file>]   record an applied fix on an entry
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite
@@ -79,6 +81,9 @@ func main() {
 	case "kb":
 		if err := app.RunKB(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "kb:", err)
+			if errors.Is(err, app.ErrUsage) {
+				os.Exit(2)
+			}
 			os.Exit(1)
 		}
 	case "curate":

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,6 +55,21 @@ func New(baseURL, owner, repo, baseBranch string, token TokenFunc) *Client {
 
 var _ providers.ReinvestForge = (*Client)(nil)
 
+// statusError is a non-2xx answer from do, kept typed so a caller can tell a 404
+// from a failure.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// isNotFound reports whether err is a 404 from do.
+func isNotFound(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusNotFound
+}
+
 // do performs an authenticated JSON request and decodes the response into out (if non-nil).
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	tok, err := c.token(ctx)
@@ -88,7 +104,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		// errors; httpx.SafeErrorBody strips the credential it was sent with and
 		// caps the length. Same reasoning (and the same helper) as the GitLab
 		// client — and the App installation token it launders is live for an hour.
-		return fmt.Errorf("github %s %s: status %d: %s", method, path, resp.StatusCode, httpx.SafeErrorBody(data, tok))
+		return &statusError{code: resp.StatusCode, msg: fmt.Sprintf("github %s %s: status %d: %s", method, path, resp.StatusCode, httpx.SafeErrorBody(data, tok))}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -376,12 +392,16 @@ func (c *Client) IsPROpen(ctx context.Context, number int) (bool, error) {
 	return out.State == "open", nil
 }
 
-// ReplaceLabel removes one label and adds another (best-effort on the removal —
-// a 404 when the label isn't present is not fatal).
+// ReplaceLabel removes one label and adds another. With an add the removal is
+// best-effort, as it always was. With no add the removal is the whole call, so a
+// failure other than "the label is not there" (404) is returned: a caller that
+// removes ready-to-merge before a push must not push after a failed removal.
 func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add string) error {
 	if remove != "" {
-		// DELETE is best-effort: ignore "label not set" errors.
-		_ = c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", c.owner, c.repo, number, url.PathEscape(remove)), nil, nil)
+		err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", c.owner, c.repo, number, url.PathEscape(remove)), nil, nil)
+		if err != nil && add == "" && !isNotFound(err) {
+			return err
+		}
 	}
 	if add != "" {
 		return c.addLabels(ctx, number, []string{add})
