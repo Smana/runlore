@@ -338,10 +338,50 @@ separate approval UI — your Git review *is* the gate.
 | `triggered` | Raw finding, not yet reviewed | RunLore |
 | `investigating` | A human is working it | you |
 | `accepted` | Reviewed & merged knowledge | you (on merge) |
-| `solved` / `ready-to-merge` | The incident resolved; promote on review | you / the groomer |
+| `solved` | The incident resolved; promote on review | you / the groomer |
+| `ready-to-merge` | Safe for a merge: the incident resolved, or the fix's latest verification held and nothing stands against the entry | the groomer, or the verification itself; withdrawn when the evidence flips |
+| `security` | The entry touches something security-sensitive; it stays in the queue for a human | you; no machine signal sets it in phase 1 |
 | `knowledge-gap` | A pattern recurs but RunLore couldn't solve it — needs a human-authored entry | the groomer |
 
-## 8. Optional: the backlog groomer
+## 8. The knowledge queue
+
+With a `curate.queue_issue.schedule` (`"<Day> HH:MM"`, UTC; empty is off), RunLore keeps one
+issue titled **Knowledge queue** in the KB repository, rewritten at that time and by
+`lore curate queue-issue` at once (`curate.queue_issue.slack: true` also posts one line linking
+it). It has three parts:
+
+- **Decide** — the open entry PRs a human must look at, riskiest first and oldest first within a
+  risk: `contested` (a standing 👎 links to the PR), `contradicts` (the PR carries the
+  possible-duplicate section), `security`, `conflict`, then `unverified` (the fix has no held
+  observation) and `verified`. A PR labelled `ready-to-merge` is not listed. Retire, revalidate
+  and resolve PRs are entry edits and never appear.
+- **Audit** — the place for a sample of what automation merged. For now it reads "Nothing merged
+  by automation to sample since the last rewrite."
+- **Measures** — entries merged since the last rewrite, the queue's median and oldest age,
+  incidents, instant recalls (and how many resolved) and tokens per incident, from the outcome
+  ledger. A compacted ledger is flagged, since its counts cover the retained events only.
+
+RunLore rewrites an issue only where it finds its own marker: a human's issue that wears the
+`runlore-queue` label is left alone and a new one is filed. With `curate.sweeps.mode: dry-run`
+the rewrite is logged and audited, not made.
+
+**Ready to merge.** With `factory.curation.defer` on, `ready-to-merge` lands when a PR's fix
+held its latest verification and no risk other than `unverified` applies, as well as when the
+incident resolves. It is withdrawn when the evidence flips, and `accepted` from a human overrides
+it. `security` is applied by a human in phase 1: no machine signal sets it.
+
+**Conflicts.** Each merged entry appends to `index.md` and `log.md`, so the next open entry PR
+can conflict. `lore curate refresh-entries` rebuilds such a PR on the current base, only when
+its branch starts with `runlore/kb-` and every commit is authored by `runlore[bot]`, committed
+by GitHub's `web-flow` and verified, and the change is one entry plus those two files. A push
+to a labelled PR removes `ready-to-merge` first, so the label never stands on a head nobody
+verified. Any other conflicting PR, a fork, or one with someone else's commit is not touched and
+is listed in Decide with the risk `conflict`. Clear a session's queue while RunLore is on: a
+merge needs the refresh before the next one can follow.
+
+Every `lore curate` subcommand takes `--config <path>` wherever the config is not `runlore.yaml`.
+
+## 9. Optional: the backlog groomer
 
 The backlog groomer keeps the PR queue tidy without you: it **suppresses** re-drafts of
 entries you already rejected, **dedups** near-identical PRs, **closes stale** unreviewed

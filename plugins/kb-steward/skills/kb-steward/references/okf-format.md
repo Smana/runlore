@@ -30,7 +30,11 @@ ignored — OKF consumers must accept unknown keys):
 
 Agent-drafted entries may also carry extension fields such as `confidence` or
 `provenance`. They are legal OKF (unknown keys are ignored) but the loader
-does not parse them — never rely on them for recall.
+does not parse them — never rely on them for recall. Two more are written by
+RunLore and are not yours to author: `origin` (`runlore` on an agent draft) and
+`resolution` (`fix_pr`, `merge_sha`, `verdict: resolved`, `verified_at`), the
+outcome of the fix a machine verified, written into the entry once the fix is
+verified under `factory.curation.defer`. Leave both alone when you edit.
 
 ## Files & directories
 
