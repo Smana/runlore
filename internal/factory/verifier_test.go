@@ -15,18 +15,20 @@ import (
 )
 
 type verifierRig struct {
-	t      *testing.T
-	now    time.Time
-	path   string
-	ledger *Ledger
-	vs     *verifyServer
-	rep    *replies
-	v      *Verifier
-	firing bool
-	amErr  error
-	reErr  error
-	reText string
-	reRuns int
+	t       *testing.T
+	now     time.Time
+	path    string
+	ledger  *Ledger
+	vs      *verifyServer
+	rep     *replies
+	v       *Verifier
+	firing  bool
+	amErr   error
+	reErr   error
+	reText  string
+	reCause string
+	reRuns  int
+	noModel bool
 }
 
 const soak = 30 * time.Minute
@@ -54,17 +56,21 @@ func (r *verifierRig) open() *Ledger {
 }
 
 func (r *verifierRig) verifier(l *Ledger) *Verifier {
-	return &Verifier{
+	v := &Verifier{
 		Ledger: l, Client: r.vs.client(r.t, &r.now), Replier: r.rep, Soak: soak,
 		Now: func() time.Time { return r.now },
 		Firing: func(context.Context, string, string) (bool, error) {
 			return r.firing, r.amErr
 		},
-		Reinvestigate: func(context.Context, Record) (string, error) {
+		Reinvestigate: func(context.Context, Record) (Findings, error) {
 			r.reRuns++
-			return r.reText, r.reErr
+			return Findings{Text: r.reText, Cause: r.reCause}, r.reErr
 		},
 	}
+	if r.noModel {
+		v.Reinvestigate = nil
+	}
+	return v
 }
 
 func (r *verifierRig) lines() []string {
@@ -303,6 +309,68 @@ func TestVerifierReinvestigatesOnceDuringAnOutage(t *testing.T) {
 	if r.reRuns != 1 || len(r.posted()) != 7 || r.posted()[6].Evidence != r.posted()[0].Evidence {
 		t.Fatalf("runs %d", r.reRuns)
 	}
+}
+
+func TestVerifierRecordsOneLineOfEvidence(t *testing.T) {
+	ctx := context.Background()
+	t.Run("the cause, flattened, and none of the text's header", func(t *testing.T) {
+		r := newVerifierRig(t, 201)
+		r.firing = true
+		r.v.OnMerged(ctx, "k1")
+		r.firing = false
+		r.now = r.now.Add(soak)
+		r.reText, r.reCause = "🔍 title\nVerdict…", "line1\n\nline2"
+		r.v.Once(ctx)
+		if got := r.posted()[0].Evidence; got != "🔍 title\nVerdict…" {
+			t.Fatalf("the factory receives Text: %q", got)
+		}
+		rec, _ := r.ledger.Get("k1")
+		if want := "firing at merge: true, firing now: false. line1 line2"; rec.Evidence != want {
+			t.Fatalf("Evidence %q, want %q", rec.Evidence, want)
+		}
+	})
+	t.Run("no model", func(t *testing.T) {
+		r := newVerifierRig(t, 201)
+		r.noModel = true
+		r.v = r.verifier(r.ledger)
+		r.firing = true
+		r.v.OnMerged(ctx, "k1")
+		r.now = r.now.Add(soak)
+		r.v.Once(ctx)
+		rec, _ := r.ledger.Get("k1")
+		if want := "firing at merge: true, firing now: true."; rec.Evidence != want {
+			t.Fatalf("Evidence %q, want %q", rec.Evidence, want)
+		}
+		if got := r.posted()[0].Evidence; got != "re-investigation unavailable: not configured" {
+			t.Fatalf("the posted evidence stays the fixed line: %q", got)
+		}
+	})
+	t.Run("a retried tick keeps the cause", func(t *testing.T) {
+		r := newVerifierRig(t, 503, 503, 503, 503, 503, 503, 201)
+		r.firing = true
+		r.v.OnMerged(ctx, "k1")
+		r.now = r.now.Add(soak)
+		r.reCause = "the pod OOMs"
+		r.v.Once(ctx)
+		r.reCause = "changed"
+		r.v.Once(ctx)
+		r.v.Once(ctx) // the factory answers
+		rec, _ := r.ledger.Get("k1")
+		if want := "firing at merge: true, firing now: true. the pod OOMs"; rec.Evidence != want || r.reRuns != 1 {
+			t.Fatalf("Evidence %q, runs %d", rec.Evidence, r.reRuns)
+		}
+	})
+	t.Run("a secret in the cause is redacted", func(t *testing.T) {
+		r := newVerifierRig(t, 201)
+		r.firing = true
+		r.v.OnMerged(ctx, "k1")
+		r.now = r.now.Add(soak)
+		r.reCause = "token ghp_" + strings.Repeat("a", 36)
+		r.v.Once(ctx)
+		if rec, _ := r.ledger.Get("k1"); strings.Contains(rec.Evidence, "ghp_aaaa") {
+			t.Fatalf("%q", rec.Evidence)
+		}
+	})
 }
 
 func TestSoakText(t *testing.T) {

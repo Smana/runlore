@@ -108,12 +108,16 @@ func BuildFactoryVerifier(cfg *config.Config, deps *Deps, ledger *factory.Ledger
 	}
 	if deps != nil {
 		run := reinvestigateRun(cfg, deps, metrics, log, f.Verify.MaxSteps)
-		v.Reinvestigate = func(ctx context.Context, r factory.Record) (string, error) {
+		v.Reinvestigate = func(ctx context.Context, r factory.Record) (factory.Findings, error) {
 			inv, err := run(ctx, verifyRequest(r))
 			if err != nil {
-				return "", err
+				return factory.Findings{}, err
 			}
-			return notify.Format(inv), nil
+			f := factory.Findings{Text: notify.Format(inv)}
+			if len(inv.RootCauses) > 0 && len(inv.RootCauses[0].Evidence) > 0 {
+				f.Cause = inv.RootCauses[0].Evidence[0]
+			}
+			return f, nil
 		}
 	} else {
 		log.Info("factory verification runs without a model: the verdict is Alertmanager's, the evidence a fixed line")

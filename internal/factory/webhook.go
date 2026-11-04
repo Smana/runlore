@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,8 @@ type Event struct {
 	State  string `json:"state,omitempty"`
 	Origin string `json:"origin,omitempty"`
 	PR     int    `json:"pr,omitempty"`
+	// Verdict is the factory monitor's reading on room.monitor_verdict.
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // ReadKeys parses the signing keys: one or two non-empty lines of standard base64, each at least
@@ -234,9 +237,17 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 		rc.log().Info("factory webhook: the event matches no incident; ignored", "type", ev.Type, "room", ev.Room, "origin", ev.Origin)
 		return nil
 	}
+	if i := archivedIndex(rec, ev.Room); i >= 0 && ev.Room != rec.Room && ev.Room != rec.FixRoom {
+		return rc.handleArchived(rec, i, ev, now)
+	}
 	if ev.Room != rec.Room && rec.FixRoom != "" && rec.FixRoom != ev.Room {
 		return nil // a second room naming this origin: the first fix stays the incident's fix
 	}
+	if ev.Type == "room.monitor_verdict" && ev.Room == rec.Room {
+		rc.log().Info("factory webhook: a monitor verdict on the task room; ignored", "room", ev.Room)
+		return nil
+	}
+	repo := eventRepo(ev, rc.log())
 	var newlyMerged bool
 	err := rc.Ledger.Upsert(rec.TriggerKey, func(r *Record) {
 		if ev.Room != r.Room && r.FixRoom == "" {
@@ -246,8 +257,18 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 		if ev.PR > 0 {
 			r.PR = ev.PR
 		}
-		if ev.Type == "room.merged" && ev.Room == r.FixRoom && r.MergedAt.IsZero() {
+		if repo != "" {
+			r.Repo = repo
+		}
+		fix := ev.Room == r.FixRoom
+		if ev.Type == "room.merged" && fix && r.MergedAt.IsZero() {
 			r.MergedAt, newlyMerged = now, true
+		}
+		if ev.Type == "room.monitor_verdict" && fix && validMonitorVerdict(ev.Verdict) {
+			r.Monitor, r.MonitorAt = ev.Verdict, now
+		}
+		if ev.Type == "room.reverted" && fix {
+			r.Reverted = true
 		}
 		rec = *r
 	})
@@ -271,6 +292,68 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 		}()
 	}
 	return nil
+}
+
+// archivedIndex is the index of the archived generation whose fix room is room, or -1.
+func archivedIndex(rec Record, room string) int {
+	if rec.Curation == nil {
+		return -1
+	}
+	return slices.IndexFunc(rec.Curation.Generations, func(g Generation) bool { return g.FixRoom == room })
+}
+
+// handleArchived applies a late event to a closed generation. Only a valid monitor verdict and a
+// revert count; neither posts a thread line (the thread belongs to the current generation) or
+// starts a soak.
+func (rc *Receiver) handleArchived(rec Record, i int, ev Event, now time.Time) error {
+	repo := eventRepo(ev, rc.log())
+	switch {
+	case ev.Type == "room.monitor_verdict" && validMonitorVerdict(ev.Verdict):
+	case ev.Type == "room.reverted":
+	default:
+		rc.log().Info("factory webhook: the event is for an archived generation; ignored", "type", ev.Type, "room", ev.Room, "key", rec.TriggerKey)
+		return nil
+	}
+	err := rc.Ledger.Upsert(rec.TriggerKey, func(r *Record) {
+		if r.Curation == nil || i >= len(r.Curation.Generations) || r.Curation.Generations[i].FixRoom != ev.Room {
+			return
+		}
+		g := &r.Curation.Generations[i]
+		if repo != "" {
+			g.Repo = repo
+		}
+		if ev.Type == "room.reverted" {
+			g.Reverted = true
+		} else {
+			g.Monitor, g.MonitorAt = ev.Verdict, now
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("updating the ledger: %w", err)
+	}
+	rc.log().Info("factory webhook: a late event recorded on an archived generation", "type", ev.Type, "key", rec.TriggerKey, "fix_room", ev.Room, "verdict", ev.Verdict)
+	return nil
+}
+
+func validMonitorVerdict(v string) bool {
+	return v == "healthy" || v == "regression" || v == "inconclusive"
+}
+
+// repoRe is GitHub's owner/name, each part a word of letters, digits, '.', '_' or '-'.
+var repoRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$`)
+
+// eventRepo is ev's repo when it is a valid owner/name, else "" (logged when one was sent): the
+// value comes from a payload and later builds API paths and branch names.
+func eventRepo(ev Event, log *slog.Logger) string {
+	if ev.Repo == "" {
+		return ""
+	}
+	owner, name, _ := strings.Cut(ev.Repo, "/")
+	if !repoRe.MatchString(ev.Repo) || owner == "." || owner == ".." || name == "." || name == ".." {
+		log.Warn("factory webhook: the event's repo is not owner/name; not recorded", "type", ev.Type)
+		return ""
+	}
+	return ev.Repo
 }
 
 // safeCode admits only the short identifier-like values the broker sends. Room text must never
@@ -310,6 +393,10 @@ func threadLine(ev Event, rec Record) string {
 		return fmt.Sprintf("The fix #%d is merged.", ev.PR)
 	case "room.reverted":
 		return fmt.Sprintf("The fix #%d was reverted.", ev.PR)
+	case "room.monitor_verdict":
+		if fix && validMonitorVerdict(ev.Verdict) {
+			return fmt.Sprintf("The factory's monitor read the fix #%d: `%s`.", ev.PR, ev.Verdict)
+		}
 	}
 	return ""
 }
