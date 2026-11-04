@@ -142,14 +142,14 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 	// writer loses the call rather than silently overwriting the note it did not
 	// see.
 	//
-	// neutralizeImages for the same reason renderEntry applies it to a first
+	// okf.NeutralizeImages for the same reason renderEntry applies it to a first
 	// draft — the appended block is untrusted text, and an entry file rendered on
 	// a review page must not be able to fire a request from the reviewer's
 	// browser. It is applied HERE, on the whole block, rather than trusted to the
 	// caller: thread.NoteBody neutralises the note TEXT but interpolates identity
 	// fields (author, thread title) around it, and on the first-draft path those
 	// are covered by renderEntry, not by NoteBody.
-	block := okf.WithNoteMarker(neutralizeImages(body), key)
+	block := okf.WithNoteMarker(okf.NeutralizeImages(body), key)
 	if err := c.putFile(ctx, entry, pr.Head.Ref, sha, "runlore: append operator note to "+entry,
 		okf.AppendBlock(raw, block)); err != nil {
 		return c.appendLanded(ctx, entry, pr.Head.Ref, key, err)

