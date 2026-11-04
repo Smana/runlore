@@ -229,9 +229,18 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 	if rc.Ledger == nil || ev.Room == "" || ev.Type == "" {
 		return nil
 	}
+	if ev.Type == "room.monitor_verdict" && !validMonitorVerdict(ev.Verdict) {
+		rc.log().Info("factory webhook: a monitor verdict outside healthy, regression, inconclusive; ignored", "room", ev.Room)
+		return nil
+	}
 	rec, ok := rc.Ledger.ByRoom(ev.Room)
 	if !ok && ev.Origin != "" {
 		rec, ok = rc.Ledger.ByRoom(ev.Origin)
+		if ok && ev.Origin != rec.Room && ev.Origin != rec.FixRoom {
+			// The origin names only an archived generation: a new room cannot bind to the current one.
+			rc.log().Info("factory webhook: the origin is an archived fix room; ignored", "type", ev.Type, "room", ev.Room, "origin", ev.Origin)
+			return nil
+		}
 	}
 	if !ok {
 		rc.log().Info("factory webhook: the event matches no incident; ignored", "type", ev.Type, "room", ev.Room, "origin", ev.Origin)

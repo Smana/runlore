@@ -3,7 +3,9 @@
 package factory
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -271,4 +273,31 @@ func TestLedgerHeldRace(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestReceiverRefusesWithoutChangingTheRecord(t *testing.T) {
+	for name, body := range map[string]string{
+		"an out-of-set verdict from an unknown room":      `{"type":"room.monitor_verdict","room":"evil0001","pr":99,"repo":"o/r","origin":"task0002","verdict":"excellent"}`,
+		"an out-of-set verdict on the known fix room":     `{"type":"room.monitor_verdict","room":"fix00002","pr":99,"repo":"o/r","origin":"task0002","verdict":"excellent"}`,
+		"a new room whose origin is an archived fix room": `{"type":"room.pr_opened","room":"other001","pr":99,"repo":"o/r","origin":"fix00001"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := archivedRig(t)
+			if strings.Contains(name, "unknown room") || strings.Contains(name, "new room") {
+				must(t, m.l.Upsert("k1", func(r *Record) { r.FixRoom, r.PR = "", 0 })) // the current generation has no fix yet
+			}
+			before, _ := json.Marshal(m.rec())
+			m.send(t, body)
+			if after, _ := json.Marshal(m.rec()); !bytes.Equal(before, after) || len(m.rep.got) != 0 {
+				t.Fatalf("before %s\nafter  %s", before, after)
+			}
+		})
+	}
+	t.Run("a direct event on the archived fix room still reaches it", func(t *testing.T) {
+		m := archivedRig(t)
+		m.send(t, `{"type":"room.reverted","room":"fix00001","pr":7}`)
+		if !m.rec().Curation.Generations[0].Reverted {
+			t.Fatal("not reverted")
+		}
+	})
 }
