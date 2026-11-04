@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -2517,7 +2518,8 @@ func CardMarker(verdict string, confidence float64) string {
 
 // ParseCardMarker reads the review card marker back from a PR body.
 func ParseCardMarker(body string) (verdict string, confidence float64, ok bool) {
-	i := strings.Index(body, cardMarkerPrefix)
+	// The LAST marker: RunLore writes its own after every untrusted segment.
+	i := strings.LastIndex(body, cardMarkerPrefix)
 	if i < 0 {
 		return "", 0, false
 	}
@@ -2531,7 +2533,7 @@ func ParseCardMarker(body string) (verdict string, confidence float64, ok bool) 
 		return "", 0, false
 	}
 	f, err := strconv.ParseFloat(c, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(f) || f < 0 || f > 1 || (v != "unknown" && !ValidVerdict(Verdict(v))) {
 		return "", 0, false
 	}
 	return v, f, true

@@ -448,12 +448,16 @@ func (c *Client) prBody(e providers.KBEntry) string {
 	if desc == "" {
 		desc = e.Title
 	}
+	// The description is model-authored: one line, so it cannot start a fake
+	// "**Evidence:**" line, and no comment delimiters, so it cannot carry a marker.
+	desc = stripCommentDelims(strings.Join(strings.Fields(desc), " "))
+	e = oneLineTitles(e)
 	body := fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
 	if s := c.suspectedDuplicateSection(e); s != "" {
-		body += "\n\n" + s
+		body += "\n\n" + stripCommentDelims(s)
 	}
 	if s := c.relatedSection(e); s != "" {
-		body += "\n\n" + s
+		body += "\n\n" + stripCommentDelims(s)
 	}
 	if e.Verdict != "" {
 		body += "\n\n" + providers.CardMarker(e.Verdict, e.Confidence)
@@ -568,9 +572,36 @@ func slugify(s string) string { return okf.Slugify(s) }
 // line, secrets redacted, no HTML comment delimiters (a copied marker could
 // pre-empt a real one), images neutralized by prBody.
 func cardEvidence(s string) string {
-	s = strings.Join(strings.Fields(redact.Secrets(s)), " ")
+	return stripCommentDelims(strings.Join(strings.Fields(redact.Secrets(s)), " "))
+}
+
+// stripCommentDelims removes HTML comment delimiters until none remain, so
+// untrusted text can neither forge a RunLore marker nor close one early.
+func stripCommentDelims(s string) string {
+	r := strings.NewReplacer("<!--", "", "-->", "")
 	for strings.Contains(s, "<!--") || strings.Contains(s, "-->") {
-		s = strings.NewReplacer("<!--", "", "-->", "").Replace(s)
+		s = r.Replace(s)
 	}
 	return s
+}
+
+// oneLineTitles returns e with the neighbour titles collapsed to one line each,
+// so a model-written title cannot begin a line of its own in the PR body.
+func oneLineTitles(e providers.KBEntry) providers.KBEntry {
+	flat := func(r providers.RelatedEntry) providers.RelatedEntry {
+		r.Title = strings.Join(strings.Fields(r.Title), " ")
+		return r
+	}
+	if e.SuspectedDuplicate != nil {
+		d := flat(*e.SuspectedDuplicate)
+		e.SuspectedDuplicate = &d
+	}
+	if len(e.Related) > 0 {
+		rel := make([]providers.RelatedEntry, len(e.Related))
+		for i, r := range e.Related {
+			rel[i] = flat(r)
+		}
+		e.Related = rel
+	}
+	return e
 }
