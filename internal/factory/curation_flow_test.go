@@ -360,7 +360,7 @@ func TestCurateAHoldWithNoLiveArtifactStartsAgain(t *testing.T) {
 }
 
 // A drafted hold with a live PR and no bound fix is one entry waiting for its human: a repeat files
-// no triager and no stub. A merged entry is live too, as noLiveArtifact reads it, and an unreadable PR.
+// no triager and no stub, until someone acts on the PR: a merge files again, as a close does.
 func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -370,7 +370,7 @@ func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
 		filed    bool
 	}{
 		{name: "an open PR, no fix", state: "open"},
-		{name: "a merged PR, no fix", state: "merged"},
+		{name: "a merged PR, no fix files as before", state: "merged", filed: true},
 		{name: "a PR that cannot be read, no fix", entryErr: fmt.Errorf("a blip")},
 		{name: "a PR closed unmerged restarts", state: "closed", filed: true},
 		{name: "an open PR, a bound decided fix", state: "open", fixRoom: "fix1", filed: true},
@@ -397,6 +397,38 @@ func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
 				t.Fatalf("ref %+v, %+v", ref, f.record())
 			}
 		})
+	}
+}
+
+// A merged entry is acted on: a recurrence months later reaches the factory, and its verified fix edits
+// the merged entry through an edit PR instead of opening a second PR for the key.
+func TestCurateARecurrenceAfterAMergedEntryFilesAndItsFixEditsTheEntry(t *testing.T) {
+	f := newFlowRig(t)
+	f.g.cu.Drafts = f.g
+	f.g.entries[164] = providers.PREntry{Path: draftEntry, State: "merged"}
+	f.detect("first", 201, "room0001")
+	must(t, f.g.l.Upsert("k1", func(r *Record) {
+		r.Curation.Drafted, r.Curation.Entry, r.Curation.Investigation = draftURL, draftEntry, nil
+	}))
+	f.g.catalog[f.record().Curation.Fingerprint] = draftEntry
+	f.g.now = f.g.now.Add(30 * 24 * time.Hour)
+	f.detect("months later", 201, "room0002")
+	if r := f.record(); len(f.factory.keys) != 2 || r.Room != "room0002" {
+		t.Fatalf("the recurrence reaches the factory: %d tasks, %+v", len(f.factory.keys), r)
+	}
+	f.event(map[string]any{"type": "room.task_received", "room": "fix00002", "origin": "room0002", "repo": fixRepo})
+	f.event(map[string]any{"type": "room.pr_opened", "room": "fix00002", "origin": "room0002", "pr": 2638})
+	f.event(map[string]any{"type": "room.merged", "room": "fix00002", "pr": 2638})
+	f.v.OnMerged(ctx, "k1")
+	f.soakEnds()
+	f.event(map[string]any{"type": "room.monitor_verdict", "room": "fix00002", "verdict": "healthy", "pr": 2638})
+	f.g.cu.Once(ctx)
+	f.g.cu.Once(ctx)
+	if len(f.forge.opened) != 0 || len(f.g.inner.invs) != 0 {
+		t.Fatalf("no second PR for the key: %d opened, %d drafted", len(f.forge.opened), len(f.g.inner.invs))
+	}
+	if len(f.g.resolves) != 1 || f.g.resolves[0].res.FixPR != fix2638 {
+		t.Fatalf("the verified fix goes through an edit PR: %+v", f.g.resolves)
 	}
 }
 

@@ -179,9 +179,9 @@ func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte,
 // filing for good. A merged fix keeps its soak past the window: the verifier always reaches a verdict or
 // an outcome.
 // A hold not drafted, with no fix yet, is one stub waiting for its human until the window: a new triager
-// and stub each repeat buy nothing. So is a drafted hold whose PR is live (open, merged, or unreadable)
-// with no fix bound, at any time; it files again once the PR is closed unmerged, or a fix is bound and
-// decided. An observe-only hold has nothing of its own to protect.
+// and stub each repeat buy nothing. So is a drafted hold whose PR is open (or unreadable) with no fix
+// bound, at any time: it waits until someone acts on it. A merge is that act, so a merged entry files
+// again; so does a PR closed unmerged, and a bound, decided fix. An observe-only hold has nothing of its own to protect.
 func (c *Curation) undecided(ctx context.Context, r Record) bool {
 	h := r.Curation
 	switch {
@@ -191,7 +191,7 @@ func (c *Curation) undecided(ctx context.Context, r Record) bool {
 		if h.Drafted == "" {
 			return !c.windowPassed(h)
 		}
-		return h.Drafted != draftedNone && !c.noLiveArtifact(ctx, h)
+		return h.Drafted != draftedNone && c.prOpen(ctx, h)
 	}
 	return r.Verdict == "" && r.Outcome == "" && !r.Reverted && r.Monitor != "regression" && !r.fixEndedUnmerged() && (!r.MergedAt.IsZero() || !c.windowPassed(h))
 }
@@ -208,6 +208,16 @@ func (c *Curation) noLiveArtifact(ctx context.Context, h *Hold) bool {
 	}
 	pe, err := c.Drafts.PREntry(ctx, n)
 	return err == nil && pe.State == "closed"
+}
+
+// prOpen reports whether the PR h drafted is open, or cannot be read: a fetch failure must not file.
+func (c *Curation) prOpen(ctx context.Context, h *Hold) bool {
+	n, ok := prNumber(h.Drafted)
+	if !ok || c.Drafts == nil {
+		return true
+	}
+	pe, err := c.Drafts.PREntry(ctx, n)
+	return err != nil || pe.State == "open"
 }
 
 // failedGenerations is the failed ones of gens, in order.
