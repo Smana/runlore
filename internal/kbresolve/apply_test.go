@@ -188,3 +188,52 @@ func TestApplyFixRound1(t *testing.T) {
 		t.Fatal("repeating the failure changes nothing")
 	}
 }
+
+const (
+	fixA = "https://github.com/Smana/cloud-native-ref/pull/2638"
+	fixB = "https://github.com/Smana/cloud-native-ref/pull/2700"
+)
+
+func resFor(fix, verdict string) providers.AppliedResolution {
+	r := with(res, func(r *providers.AppliedResolution) { r.FixPR, r.Verdict = fix, verdict })
+	if verdict == "persisting" {
+		r.Why = "the alert still fired"
+	}
+	return r
+}
+
+func applyAll(t *testing.T, raw string, rs ...providers.AppliedResolution) string {
+	t.Helper()
+	doc := []byte(raw)
+	for _, r := range rs {
+		out, _, err := Apply(doc, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc = out
+	}
+	return string(doc)
+}
+
+// TestApplyTwoFixesBothOrders is spec live proof 3: a fix that persisted and a
+// later one that resolved are both on the entry, in either order of arrival.
+func TestApplyTwoFixesBothOrders(t *testing.T) {
+	for name, rs := range map[string][]providers.AppliedResolution{
+		"persisting A then resolved B": {resFor(fixA, "persisting"), resFor(fixB, "resolved")},
+		"resolved B then persisting A": {resFor(fixB, "resolved"), resFor(fixA, "persisting")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := applyAll(t, entry, rs...)
+			if !strings.Contains(s, "## Unresolved\n\n- The fix [#2638]("+fixA+")") {
+				t.Fatal("A's bullet stays: ", s)
+			}
+			if !strings.Contains(s, "- **Applied:** [#2700]("+fixB+")") {
+				t.Fatal("B shows as applied: ", s)
+			}
+			resolution, _ := frontmatterOf(t, []byte(s))["resolution"].(map[string]any)
+			if resolution["fix_pr"] != fixB {
+				t.Fatal("resolution.fix_pr is B: ", s)
+			}
+		})
+	}
+}
