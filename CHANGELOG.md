@@ -14,6 +14,13 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.19.1](https://github.com/Smana/runlore/compare/v0.19.0...v0.19.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **factory:** a drafted entry with an open PR and no fix files nothing on a repeat ([#607](https://github.com/Smana/runlore/issues/607)) ([4c77f25](https://github.com/Smana/runlore/commit/4c77f2595ebc3ccd55c188983a00e932d9156b26))
+
 ## [0.19.0](https://github.com/Smana/runlore/compare/v0.18.0...v0.19.0) (2026-11-04)
 
 
