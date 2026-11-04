@@ -1072,6 +1072,7 @@ factory:
   accepted does not get its knowledge-base entry at once: the entry waits for the fix's outcome, so
   it records what the fix did.
 
+  <!-- docsguard:ignore partial: only the factory.curation keys; the block above is the whole factory config -->
   ```yaml
   factory:
     curation:
