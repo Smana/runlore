@@ -173,7 +173,8 @@ func addFactoryNotifier(notifier *notify.Multi, cfg *config.Config, ledger *fact
 // caller passes it to BuildInvestigator through WithFactoryCuration, which sets Inner; cat may be nil.
 //
 // Drafts and Resolve go through one audited curate.Guard over the same KB repository as Inner's forge,
-// since a PR number names no repository. Promote stays nil until the Queue's PromoteOne exists.
+// since a PR number names no repository. Promote is set under curate.sweeps.mode: apply only: the label
+// is what the merge gate trusts, so no other mode lays it, or withdraws it, from a tick.
 func BuildFactoryCuration(cfg *config.Config, ledger *factory.Ledger, client *factory.Client, outcomes *outcome.Ledger,
 	cat *catalog.Catalog, aud audit.Auditor, log *slog.Logger) *factory.Curation {
 	if !cfg.Factory.Curation.Defer || ledger == nil {
@@ -187,7 +188,7 @@ func BuildFactoryCuration(cfg *config.Config, ledger *factory.Ledger, client *fa
 	}
 	dry := cfg.Curate.Sweeps.DryRun()
 	guard := curate.Guard{Inner: gh, DryRun: dry, Audit: aud, Log: log}
-	return &factory.Curation{
+	c := &factory.Curation{
 		Filer:   newFactoryNotifier(cfg, ledger, client, log),
 		Ledger:  ledger,
 		Outcome: outcomes,
@@ -208,4 +209,8 @@ func BuildFactoryCuration(cfg *config.Config, ledger *factory.Ledger, client *fa
 		DryRun:     dry,
 		Log:        log,
 	}
+	if cfg.Curate.Sweeps.Mode == config.SweepApply {
+		c.Promote = curate.Queue{Forge: guard, Evidence: outcomes, KBRepo: cfg.Forge.KBRepo, Log: log}.PromoteOne
+	}
+	return c
 }

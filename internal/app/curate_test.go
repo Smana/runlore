@@ -120,6 +120,34 @@ func TestBuildCurateAgentPassComposition(t *testing.T) {
 	}
 }
 
+// The Queue reads the evidence only under factory.curation.defer: adopters keep today's path.
+func TestBuildCurateAgentWiresTheQueuesEvidence(t *testing.T) {
+	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := func(cfg *config.Config) curate.Queue {
+		t.Helper()
+		for _, p := range BuildCurateAgent(cfg, forge, ledger, discardLog()).Passes {
+			if q, ok := p.(curate.Queue); ok {
+				return q
+			}
+		}
+		t.Fatal("no Queue pass")
+		return curate.Queue{}
+	}
+	cfg := &config.Config{}
+	cfg.Forge.KBRepo = "acme/kb"
+	if q := queue(cfg); q.Evidence != nil {
+		t.Fatal("defer off: Evidence must stay nil")
+	}
+	cfg.Factory.Curation.Defer = true
+	if q := queue(cfg); q.Evidence == nil || q.KBRepo != "acme/kb" || q.Checker == nil {
+		t.Fatalf("defer on: want Evidence, KBRepo and Checker: %+v", q)
+	}
+}
+
 // TestBuildCurateAgentWiresRevalidation pins the opt-in wiring of the
 // revalidation pass, including that its knobs come from config rather than from
 // the pass's zero value (a MaxOpen of 0 would silently propose nothing).

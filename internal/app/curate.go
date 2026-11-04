@@ -23,7 +23,8 @@ import (
 // backlog-dedup pass (collapses duplicate open PRs across history) and the
 // lifecycle sweep (closes stale, unprotected PRs by forge age). When
 // outcome.ledger_path is configured, it also runs the Queue pass (promotes
-// solved→ready-to-merge when the incident resolves), the Recurrence pass
+// solved→ready-to-merge when the incident resolves and, under factory.curation.defer,
+// labels or withdraws from the factory's verified evidence), the Recurrence pass
 // (opens a knowledge-gap issue for repeatedly-unresolved patterns), and the
 // Contested pass (warns the open KB PR when humans 👎'd the investigation
 // behind it).
@@ -126,8 +127,14 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 	if ledger == nil {
 		return agent
 	}
+	queue := curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log}
+	// Under factory.curation.defer the ledger holds the factory's verifications, and the label
+	// follows them. Otherwise Evidence stays nil and adopters keep the resolution path.
+	if cfg.Factory.Curation.Defer {
+		queue.Evidence, queue.KBRepo = ledger, cfg.Forge.KBRepo
+	}
 	agent.Passes = append(agent.Passes,
-		curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log},
+		queue,
 		// Recurrence escalates recurring UNRESOLVED patterns AND recurring
 		// closed-unmerged (human-rejected) entries: the latter via a knowledge-gap
 		// issue that links the closed PR — never reopening it. The suppression set is
