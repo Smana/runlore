@@ -113,6 +113,21 @@ func TestRetirement(t *testing.T) {
 		}
 	})
 
+	t.Run("failed fixes alone reach MinObservations and the body names them", func(t *testing.T) {
+		path := "incidents/failed-fixes.md"
+		stats := mapStats{path: {Failed: 3}} // factor 0.20, obs 3 -> retire
+		forge := &fakeRetireForge{}
+		if err := newRetirement(forge, stats).Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !slices.Equal(forge.proposed, []string{path}) {
+			t.Fatalf("proposed=%v, want one retire PR for %s", forge.proposed, path)
+		}
+		if body := forge.bodies[path]; !strings.Contains(body, "failed fixes") || !strings.Contains(body, "| 0 | 0 | 0 | 0 | 0 | 3 |") {
+			t.Errorf("body does not name the failed fixes:\n%s", body)
+		}
+	})
+
 	t.Run("spares unresolvable entries when no resolve can ever arrive", func(t *testing.T) {
 		// Same aggregates as above, on a deployment where a resolve never arrives
 		// (Alertmanager with send_resolved off). Unresolved recalls are then not

@@ -753,7 +753,7 @@ func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (
 	if !agg.HasEvidence() && !r.Outcome.ResolveChannelLive() {
 		return 1, true
 	}
-	f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, agg.Confirms, r.OutcomePrior)
+	f := agg.Factor(r.OutcomePrior)
 	return f, f >= r.OutcomeFloor
 }
 
