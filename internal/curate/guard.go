@@ -146,9 +146,10 @@ func (g Guard) OpenRevalidatePR(ctx context.Context, entryPath string, validated
 }
 
 // EditEntryOnPR pushes a resolution edit onto an open PR (audited as kb.resolve;
-// skipped in dry-run, where it reports that nothing was pushed).
+// skipped in dry-run, where it reports changed=true: the push that would happen,
+// so a dry-run caller does not read it as "already recorded").
 func (g Guard) EditEntryOnPR(ctx context.Context, number int, message string, edit func([]byte) ([]byte, bool, error)) (bool, error) {
-	var changed bool
+	changed := g.DryRun
 	err := g.write("kb.resolve", fmt.Sprintf("pr/%d", number), firstLine(message), func() error {
 		var ierr error
 		changed, ierr = g.Inner.EditEntryOnPR(ctx, number, message, edit)
@@ -161,7 +162,7 @@ func (g Guard) EditEntryOnPR(ctx context.Context, number int, message string, ed
 // (audited as kb.resolve; skipped in dry-run).
 func (g Guard) OpenResolvePR(ctx context.Context, path string, edit func([]byte) ([]byte, bool, error), body string) (providers.Ref, error) {
 	var ref providers.Ref
-	err := g.write("kb.resolve", path, "", func() error {
+	err := g.write("kb.resolve", path, firstLine(body), func() error {
 		var ierr error
 		ref, ierr = g.Inner.OpenResolvePR(ctx, path, edit, body)
 		return ierr

@@ -38,8 +38,8 @@ const prFilesPerPage = 100
 // entry was first drafted.
 //
 // Four calls: read the PR (its head branch), list its changed paths, read the
-// entry on that branch, PUT it back (plus a label removal first when the PR is
-// labelled ready-to-merge: a push is new content a merge automation has not seen). The entry is located from the pull request
+// entry on that branch, PUT it back. A PR labelled ready-to-merge loses the label
+// first: a push is new content a merge automation has not seen. The entry is located from the pull request
 // itself rather than passed in, so no caller has to persist a path it wrote
 // weeks ago and no stale path can send a commit somewhere unintended — see
 // okf.EntryFile, which refuses to guess when the changed paths do not name
@@ -116,6 +116,18 @@ func (c *Client) readPR(ctx context.Context, number int) (prHead, error) {
 	return out, nil
 }
 
+// requireRunLorePR refuses a pull request RunLore did not open: it must carry the
+// runlore label and a runlore/ head branch. A PR number now comes from an operator
+// or a script (lore kb resolve --pr), not only from one RunLore recorded, so the
+// number alone proves nothing, and a human's single-entry PR must never take a
+// RunLore commit or an edit PR.
+func requireRunLorePR(number int, pr prHead) error {
+	if !slices.Contains(pr.labels, "runlore") || !strings.HasPrefix(pr.branch, "runlore/") {
+		return fmt.Errorf("github PR %d (branch %q, labels %v): %w", number, pr.branch, pr.labels, providers.ErrNotRunLorePR)
+	}
+	return nil
+}
+
 // prEntryPath names the one catalog entry a pull request changes.
 func (c *Client) prEntryPath(ctx context.Context, number int) (string, error) {
 	var files []struct {
@@ -152,6 +164,9 @@ func (c *Client) PREntry(ctx context.Context, number int) (providers.PREntry, er
 	if err != nil {
 		return providers.PREntry{}, err
 	}
+	if err := requireRunLorePR(number, pr); err != nil {
+		return providers.PREntry{}, err
+	}
 	state := pr.state
 	if pr.merged {
 		state = "merged"
@@ -180,11 +195,13 @@ func (c *Client) editEntryOnPR(ctx context.Context, number int, message func(ent
 	if pr.branch == "" {
 		return false, fmt.Errorf("github PR %d: no head branch to commit onto", number)
 	}
+	if err := requireRunLorePR(number, pr); err != nil {
+		return false, err
+	}
 	// head.ref is a bare BRANCH NAME while every write below addresses
 	// c.owner/c.repo, so for a pull request opened from a FORK the branch named
 	// lives in another repository — commonly "main" — and this would commit onto
-	// the configured repository's own main. Not reachable today (the append route
-	// requires a PR RunLore itself opened, recorded from OpenPR's own return), but
+	// the configured repository's own main. requireRunLorePR makes it unlikely, but
 	// it is the single check standing between "commit onto a note branch" and
 	// "commit onto main", so it does not depend on that staying true.
 	if want := c.owner + "/" + c.repo; !strings.EqualFold(pr.repo, want) {

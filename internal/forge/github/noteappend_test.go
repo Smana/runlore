@@ -47,7 +47,7 @@ type stubPR struct {
 	// appendLanded, and the case a fake that simply errors cannot express.
 	putLands bool
 
-	labels       []string // the PR's labels; none unless set
+	labels       []string // the PR's labels; ["runlore"] when nil
 	mergedAt     string   // the PR's merged_at; null unless set
 	deleteStatus int      // the status a label DELETE answers with; 200 unless set
 
@@ -69,6 +69,9 @@ func (s *stubPR) start(t *testing.T) *Client {
 		s.content = ""
 	} else {
 		s.content = cmp.Or(s.content, noteEntry)
+	}
+	if s.labels == nil {
+		s.labels = []string{"runlore"}
 	}
 	s.sha = "entrysha0"
 	if s.changed == nil {

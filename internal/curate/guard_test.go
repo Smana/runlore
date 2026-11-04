@@ -182,8 +182,8 @@ func TestGuardResolveWrites(t *testing.T) {
 	t.Run("dry-run skips the inner forge and audits", func(t *testing.T) {
 		inner, aud := &fakeGuarded{}, &recAudit{}
 		g := Guard{Inner: inner, DryRun: true, Audit: aud, Log: discardLog()}
-		if _, err := g.EditEntryOnPR(ctx, 7, "m", edit); err != nil {
-			t.Fatal(err)
+		if changed, err := g.EditEntryOnPR(ctx, 7, "m", edit); err != nil || !changed {
+			t.Fatal("dry-run reports the push that would happen: ", changed, err)
 		}
 		if _, err := g.OpenResolvePR(ctx, "incidents/a.md", edit, "b"); err != nil {
 			t.Fatal(err)
@@ -191,7 +191,7 @@ func TestGuardResolveWrites(t *testing.T) {
 		if inner.edited != 0 || inner.resolvePRs != 0 {
 			t.Fatal("dry-run must not reach the forge")
 		}
-		if len(aud.recs) != 2 || aud.recs[0].Op != "kb.resolve" || aud.recs[1].Op != "kb.resolve" || aud.recs[0].Decision != audit.DecisionDryRun {
+		if len(aud.recs) != 2 || aud.recs[0].Op != "kb.resolve" || aud.recs[1].Op != "kb.resolve" || aud.recs[0].Decision != audit.DecisionDryRun || aud.recs[1].Reason != "b" {
 			t.Fatalf("%+v", aud.recs)
 		}
 	})

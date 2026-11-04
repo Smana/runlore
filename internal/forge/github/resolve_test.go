@@ -54,7 +54,7 @@ func TestEditEntryOnPR(t *testing.T) {
 	})
 
 	t.Run("an edit that changes nothing leaves the label alone", func(t *testing.T) {
-		s := &stubPR{labels: []string{"ready-to-merge"}, content: noteEntry + "x\n"}
+		s := &stubPR{labels: []string{"runlore", "ready-to-merge"}, content: noteEntry + "x\n"}
 		c := s.start(t)
 		if changed, err := c.EditEntryOnPR(ctx, 84, "m", addLine("x")); err != nil || changed {
 			t.Fatal(changed, err)
@@ -65,12 +65,12 @@ func TestEditEntryOnPR(t *testing.T) {
 	})
 
 	t.Run("a failed DELETE stops the push, a 404 does not", func(t *testing.T) {
-		s := &stubPR{labels: []string{"ready-to-merge"}, deleteStatus: http.StatusInternalServerError}
+		s := &stubPR{labels: []string{"runlore", "ready-to-merge"}, deleteStatus: http.StatusInternalServerError}
 		c := s.start(t)
 		if _, err := c.EditEntryOnPR(ctx, 84, "m", addLine("x")); err == nil || len(s.writes()) != 0 {
 			t.Fatal("a 500 on the DELETE is an error and no PUT: ", err, s.writes())
 		}
-		s = &stubPR{labels: []string{"ready-to-merge"}, deleteStatus: http.StatusNotFound}
+		s = &stubPR{labels: []string{"runlore", "ready-to-merge"}, deleteStatus: http.StatusNotFound}
 		c = s.start(t)
 		if changed, err := c.EditEntryOnPR(ctx, 84, "m", addLine("x")); err != nil || !changed || len(s.writes()) != 1 {
 			t.Fatal("the label is already gone: still pushes: ", changed, err)
@@ -96,7 +96,7 @@ func TestEditEntryOnPR(t *testing.T) {
 }
 
 func TestAppendToEntryOnPRRemovesReadyToMergeFirst(t *testing.T) {
-	s := &stubPR{labels: []string{"ready-to-merge"}}
+	s := &stubPR{labels: []string{"runlore", "ready-to-merge"}}
 	c := s.start(t)
 	if err := c.AppendToEntryOnPR(context.Background(), 84, "### note\n\nhi", "k1"); err != nil {
 		t.Fatal(err)
@@ -236,5 +236,38 @@ func TestOpenResolvePR(t *testing.T) {
 	_, err = c.OpenResolvePR(context.Background(), "incidents/t.md", func(raw []byte) ([]byte, bool, error) { return raw, false, nil }, "b")
 	if !errors.Is(err, providers.ErrAlreadyResolved) || len(calls) != before+1 {
 		t.Fatal("an edit that changes nothing: ErrAlreadyResolved, no branch: ", err, calls)
+	}
+}
+
+// TestRefusesAPRThatIsNotRunLores: the number comes from an operator, so the PR
+// must itself carry the runlore label and a runlore/ head branch.
+func TestRefusesAPRThatIsNotRunLores(t *testing.T) {
+	ctx := context.Background()
+	for name, s := range map[string]*stubPR{
+		"unlabelled open PR":        {labels: []string{"bug"}},
+		"no labels at all":          {labels: []string{}},
+		"labelled PR, human branch": {branch: "alice/fix-oom"},
+		"unlabelled merged PR":      {state: "closed", mergedAt: "2026-11-03T10:00:00Z", labels: []string{}},
+		"merged, human branch":      {state: "closed", mergedAt: "2026-11-03T10:00:00Z", branch: "alice/x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := s.start(t)
+			if _, err := c.PREntry(ctx, 84); !errors.Is(err, providers.ErrNotRunLorePR) {
+				t.Fatal("PREntry: ", err)
+			}
+			if s.state != "closed" {
+				if _, err := c.EditEntryOnPR(ctx, 84, "m", addLine("x")); !errors.Is(err, providers.ErrNotRunLorePR) || len(s.calls) != 0 {
+					t.Fatal("EditEntryOnPR: ", err, s.calls)
+				}
+				if err := c.AppendToEntryOnPR(ctx, 84, "note", "k"); !errors.Is(err, providers.ErrNotRunLorePR) || len(s.writes()) != 0 {
+					t.Fatal("AppendToEntryOnPR: ", err)
+				}
+			}
+		})
+	}
+	// The showcase shape: label runlore, head runlore/kb-...
+	s := &stubPR{labels: []string{"runlore", "solved"}, branch: "runlore/kb-oom-1"}
+	if pe, err := s.start(t).PREntry(ctx, 84); err != nil || pe.State != "open" {
+		t.Fatal(pe, err)
 	}
 }
