@@ -1019,7 +1019,7 @@ it may do, and whether a fix is published. RunLore only files, listens and repor
 factory:
   url: http://agent-factory.agent-system.svc.cluster.local:8082
   token_url: https://auth.example.com/oauth/v2/token
-  ca_file: /etc/runlore/factory-ca/ca.crt         # optional; PEM of a private CA, trusted besides the system roots
+  ca_file: /etc/runlore-factory-ca/ca.crt         # optional; PEM of a private CA, trusted besides the system roots
   client_id_env: FACTORY_CLIENT_ID
   client_secret_env: FACTORY_CLIENT_SECRET
   project_id_env: FACTORY_PROJECT_ID
