@@ -459,6 +459,22 @@ func TestCurateAnUnreadablePRHoldsForABoundedNumberOfRepeats(t *testing.T) {
 			t.Fatalf("%d failures", failures(f))
 		}
 	})
+	t.Run("a process restart keeps the count", func(t *testing.T) {
+		f := setup(t)
+		for range 3 {
+			f.detect("again", 201, "room0002")
+		}
+		l, err := OpenLedger(f.g.l.path, f.g.cu.Now)
+		must(t, err)
+		f.g.l, f.g.cu.Ledger, f.g.cu.Filer.Ledger = l, l, l
+		if got := failures(f); got != 3 {
+			t.Fatalf("the count did not survive the reload: %d", got)
+		}
+		f.detect("again", 201, "room0002")
+		if got := failures(f); got != 4 || len(f.factory.keys) != 1 {
+			t.Fatalf("the count continues from there: %d failures, %d tasks", got, len(f.factory.keys))
+		}
+	})
 	t.Run("a restart on a closed PR starts a clean count", func(t *testing.T) {
 		f := setup(t)
 		f.detect("again", 201, "room0002")

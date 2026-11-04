@@ -1096,8 +1096,8 @@ factory:
 
   While an entry's pull request is open and no fix is bound to it, a repeat of the alert starts no
   triager and no stub with the factory: the entry waits for its reviewer, at any age. A pull request
-  whose state cannot be read holds filing the same way, logged at `warn` on each repeat, but only for
-  30 repeats once `window` has passed; the next one files. Someone acting on the pull request ends
+  whose state cannot be read holds filing the same way, logged at `warn` on each repeat, but once
+  `window` has passed, only the first 29 such repeats hold; the 30th files. Someone acting on the pull request ends
   the wait: once it is merged, a repeat files again, and the verified fix edits the merged entry
   instead of opening a second pull request. A pull request closed unmerged starts the hold again,
   and once a fix is bound and decided, filing resumes too.
