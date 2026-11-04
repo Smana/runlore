@@ -2040,7 +2040,7 @@ type EntryPRState struct {
 	Branch, HeadSHA string
 	Mergeable       *bool    // nil while the forge computes it
 	Fork, Truncated bool     // Truncated: a full page of commits or files, so the lists below may be cut
-	CommitAuthors   []string // one per commit; empty for a commit with no linked account
+	CommitAuthors   []string // one per commit; empty for one with no linked account, or the forge did not write and sign
 	Files           []string
 }
 

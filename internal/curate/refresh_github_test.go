@@ -28,8 +28,9 @@ import (
 
 // fakeCommit is a whole snapshot of the tree with its parent, which is all a merge check and a diff need.
 type fakeCommit struct {
-	sha, parent, author string
-	files               map[string]string
+	sha, parent, author, committer string
+	verified                       bool
+	files                          map[string]string
 }
 
 // activityRow is one row of a ref's activity: what Maku's pushedBy reads.
@@ -104,6 +105,11 @@ func (f *fakeRepo) commit(parent, author string, files map[string]string) string
 	f.seq++
 	sha := fmt.Sprintf("%040x", f.seq)
 	f.commits[sha] = &fakeCommit{sha: sha, parent: parent, author: author, files: files}
+	// What a Contents API write with the App's token reads as on GitHub (runlore-kb #157 to #163).
+	// The fake serves no Git Data commit route, so a rebuild cannot make commits any other way.
+	if author == curate.BotLogin {
+		f.commits[sha].committer, f.commits[sha].verified = webFlow, true
+	}
 	return sha
 }
 
@@ -301,11 +307,14 @@ func (f *fakeRepo) routes() {
 		}
 		out := []map[string]any{}
 		for _, c := range own {
-			var author any
-			if c.author != "" {
-				author = map[string]string{"login": c.author}
+			account := func(login string) any {
+				if login == "" {
+					return nil
+				}
+				return map[string]string{"login": login}
 			}
-			out = append(out, map[string]any{"sha": c.sha, "author": author})
+			out = append(out, map[string]any{"sha": c.sha, "author": account(c.author), "committer": account(c.committer),
+				"commit": map[string]any{"verification": map[string]any{"verified": c.verified}}})
 		}
 		writeJSON(w, 200, out)
 	})
@@ -400,6 +409,14 @@ func (f *fakeRepo) push(branch, author, path, content string) string {
 	f.refs[branch] = sha
 	f.rows[branch] = append([]activityRow{{"push", author, head, sha}}, f.rows[branch]...)
 	return sha
+}
+
+// pushShaped adds a commit whose identity a test chooses: what a local amend or a web edit leaves.
+func (f *fakeRepo) pushShaped(branch, author, committer string, verified bool, path, content string) {
+	sha := f.push(branch, author, path, content)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commits[sha].author, f.commits[sha].committer, f.commits[sha].verified = author, committer, verified
 }
 
 func (f *fakeRepo) activity(branch string) []activityRow {
@@ -521,6 +538,8 @@ func kbEntry(title, fingerprint string) providers.KBEntry {
 	return providers.KBEntry{Type: "Incident", Title: title, Description: title + " happened", Body: "## Cause\n\nIt broke.",
 		Fingerprint: fingerprint, Confidence: 0.9, Origin: "runlore"}
 }
+
+const webFlow = "web-flow"
 
 const secondPath = "incidents/second-incident-bbbbbbbb.md"
 
@@ -646,8 +665,8 @@ func TestEntryPRState(t *testing.T) {
 	t.Run("who wrote each commit, no linked account being empty", func(t *testing.T) {
 		repo, c, n := conflicting(t)
 		st, _ := c.EntryPRState(ctx, n)
-		repo.push(st.Branch, "Smana", "note.md", "x")
-		repo.push(st.Branch, "", "note2.md", "y")
+		repo.pushShaped(st.Branch, "Smana", webFlow, true, "note.md", "x")
+		repo.pushShaped(st.Branch, "", webFlow, true, "note2.md", "y")
 		st, err := c.EntryPRState(ctx, n)
 		if err != nil || !slices.Contains(st.CommitAuthors, "Smana") || !slices.Contains(st.CommitAuthors, "") || !slices.Contains(st.CommitAuthors, curate.BotLogin) {
 			t.Fatalf("%+v %v", st, err)
@@ -893,4 +912,111 @@ func TestRebuildEntryPR(t *testing.T) {
 			t.Fatal("the temporary branch is left behind")
 		}
 	})
+}
+
+// A commit is the bot's only with the bot as author, web-flow as committer and GitHub's signature:
+// what every commit on runlore-kb #157 to #163 reads. A local amend, rebase or spoofed email keeps
+// the author and loses the rest, and a rebuild would lose its hand edits to index.md and log.md.
+func TestRefreshRefusesACommitThatOnlyNamesTheBot(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name, author, committer string
+		verified                bool
+	}{
+		{"an amend or a rebase: the bot's author, a human committer", curate.BotLogin, "Smana", false},
+		{"the same, signed with the human's own key", curate.BotLogin, "Smana", true},
+		{"a spoofed committer email: web-flow, no signature", curate.BotLogin, webFlow, false},
+		{"a committer email linking to no account", curate.BotLogin, "", false},
+		{"signed, a committer linking to no account", curate.BotLogin, "", true},
+		{"a human's edit in the web UI", "Smana", webFlow, true},
+		{"an author linking to no account", "", webFlow, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, c, n := conflicting(t)
+			if err := c.ReplaceLabel(ctx, n, "", "ready-to-merge"); err != nil {
+				t.Fatal(err)
+			}
+			st, err := c.EntryPRState(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo.pushShaped(st.Branch, tc.author, tc.committer, tc.verified, "index.md", "# Index\n\nby hand\n")
+			head := repo.head(n)
+			res, err := curate.RefreshEntries{Forge: c, Log: slog.Default()}.Once(ctx)
+			if err != nil || res.Refused[n] != "conflict" || len(res.Rebuilt) != 0 {
+				t.Fatalf("%+v %v", res, err)
+			}
+			if repo.head(n) != head || repo.hasRefWithPrefix("runlore/rebuild-") {
+				t.Fatalf("the branch was touched: %q", repo.writeEvents())
+			}
+			repo.mu.Lock()
+			labels := slices.Clone(repo.prs[n].labels)
+			repo.mu.Unlock()
+			if slices.Contains(labels, "ready-to-merge") {
+				t.Fatalf("a refused PR loses the label, so Decide lists it: %v", labels)
+			}
+		})
+	}
+}
+
+// The rebuild's own commits must pass the check it applies, or merging the next PR would refuse a
+// PR the bot has already rebuilt once.
+func TestRefreshRebuildsAPRTwice(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo(t, map[string]string{"index.md": "# Index\n\n## Incidents\n", "log.md": "# Change log\n"})
+	c := repo.client()
+	a, _ := c.OpenPR(ctx, kbEntry("First incident", "aaaaaaaa"))
+	b, _ := c.OpenPR(ctx, kbEntry("Second incident", "bbbbbbbb"))
+	d, _ := c.OpenPR(ctx, kbEntry("Third incident", "dddddddd"))
+	nb, nd := repo.number(b), repo.number(d)
+	r := curate.RefreshEntries{Forge: c, Log: slog.Default()}
+
+	repo.merge(repo.number(a))
+	if res, err := r.Once(ctx); err != nil || !slices.Equal(res.Rebuilt, []int{nb, nd}) || len(res.Refused) != 0 {
+		t.Fatalf("first merge: %+v %v", res, err)
+	}
+	st, err := c.EntryPRState(ctx, nd)
+	if err != nil || len(st.CommitAuthors) != 3 || slices.ContainsFunc(st.CommitAuthors, func(a string) bool { return a != curate.BotLogin }) {
+		t.Fatalf("the rebuilt commits are the bot's: %+v %v", st, err)
+	}
+
+	repo.merge(nb)
+	if res, err := r.Once(ctx); err != nil || !slices.Equal(res.Rebuilt, []int{nd}) || len(res.Refused) != 0 {
+		t.Fatalf("a second conflict on a rebuilt PR: %+v %v", res, err)
+	}
+	diff := repo.diffAgainstBase(nd)
+	if path := "incidents/third-incident-dddddddd.md"; !diff.Added(path) || !slices.Equal(diff.Paths(), []string{path, "index.md", "log.md"}) || diff.Deletions("index.md") != 0 || diff.Deletions("log.md") != 0 {
+		t.Fatalf("the shape changed: %v", diff.Paths())
+	}
+}
+
+// A # or ? in the branch name ends the path or the query, so the read and the PATCH would land on
+// another ref, one nobody examined.
+func TestRebuildEntryPRRefusesABranchAURLWouldCut(t *testing.T) {
+	ctx := context.Background()
+	for _, name := range []string{"runlore/kb-a#b", "runlore/kb-a?b", "runlore/kb-a%23b", "runlore/kb-a b", "runlore/kb-a/b", "runlore/kb-"} {
+		t.Run(name, func(t *testing.T) {
+			repo, c, n := conflicting(t)
+			repo.mu.Lock()
+			pr := repo.prs[n]
+			head := repo.refs[pr.branch]
+			repo.refs[name], repo.refs["runlore/kb-a"] = head, head
+			pr.branch = name
+			repo.mu.Unlock()
+			human := repo.push("runlore/kb-a", "Smana", "note.md", "mine")
+			writes := repo.writes()
+
+			if err := c.RebuildEntryPR(ctx, n, head); !errors.Is(err, providers.ErrNotRunLorePR) {
+				t.Fatalf("err = %v", err)
+			}
+			if repo.writes() != writes || repo.ref("runlore/kb-a") != human || repo.ref(name) != head {
+				t.Fatalf("a ref was written: %q", repo.writeEvents())
+			}
+			res, err := curate.RefreshEntries{Forge: c, Log: slog.Default()}.Once(ctx)
+			if err != nil || res.Refused[n] != "conflict" {
+				t.Fatalf("listed in Decide: %+v %v", res, err)
+			}
+		})
+	}
 }

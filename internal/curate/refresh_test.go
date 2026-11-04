@@ -132,6 +132,8 @@ func TestRefreshEntries(t *testing.T) {
 		{name: "the only other path is no entry", state: rfState(func(st *providers.EntryPRState) { st.Files = []string{"scripts/x.sh", "log.md"} }), wantRefused: conflict},
 		{name: "the entry already on the base is refused", state: rfState(), rebuildErr: fmt.Errorf("x: %w", providers.ErrEntryOnBase),
 			wantCalls: []string{rebuild}, wantRefused: conflict},
+		{name: "a branch name the forge will not move is refused", state: rfState(func(st *providers.EntryPRState) { st.Branch = "runlore/kb-a#b" }),
+			rebuildErr: fmt.Errorf("x: %w", providers.ErrNotRunLorePR), wantCalls: []string{"rebuild 7 abc"}, wantRefused: conflict},
 		{name: "a moved head is retried next pass", state: rfState(), rebuildErr: fmt.Errorf("x: %w", providers.ErrHeadMoved), wantCalls: []string{rebuild}},
 		{name: "any other failure is retried next pass", state: rfState(), rebuildErr: errors.New("down"), wantCalls: []string{rebuild}},
 	}

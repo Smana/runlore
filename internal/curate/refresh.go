@@ -97,6 +97,9 @@ func (r RefreshEntries) refresh(ctx context.Context, pr providers.CuratedIssue, 
 	case errors.Is(err, providers.ErrEntryOnBase):
 		r.refuse(pr.Number, res, "the base already has its entry")
 		return
+	case errors.Is(err, providers.ErrNotRunLorePR):
+		r.refuse(pr.Number, res, "its branch name is not one RunLore makes")
+		return
 	case err != nil:
 		r.Log.Warn("refresh-entries: rebuild failed; retried next pass", "pr", pr.Number, "err", err)
 		return
@@ -115,8 +118,8 @@ func (r RefreshEntries) refuse(number int, res *RefreshResult, why string) {
 	res.Refused[number] = RiskConflict.String()
 }
 
-// rebuildable reports whether a rebuild would lose nothing: every commit is the bot's, on a head in
-// this repository, and the whole change is one entry and the two files a rebuild writes again.
+// rebuildable reports whether a rebuild would lose nothing: every commit is the bot's (the forge
+// reports no login for a commit it did not write and sign itself), on a head in this repository, and the whole change is one entry and the two files a rebuild writes again.
 func rebuildable(st providers.EntryPRState) bool {
 	if st.Fork || st.Truncated || len(st.CommitAuthors) == 0 {
 		return false

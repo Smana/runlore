@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +27,15 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// kbBranchPattern is what OpenPR makes: the prefix, a slug and a timestamp. A rebuild moves nothing
+// else. A branch name goes unescaped into the read's query and the PATCH's path, so a # or ? in it
+// would send both to another ref, one nobody examined.
+var kbBranchPattern = regexp.MustCompile(`^` + regexp.QuoteMeta(kbBranchPrefix) + `[A-Za-z0-9._-]+$`)
+
+// webFlowLogin is the committer GitHub reports on the commits it writes and signs itself, as it does
+// for a Contents API write with the App's token.
+const webFlowLogin = "web-flow"
+
 // mergeableRetry is how long EntryPRState waits before its one re-read when GitHub answers
 // mergeable: null, which it does while computing the answer. A variable so tests set it to 0.
 var mergeableRetry = 2 * time.Second
@@ -33,6 +43,12 @@ var mergeableRetry = 2 * time.Second
 // EntryPRState reads what deciding on a rebuild takes: the head, whether GitHub calls it
 // mergeable, whose commits it is and what it changes. Mergeable stays nil if GitHub is
 // still computing after one re-read.
+//
+// A commit's author login counts only when GitHub wrote and signed the commit (committer
+// web-flow, verification verified), and is empty otherwise. An amend, a rebase or a spoofed
+// email keeps the bot as author and loses both, and only the signature cannot be set from a
+// laptop. Every commit RunLore makes qualifies: OpenPR, EditEntryOnPR and RebuildEntryPR all
+// commit through the Contents API (putFile). A human's web edit keeps that human's login.
 //
 // The head is read FIRST: a push landing during these reads makes the commits newer than
 // HeadSHA, and RebuildEntryPR then refuses that HeadSHA.
@@ -54,9 +70,13 @@ func (c *Client) EntryPRState(ctx context.Context, number int) (providers.EntryP
 	st := providers.EntryPRState{Branch: pr.branch, HeadSHA: pr.headSHA, Mergeable: pr.mergeable, Fork: !c.ownHead(pr)}
 
 	var commits []struct {
-		Author *struct {
-			Login string `json:"login"`
-		} `json:"author"` // null when the commit's email links to no account
+		Author    *gitHubAccount `json:"author"`    // null when the commit's email links to no account
+		Committer *gitHubAccount `json:"committer"` // likewise
+		Commit    struct {
+			Verification struct {
+				Verified bool `json:"verified"`
+			} `json:"verification"`
+		} `json:"commit"`
 	}
 	if err := c.do(ctx, http.MethodGet,
 		fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=%d", c.owner, c.repo, number, prFilesPerPage), nil, &commits); err != nil {
@@ -64,7 +84,7 @@ func (c *Client) EntryPRState(ctx context.Context, number int) (providers.EntryP
 	}
 	for _, cm := range commits {
 		login := ""
-		if cm.Author != nil {
+		if cm.Author != nil && cm.Committer != nil && cm.Committer.Login == webFlowLogin && cm.Commit.Verification.Verified {
 			login = cm.Author.Login
 		}
 		st.CommitAuthors = append(st.CommitAuthors, login)
@@ -84,6 +104,10 @@ func (c *Client) EntryPRState(ctx context.Context, number int) (providers.EntryP
 	return st, nil
 }
 
+type gitHubAccount struct {
+	Login string `json:"login"`
+}
+
 // ownHead reports whether the PR's head branch is in this repository. A deleted fork
 // reports no repository at all, which is not this one either.
 func (c *Client) ownHead(pr prHead) bool {
@@ -100,7 +124,7 @@ func (c *Client) checkRebuildable(number int, pr prHead, head string) error {
 	if !c.ownHead(pr) {
 		return fmt.Errorf("github PR %d: head branch is in %q, not %s/%s (fork); refusing to rebuild", number, pr.repo, c.owner, c.repo)
 	}
-	if !strings.HasPrefix(pr.branch, kbBranchPrefix) {
+	if !kbBranchPattern.MatchString(pr.branch) {
 		return fmt.Errorf("github PR %d (branch %q): %w", number, pr.branch, providers.ErrNotRunLorePR)
 	}
 	if pr.headSHA != head {
