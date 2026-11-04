@@ -64,6 +64,8 @@ const (
 	longRun = 40
 	// longEscapes is the same for \xNN and \uNNNN runs. A log may quote a few bytes that way.
 	longEscapes = 8
+	// minDecoded is the shortest run worth decoding: "curl x | sh" is 15 characters of base64.
+	minDecoded = 12
 	// maxDecodeDepth bounds how many encodings hasEncoded peels off.
 	maxDecodeDepth = 2
 )
@@ -207,32 +209,45 @@ func (v views) hasMarkup() bool   { return chatLine.MatchString(v.line) || chatF
 func (v views) hasOverride() bool { return override.MatchString(v.phrase) }
 
 func (v views) hasExfiltration() bool {
-	if exfiltration.MatchString(v.line) {
-		return true
+	return exfiltration.MatchString(v.line) || hasPipeToShell(v.line)
+}
+
+// hasPipeToShell reports a pipe to a shell, sparing what is only a markdown table's cell. It goes line
+// by line, so what it asks about a line is asked once, however many matches the line holds.
+func hasPipeToShell(s string) bool {
+	if !pipeToShell.MatchString(s) {
+		return false
 	}
-	for _, loc := range pipeToShell.FindAllStringIndex(v.line, -1) {
-		if !inTableCell(v.line, loc) {
+	for line := range strings.SplitSeq(s, "\n") {
+		locs := pipeToShell.FindAllStringIndex(line, -1)
+		if len(locs) == 0 {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "|") || !strings.HasSuffix(trimmed, "|") {
 			return true
+		}
+		for _, loc := range locs {
+			if !isShellCell(line, loc) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// inTableCell reports that a match of pipeToShell is a markdown table's cell, "| sh |" or "| bash
-// script |": on a line that opens and closes with a pipe, with no flag, redirect or end of line after
-// it. So "| sh | tee log", "| bash -c x |" and a pipeline's continuation line still count.
-func inTableCell(s string, loc []int) bool {
-	start := strings.LastIndexByte(s[:loc[0]], '\n') + 1
-	end := len(s)
-	if i := strings.IndexByte(s[loc[1]:], '\n'); i >= 0 {
-		end = loc[1] + i
-	}
-	line := strings.TrimSpace(s[start:end])
-	if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
+// isShellCell reports that a match on a table line ("| ... |") is a cell naming a shell, "| Tool | sh |"
+// or "| Shell | bash script |": the cell before it is empty or one plain word, so nothing pipes into
+// it, and a word or the cell's end follows, not a flag or a redirect. "| curl x | sh |" is a pipe to a
+// shell whatever wraps it. Each look stays inside the neighbouring cell, and matches do not overlap,
+// so a line costs its own length.
+func isShellCell(line string, loc []int) bool {
+	after := strings.TrimLeft(line[loc[1]:], " \t")
+	if after == "" || (after[0] != '|' && !unicode.IsLetter(rune(after[0]))) {
 		return false
 	}
-	after := strings.TrimSpace(s[loc[1]:end])
-	return after != "" && (after[0] == '|' || unicode.IsLetter(rune(after[0])))
+	before := strings.TrimSpace(line[strings.LastIndexByte(line[:loc[0]], '|')+1 : loc[0]])
+	return strings.IndexFunc(before, func(r rune) bool { return !unicode.IsLetter(r) }) < 0
 }
 
 // frontmatterValues is every scalar of text's frontmatter, keys included, decoded as a reader decodes
@@ -323,9 +338,11 @@ func outsideCode(s string) string {
 }
 
 // dropSpans removes a line's code spans: a backtick run closed by a run of the same length. A run
-// nothing closes is literal, as in CommonMark, so what follows it stays.
+// nothing closes is literal, as in CommonMark, so what follows it stays. Once a length has no closer
+// none later will, so it is not looked for again.
 func dropSpans(line string) string {
 	var b strings.Builder
+	unclosed := map[int]bool{}
 	for {
 		i := strings.IndexByte(line, '`')
 		if i < 0 {
@@ -335,9 +352,12 @@ func dropSpans(line string) string {
 		n := backticks(line[i:])
 		b.WriteString(line[:i])
 		rest := line[i+n:]
-		if end, ok := closingRun(rest, n); ok {
-			line = rest[end+n:]
-			continue
+		if !unclosed[n] {
+			if end, ok := closingRun(rest, n); ok {
+				line = rest[end+n:]
+				continue
+			}
+			unclosed[n] = true
 		}
 		b.WriteString(line[i : i+n])
 		line = rest
@@ -388,14 +408,31 @@ func hasEncoded(s string, depth int) bool {
 
 func runIsPayload(run string, depth int) bool {
 	bare := strings.TrimRight(run, "=")
-	if raw, err := hex.DecodeString(bare); err == nil && decodedHit(string(raw), depth) {
+	if decodesToHit(bare, depth) {
 		return true
 	}
-	std := strings.NewReplacer("-", "+", "_", "/").Replace(bare)
-	if raw, err := base64.RawStdEncoding.DecodeString(std); err == nil && decodedHit(string(raw), depth) {
-		return true
+	// "/", "-" and "_" are in the alphabet, so a prefix ending in one shifts the whole run: each
+	// segment is decoded by itself too. A prefix with no separator still shifts it (TestKnownPasses).
+	if segs := strings.FieldsFunc(bare, isRunSeparator); len(segs) > 1 {
+		for _, seg := range segs {
+			if len(seg) >= minDecoded && decodesToHit(seg, depth) {
+				return true
+			}
+		}
 	}
 	return len(bare) >= longRun && looksEncoded(bare)
+}
+
+func isRunSeparator(r rune) bool { return r == '/' || r == '-' || r == '_' }
+
+// decodesToHit decodes s as hex and as base64, and runs the rules over what comes out.
+func decodesToHit(s string, depth int) bool {
+	if raw, err := hex.DecodeString(s); err == nil && decodedHit(string(raw), depth) {
+		return true
+	}
+	std := strings.NewReplacer("-", "+", "_", "/").Replace(s)
+	raw, err := base64.RawStdEncoding.DecodeString(std)
+	return err == nil && decodedHit(string(raw), depth)
 }
 
 // decodedHit runs the rules that read words over decoded text. hidden-character does not apply: any
