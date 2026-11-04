@@ -211,7 +211,7 @@ func buildGuardedForge(cfg *config.Config, tok ForgeToken, dryRun bool, aud audi
 	if base == "" {
 		base = "main"
 	}
-	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
+	client := newKBClient(cfg, owner, repo, base, github.TokenFunc(tok))
 	return curate.Guard{Inner: client, DryRun: dryRun, Audit: aud, Log: log}, nil
 }
 

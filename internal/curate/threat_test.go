@@ -186,8 +186,8 @@ func TestQueueIssueThreat(t *testing.T) {
 		var logs bytes.Buffer
 		q := newQI(f, mon)
 		q.Evidence, q.Log = qiEvidence{verified: map[string]bool{"fp": true}}, slog.New(slog.NewTextHandler(&logs, nil))
-		if b := rewrite(t, q); !strings.Contains(b, "| threat: "+ruleEntryUnreadable+" |") {
-			t.Fatalf("fail closed:\n%s", b)
+		if b := rewrite(t, q); !strings.Contains(b, "| threat: "+ruleEntryUnreadable+" (read failed, retrying) |") {
+			t.Fatalf("a failed read says so, and is not the refusal a human clears with accepted:\n%s", b)
 		}
 		if !strings.Contains(logs.String(), "forge down") {
 			t.Fatalf("not logged: %s", logs.String())

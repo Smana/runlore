@@ -405,38 +405,63 @@ func TestFilePathIsEscaped(t *testing.T) {
 	}
 }
 
-// Text a human accepted is not the text after RunLore's own later write, so accepted goes with the
-// push, under the same rule as ready-to-merge: no removal, no push.
-func TestEditRemovesAcceptedFirst(t *testing.T) {
+// Text a human accepted is not the text after RunLore's own later write, so with RevokeAcceptedOnEdit
+// accepted goes with the push, under the same rule as ready-to-merge: no removal, no push. Without it,
+// which is an install where accepted alone earns the label, it stays.
+func TestEditAndAccepted(t *testing.T) {
 	ctx := context.Background()
 	edit := func(raw []byte) ([]byte, bool, error) { return append(raw, " edited"...), true, nil }
-	t.Run("both labels, then the push", func(t *testing.T) {
-		s := &stubPR{labels: []string{"runlore", "ready-to-merge", "accepted"}}
-		if _, err := s.start(t).EditEntryOnPR(ctx, 84, "m", edit); err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Join(s.calls, ","); got != "DELETE ready-to-merge,DELETE accepted,PUT" {
-			t.Fatal(got)
-		}
-	})
-	t.Run("a thread note is a push too", func(t *testing.T) {
-		s := &stubPR{labels: []string{"runlore", "accepted"}}
-		if err := s.start(t).AppendToEntryOnPR(ctx, 84, "### note\n\nhi", "k1"); err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Join(s.calls, ","); got != "DELETE accepted,PUT" {
-			t.Fatal(got)
-		}
-	})
-	t.Run("a failed removal stops the push", func(t *testing.T) {
+	start := func(t *testing.T, s *stubPR, revoke bool) *Client {
+		t.Helper()
+		c := s.start(t)
+		c.RevokeAcceptedOnEdit = revoke
+		return c
+	}
+	for name, tc := range map[string]struct {
+		revoke bool
+		labels []string
+		want   string
+	}{
+		"revoke: both labels, then the push": {true, []string{"runlore", "ready-to-merge", "accepted"}, "DELETE ready-to-merge,DELETE accepted,PUT"},
+		"keep: accepted stays":               {false, []string{"runlore", "ready-to-merge", "accepted"}, "DELETE ready-to-merge,PUT"},
+		"keep: alone, no call":               {false, []string{"runlore", "accepted"}, "PUT"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &stubPR{labels: tc.labels}
+			if _, err := start(t, s, tc.revoke).EditEntryOnPR(ctx, 84, "m", edit); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(s.calls, ","); got != tc.want {
+				t.Fatalf("calls = %s, want %s", got, tc.want)
+			}
+		})
+	}
+	for name, tc := range map[string]struct {
+		revoke bool
+		want   string
+	}{
+		"revoke: a thread note is a push too": {true, "DELETE accepted,PUT"},
+		"keep: a thread note leaves it":       {false, "PUT"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &stubPR{labels: []string{"runlore", "accepted"}}
+			if err := start(t, s, tc.revoke).AppendToEntryOnPR(ctx, 84, "### note\n\nhi", "k1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(s.calls, ","); got != tc.want {
+				t.Fatalf("calls = %s, want %s", got, tc.want)
+			}
+		})
+	}
+	t.Run("revoke: a failed removal stops the push", func(t *testing.T) {
 		s := &stubPR{labels: []string{"runlore", "accepted"}, deleteStatus: http.StatusInternalServerError}
-		if _, err := s.start(t).EditEntryOnPR(ctx, 84, "m", edit); err == nil || slices.Contains(s.calls, "PUT") {
+		if _, err := start(t, s, true).EditEntryOnPR(ctx, 84, "m", edit); err == nil || slices.Contains(s.calls, "PUT") {
 			t.Fatal(err, s.calls)
 		}
 	})
-	t.Run("an edit that changes nothing keeps it", func(t *testing.T) {
+	t.Run("revoke: an edit that changes nothing keeps it", func(t *testing.T) {
 		s := &stubPR{labels: []string{"runlore", "accepted"}}
-		if _, err := s.start(t).EditEntryOnPR(ctx, 84, "m", func(raw []byte) ([]byte, bool, error) { return raw, false, nil }); err != nil || len(s.calls) != 0 {
+		if _, err := start(t, s, true).EditEntryOnPR(ctx, 84, "m", func(raw []byte) ([]byte, bool, error) { return raw, false, nil }); err != nil || len(s.calls) != 0 {
 			t.Fatal(err, s.calls)
 		}
 	})

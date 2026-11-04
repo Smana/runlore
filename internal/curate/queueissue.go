@@ -230,9 +230,10 @@ func (q QueueIssue) decide(ctx context.Context, refused map[int]string) ([]decid
 		var threats []string
 		if q.ScreenEntries {
 			var readErr error
-			// An unread entry is withheld like a hit: a row is no label, and it may hold anything.
+			// An unread entry is withheld like a hit: a row is no label, and it may hold anything. It
+			// says so, since accepted is no answer to a failure that clears by itself.
 			if threats, readErr = entryThreats(ctx, q.Forge, q.Log, pr); readErr != nil {
-				threats = []string{ruleEntryUnreadable}
+				threats = []string{ruleEntryUnreadable + " (read failed, retrying)"}
 			}
 		}
 		risks := Risks(pr, contested, verified, threats)

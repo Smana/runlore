@@ -95,7 +95,16 @@ func buildGitHubClient(cfg *config.Config, log *slog.Logger) *github.Client {
 	if base == "" {
 		base = "main"
 	}
-	return github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
+	return newKBClient(cfg, owner, repo, base, github.TokenFunc(token))
+}
+
+// newKBClient is the one way to build the KB repository's client. Under factory.curation.defer the
+// threat check runs and accepted skips it, so RunLore's own later write takes accepted off. Without
+// defer accepted alone earns ready-to-merge, and a thread note must not cost it.
+func newKBClient(cfg *config.Config, owner, repo, base string, token github.TokenFunc) *github.Client {
+	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, token)
+	client.RevokeAcceptedOnEdit = cfg.Factory.Curation.Defer
+	return client
 }
 
 // BuildCurator returns a Curator when the forge credentials + KB repo are

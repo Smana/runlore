@@ -317,10 +317,10 @@ func (c *Client) editEntryOnPR(ctx context.Context, number int, ownOnly bool, me
 	}
 	// A push is new content the label was not earned on: Maku's merge gate checks
 	// who labelled, not when, so a label on the old head would stand on the new one.
-	// A failed removal stops the push; a label already gone (404) does not. accepted goes too: it
-	// skips the threat check on text a human read, and this push is text no human has.
+	// A failed removal stops the push; a label already gone (404) does not. accepted goes too where
+	// it skips a screen of the text a human read: this push is text no human has.
 	for _, label := range []string{"ready-to-merge", "accepted"} {
-		if !slices.Contains(pr.labels, label) {
+		if !slices.Contains(pr.labels, label) || (label == "accepted" && !c.RevokeAcceptedOnEdit) {
 			continue
 		}
 		if err := c.ReplaceLabel(ctx, number, label, ""); err != nil {

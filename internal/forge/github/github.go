@@ -35,6 +35,11 @@ type Client struct {
 	baseBranch string
 	token      TokenFunc
 	http       *http.Client
+
+	// RevokeAcceptedOnEdit makes an edit of an open PR's entry remove the accepted label before the
+	// push, along with ready-to-merge. Set where accepted skips a screen of the text a human read;
+	// elsewhere accepted alone earns the label and is left alone.
+	RevokeAcceptedOnEdit bool
 }
 
 // DefaultBaseURL is the public GitHub REST API. Override for GitHub Enterprise

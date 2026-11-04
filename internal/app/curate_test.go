@@ -8,15 +8,22 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
 	github "github.com/Smana/runlore/internal/forge/github"
@@ -450,5 +457,61 @@ func TestQueueLine(t *testing.T) {
 	}
 	if queueLine(&config.Config{Curate: config.Curate{QueueIssue: config.QueueIssue{Slack: true}}}, false, discardLog()) != nil {
 		t.Fatal("no notifier configured: no line, not a typed nil")
+	}
+}
+
+// Both ways RunLore writes to an open entry PR, a resolution through the guarded forge and a thread
+// note through the plain client, drop accepted under defer only: without it, accepted alone earns
+// ready-to-merge on the resolution path, and a note must not cost it.
+func TestAcceptedOnWriteFollowsDefer(t *testing.T) {
+	entry := base64.StdEncoding.EncodeToString([]byte("---\ntype: Incident\ntitle: x\n---\n\n## Cause\n\nc\n"))
+	for _, deferred := range []bool{false, true} {
+		for _, how := range []string{"resolution", "thread note"} {
+			t.Run(fmt.Sprintf("defer=%v/%s", deferred, how), func(t *testing.T) {
+				var removed []string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+						w.WriteHeader(http.StatusCreated)
+						_, _ = w.Write([]byte(`{"token":"t","expires_at":"2099-01-01T00:00:00Z"}`))
+					case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/kb/pulls/7":
+						_, _ = w.Write([]byte(`{"state":"open","labels":[{"name":"runlore"},{"name":"accepted"}],"head":{"ref":"runlore/kb-x","sha":"h","repo":{"full_name":"acme/kb"}}}`))
+					case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/kb/pulls/7/files":
+						_, _ = w.Write([]byte(`[{"filename":"incidents/x.md","status":"added"}]`))
+					case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/kb/contents/incidents/x.md":
+						_, _ = w.Write([]byte(`{"sha":"blob","encoding":"base64","content":"` + entry + `"}`))
+					case r.Method == http.MethodPut:
+						_, _ = w.Write([]byte(`{}`))
+					case r.Method == http.MethodDelete:
+						removed = append(removed, path.Base(r.URL.Path))
+						_, _ = w.Write([]byte(`[]`))
+					default:
+						t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusTeapot)
+					}
+				}))
+				defer srv.Close()
+				cfg := curationCfg(t)
+				cfg.Forge.GitHubAPIURL = srv.URL
+				cfg.Factory.Curation.Defer = deferred
+				ctx := context.Background()
+				var err error
+				if how == "resolution" {
+					forge, gerr := buildGuardedForge(cfg, func(context.Context) (string, error) { return "t", nil }, false, audit.Nop{}, discardLog())
+					if gerr != nil {
+						t.Fatal(gerr)
+					}
+					_, err = forge.EditEntryOnPR(ctx, 7, "m", func(raw []byte) ([]byte, bool, error) { return append(raw, "x"...), true, nil })
+				} else {
+					err = buildGitHubClient(cfg, discardLog()).AppendToEntryOnPR(ctx, 7, "### note\n\nhi", "k1")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := slices.Contains(removed, "accepted"); got != deferred {
+					t.Fatalf("accepted removed = %v, want %v (%v)", got, deferred, removed)
+				}
+			})
+		}
 	}
 }

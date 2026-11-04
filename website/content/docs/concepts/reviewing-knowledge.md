@@ -392,7 +392,7 @@ model is called: a model is what the text would attack. Each rule has a name:
 | `instruction-override` | "ignore previous instructions" and common variants, "you are now", "disregard the above", "do not tell the user", after folding case, spacing, markdown emphasis and `_` or `-` between words |
 | `hidden-character` | Unicode format, private-use and control characters other than tab and newline, anywhere |
 | `encoded-payload` | Outside a code span: a long base64 or hex run without a SHA's length, or a shorter base64, hex or `\x` run that decodes to what another rule catches |
-| `exfiltration` | `curl ... \| sh`, a pipe to a shell, `gh auth token`, a command reading a credentials path such as `~/.aws/credentials`, `/run/secrets/...` or `/etc/shadow` |
+| `exfiltration` | `curl ... \| sh`, a pipe to a shell, inside a table's cell too, `gh auth token`, a command reading a credentials path such as `~/.aws/credentials`, `/run/secrets/...` or `/etc/shadow` |
 | `malformed-frontmatter` | Frontmatter that does not parse, so its values cannot be read |
 
 A hit keeps `ready-to-merge` off, withdraws it from a labelled PR, and lists the PR in Decide as
@@ -402,21 +402,24 @@ screened counts as a hit, `threat: entry-unreadable`: not exactly one entry, a p
 `incidents/`, `playbooks/` and `concepts/` or with unusual characters, a file too large to read, or a
 file the PR lists that is absent from its head. Any other read failure (a 5xx, a 429) says nothing
 about the entry: no label is added, a label already there stays, and the read is retried. In Decide
-such a row also reads `threat: entry-unreadable` until the next rewrite, since its text is unknown.
+such a row reads `threat: entry-unreadable (read failed, retrying)` until the next rewrite, since its
+text is unknown. It clears by itself, so it needs no `accepted`.
 
 The check never edits or closes a PR, and blocks nothing a human decides: for a false positive, label
-the PR `accepted`, which skips the check for as long as the label stands, or merge it yourself. When
+the PR `accepted`, which skips the check for as long as the label stands, or merge it yourself. The
+same goes for an entry that cannot be screened. When
 RunLore writes to the PR again (a resolution, a thread note) it removes `accepted` along with
 `ready-to-merge`, since a human has not read that text: apply it again if the new text is fine. A rule
 that fires costs a human look, not an entry.
 
 It is a screen for obvious injection, not a proof of safety. Rewording, another language, lookalike
-letters, percent-encoding, base64 spaced in groups, or a payload inside a code span all pass it. It
+letters, percent-encoding, base64 spaced in groups or shifted by a character with no separator, or a
+payload inside a code span all pass it. It
 does not read the PR's title and card, or `index.md` and `log.md`. It runs at a pass, so `ready-to-merge`
 is not bound to a head: a push after a pass stands unscreened until the next one, which an adopter's own
 automation on that label must allow for. The intended boundary is that every reader receives entries
 as quoted data (RK11), which this check does not establish. Without `defer` the check does not run,
-and nothing changes for that install.
+and nothing changes for that install: a write to the PR leaves `accepted` where it is.
 
 **Conflicts.** Each merged entry appends to `index.md` and `log.md`, so one merge can make every
 other open entry PR conflict. Rebuilding one costs six writes and a CI run and restarts its stale
