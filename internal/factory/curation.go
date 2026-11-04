@@ -87,11 +87,19 @@ type Curation struct {
 	once sync.Mutex // a leadership change can start a tick while the old one ends
 }
 
-// Curate files inv with the factory. On a 201, or a 200 with no hold yet, it holds the entry and
-// drafts nothing; any other answer takes today's path at once, unless a hold already owns the
-// incident's entry. A 200 with a hold standing is no new generation and touches nothing. A recall is
-// filed and observed, never drafted.
+// Curate files inv with the factory, unless the hold's current generation is undecided: a 201 would
+// reset the record under a fix that is still running. On a 201, or a 200 with no hold yet, it holds the
+// entry and drafts nothing; any other answer takes today's path at once, unless a hold already owns the
+// incident's entry. A 200 with a hold standing is no new generation and touches nothing. A 201 on a
+// hold with no live artifact starts it again. A recall is filed and observed, never drafted.
 func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
+	if r, ok := c.Ledger.Get(inv.TriggerKey); ok && c.undecided(r) {
+		c.log().Info("a generation is undecided; filing nothing for this re-detection", "alert", inv.AlertName, "key", inv.TriggerKey)
+		if inv.Recalled {
+			return providers.Ref{}, nil
+		}
+		return r.Curation.ref(), nil
+	}
 	got, err := c.Filer.File(ctx, inv)
 	if err != nil {
 		c.log().Warn("filing with the factory failed", "alert", inv.AlertName, "err", redact.Secrets(err.Error()))
@@ -108,8 +116,9 @@ func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (pro
 	}
 	h := c.standingHold(inv.TriggerKey)
 	owned := h != nil && !h.ObserveOnly
+	restart := owned && accepted && got.Status == http.StatusCreated && c.noLiveArtifact(ctx, h)
 	switch {
-	case owned && (!accepted || h.Drafted != ""):
+	case owned && !restart && (!accepted || h.Drafted != ""):
 		// A refused detection is no generation, and a set Drafted freezes the snapshot.
 		return h.ref(), nil
 	case h != nil && accepted && got.Status == http.StatusOK:
@@ -125,7 +134,7 @@ func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (pro
 		return c.lostHold(ctx, inv, err)
 	}
 	var ref providers.Ref
-	if err := c.Ledger.Upsert(inv.TriggerKey, func(r *Record) { ref = c.hold(r, inv, snapshot) }); err != nil {
+	if err := c.Ledger.Upsert(inv.TriggerKey, func(r *Record) { ref = c.hold(r, inv, snapshot, restart) }); err != nil {
 		return c.lostHold(ctx, inv, err)
 	}
 	return ref, nil
@@ -137,15 +146,23 @@ func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (pro
 // path already opened, if any, so the draft adopts that PR. An observe-only hold had a recall behind
 // it; a fresh investigation means the recall did not fire, so the incident now needs its draft. A
 // newest snapshot that fails the bar does not replace the older one: the draft would drop the entry
-// for good, and the verified fix with it.
-func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte) providers.Ref {
+// for good, and the verified fix with it. A hold starting over, on a recall or with restart, keeps only
+// its failed generations: a held one would release a draft at once, naming an old fix as Applied. A
+// restart's failed fixes are credited again, on the entry that will now exist.
+func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte, restart bool) providers.Ref {
 	switch h := r.Curation; {
 	case h == nil || h.ObserveOnly:
 		fresh := &Hold{AcceptedAt: c.now(), Investigation: snapshot, Fingerprint: cmp.Or(r.DraftFingerprint, curator.DupFingerprint(inv))}
 		if h != nil {
-			fresh.Generations = h.Generations
+			fresh.Generations = failedGenerations(h.Generations)
 		}
 		r.Curation = fresh
+	case restart:
+		gens := failedGenerations(h.Generations)
+		for i := range gens {
+			gens[i].Observed, gens[i].Resolved = "", ""
+		}
+		r.Curation = &Hold{AcceptedAt: c.now(), Investigation: snapshot, Fingerprint: h.Fingerprint, Generations: gens}
 	case h.Drafted == "":
 		if c.meetsBar(inv) {
 			h.Investigation = snapshot
@@ -154,6 +171,46 @@ func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte)
 		return h.ref()
 	}
 	return providers.Ref{}
+}
+
+// undecided reports whether r's hold should keep the next re-detection from filing. A bound fix is
+// undecided until a verdict, a refusal, a revert or a regression, or until its room ends without a merge.
+// A hold not drafted, with no fix yet, is one stub waiting for its human until the window: a new triager
+// and stub each repeat buy nothing. An observe-only hold has nothing of its own to protect.
+func (c *Curation) undecided(r Record) bool {
+	h := r.Curation
+	switch {
+	case h == nil || h.ObserveOnly:
+		return false
+	case r.FixRoom == "":
+		return h.Drafted == "" && !c.windowPassed(h)
+	}
+	return r.Verdict == "" && r.Outcome == "" && !r.Reverted && r.Monitor != "regression" && !r.fixEndedUnmerged()
+}
+
+// noLiveArtifact reports whether h settled with nothing to its name: no PR and no entry, or a PR the
+// forge says was closed unmerged. A PR that cannot be read is taken as live.
+func (c *Curation) noLiveArtifact(ctx context.Context, h *Hold) bool {
+	if h.Drafted == draftedNone {
+		return h.Entry == ""
+	}
+	n, ok := prNumber(h.Drafted)
+	if !ok || c.Drafts == nil {
+		return false
+	}
+	pe, err := c.Drafts.PREntry(ctx, n)
+	return err == nil && pe.State == "closed"
+}
+
+// failedGenerations is the failed ones of gens, in order.
+func failedGenerations(gens []Generation) []Generation {
+	var out []Generation
+	for _, g := range gens {
+		if g.Outcome() == "failed" {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // holdRecall writes the observe-only hold of a recall with no hold yet; any other hold stays as it is.
@@ -420,6 +477,7 @@ func (c *Curation) writeDraft(key, drafted, entry string, carried map[string]str
 			return
 		}
 		h.Drafted, h.Entry, h.DraftedAt = drafted, entry, c.now()
+		h.Investigation = nil // frozen from here on, and every write would carry it
 		delete(h.PastWindowFailures, stepDraft)
 		if drafted != draftedNone {
 			h.LinkDue, h.PromoteDue, h.EntryDue = true, true, entry == ""

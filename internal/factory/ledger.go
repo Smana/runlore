@@ -69,6 +69,8 @@ type Record struct {
 	Observed string `json:"observed,omitempty"`
 	Resolved string `json:"resolved,omitempty"`
 	Reverted bool   `json:"reverted,omitempty"`
+	// FixEnded is the state the fix room's task ended in ("done", "failed", "stopped"); empty while it runs.
+	FixEnded string `json:"fix_ended,omitempty"`
 	// Curation is the hold the deferral keeps for this incident; nil without one.
 	Curation *Hold `json:"curation,omitempty"`
 	// DraftFingerprint is the fingerprint of the first PR today's path opened for this incident. It
@@ -111,6 +113,28 @@ type Hold struct {
 	// PastWindowFailures counts each step's failed attempts since the window passed; a success clears
 	// its count. It lives here so a restart keeps it.
 	PastWindowFailures map[string]int `json:"past_window_failures,omitempty"`
+}
+
+// fixEndedUnmerged reports whether the fix room's task is over with nothing left to merge. A task can end
+// done with its PR still open, a human merge following later, so that alone keeps waiting.
+func (r Record) fixEndedUnmerged() bool {
+	return r.FixEnded != "" && r.MergedAt.IsZero() && (r.FixEnded != "done" || r.PR == 0)
+}
+
+// recordVerdict writes the soak's verdict on the generation of fix room room, current or archived: the
+// record may have moved to a new generation while the verdict was being gathered.
+func (r *Record) recordVerdict(room, verdict, evidence string) {
+	if r.FixRoom == room {
+		r.Verdict, r.Evidence = verdict, evidence
+		return
+	}
+	if r.Curation != nil {
+		for i := range r.Curation.Generations {
+			if g := &r.Curation.Generations[i]; g.FixRoom == room {
+				g.Verdict, g.Evidence = verdict, evidence
+			}
+		}
+	}
 }
 
 // Generation is the record's current generation.

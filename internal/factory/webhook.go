@@ -279,6 +279,9 @@ func (rc *Receiver) handle(ctx context.Context, ev Event, now time.Time) error {
 		if ev.Type == "room.reverted" && fix {
 			r.Reverted = true
 		}
+		if ev.Type == "room.ended" && fix {
+			r.FixEnded = code(ev.State)
+		}
 		rec = *r
 	})
 	if err != nil {

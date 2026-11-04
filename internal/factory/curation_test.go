@@ -229,8 +229,8 @@ func TestCurateAFreshInvestigationTurnsAnObserveOnlyHoldOrdinary(t *testing.T) {
 		h.Fingerprint != curator.DupFingerprint(inv) || !h.AcceptedAt.Equal(later) || snapshotTitle(t, h) != inv.Title {
 		t.Fatalf("ref %+v, inner %d, %+v", ref, inner.calls, h)
 	}
-	if len(h.Generations) != 1 || h.Generations[0].Outcome() != "held" {
-		t.Fatalf("the generations are kept: %+v", h.Generations)
+	if len(h.Generations) != 0 {
+		t.Fatalf("a held generation of the recall is not this incident's: %+v", h.Generations)
 	}
 }
 

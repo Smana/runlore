@@ -400,3 +400,46 @@ func TestVerifierLogsSoakVerdictAndEarlyReturn(t *testing.T) {
 		t.Fatalf("early return not logged: %s", out)
 	}
 }
+
+// I3: the re-investigation can take minutes, and a 201 can start the next generation meanwhile.
+func TestVerifierWritesToItsOwnFixRoomsGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		code         int
+		wantVerdict  string
+		wantArchived bool
+	}{
+		{name: "a verdict lands on the archive", code: 201, wantVerdict: "resolved", wantArchived: true},
+		{name: "a refusal leaves the next generation alone", code: 409},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newVerifierRig(t, tc.code)
+			must(t, r.ledger.Upsert("k1", func(rec *Record) { rec.SoakUntil, rec.Curation = r.now, &Hold{Fingerprint: "fp"} }))
+			r.v.Reinvestigate = func(context.Context, Record) (Findings, error) {
+				must(t, r.ledger.Upsert("k1", func(rec *Record) {
+					rec.startGeneration(false)
+					rec.Room = "room0002"
+				}))
+				return Findings{Text: "t", Cause: "c"}, nil
+			}
+			r.v.Once(ctx)
+			rec, _ := r.ledger.Get("k1")
+			if rec.Verdict != "" || rec.Evidence != "" || rec.Outcome != "" {
+				t.Fatalf("the next generation was written: %+v", rec)
+			}
+			g := rec.Curation.Generations[0]
+			if g.FixRoom != "fixt0001" || g.Verdict != tc.wantVerdict || (g.Evidence != "") != tc.wantArchived {
+				t.Fatalf("%+v", g)
+			}
+		})
+	}
+}
+
+func TestVerifierWritesTheCurrentGenerationWithNoHold(t *testing.T) {
+	r := newVerifierRig(t, 201)
+	must(t, r.ledger.Upsert("k1", func(rec *Record) { rec.SoakUntil = r.now }))
+	r.v.Once(ctx)
+	if rec, _ := r.ledger.Get("k1"); rec.Verdict != "resolved" || rec.Evidence == "" {
+		t.Fatalf("%+v", rec)
+	}
+}

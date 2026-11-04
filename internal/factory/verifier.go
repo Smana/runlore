@@ -182,7 +182,7 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 		line := EvidenceLine(rec.FiringAtMerge, firing, ev.Cause)
 		delete(v.evidence, rec.TriggerKey)
 		v.log().Info("factory verifier: verdict posted", "key", rec.TriggerKey, "alert", rec.Alert, "verdict", verdict, "status", status, "reason", reason)
-		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.Verdict, r.Evidence = verdict, line }); err != nil {
+		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.recordVerdict(rec.FixRoom, verdict, line) }); err != nil {
 			v.log().Error("factory verifier: recording the verdict failed", "err", err)
 			return
 		}
@@ -199,7 +199,12 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 		if reason == "" {
 			outcome = fmt.Sprintf("http_%d", status)
 		}
-		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.Outcome = outcome }); err != nil {
+		// An archived generation is soaked no more, so only the current one needs the outcome.
+		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) {
+			if r.FixRoom == rec.FixRoom {
+				r.Outcome = outcome
+			}
+		}); err != nil {
 			v.log().Error("factory verifier: recording the outcome failed", "err", err)
 			return
 		}
