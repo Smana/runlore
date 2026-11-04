@@ -56,6 +56,10 @@ func TestVerifyIsAnObservation(t *testing.T) {
 			t.Fatal("reload and compaction keep the observations")
 		}
 	}
+	// The compacted file is what a later start replays: read it back from the checkpoint.
+	if fresh := mustNew(t, p); factor(fresh) != 0.25 || fresh.Verifications()["fpA"] {
+		t.Fatal("a reopen after compaction keeps the observations")
+	}
 	must(t, l.Feedback("k1", "down", "U1", at))
 	const url = "https://github.com/Smana/runlore-kb/pull/164"
 	if must(t, l.Link("k1", url, at)); l.ContestedTriggers()[0].CuratedURL != url {
@@ -69,6 +73,9 @@ func TestVerifyIsAnObservation(t *testing.T) {
 		if got := again.ContestedTriggers(); len(got) != 1 || got[0].CuratedURL != url {
 			t.Fatal("reload and compaction keep the link")
 		}
+	}
+	if got := mustNew(t, p).ContestedTriggers(); len(got) != 1 || got[0].CuratedURL != url {
+		t.Fatalf("a reopen after compaction keeps the link: %+v", got)
 	}
 }
 
