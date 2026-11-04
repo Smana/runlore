@@ -158,7 +158,7 @@ func queueLine(cfg *config.Config, dryRun bool, log *slog.Logger) providers.Line
 // not become a typed-nil interface.
 func buildQueueIssue(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, line providers.LineNotifier, log *slog.Logger) curate.QueueIssue {
 	refresh := buildRefresh(cfg, forge, ledger, log)
-	q := curate.QueueIssue{Forge: forge, Line: line, KBRepo: cfg.Forge.KBRepo, Refresh: &refresh, Log: log}
+	q := curate.QueueIssue{Forge: forge, Line: line, KBRepo: cfg.Forge.KBRepo, Refresh: &refresh, ScreenEntries: cfg.Factory.Curation.Defer, Log: log}
 	if ledger != nil {
 		q.Evidence, q.Stats = ledger, ledger
 		q.Reconcile = buildQueue(cfg, forge, ledger, log)
@@ -211,7 +211,7 @@ func buildGuardedForge(cfg *config.Config, tok ForgeToken, dryRun bool, aud audi
 	if base == "" {
 		base = "main"
 	}
-	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
+	client := newKBClient(cfg, owner, repo, base, github.TokenFunc(tok))
 	return curate.Guard{Inner: client, DryRun: dryRun, Audit: aud, Log: log}, nil
 }
 

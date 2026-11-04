@@ -1445,6 +1445,11 @@ func CloudPreflightDenied(err error) bool { return errors.Is(err, ErrCloudPrefli
 // Providers wrap it; callers ask via CloudPreflightDenied.
 var ErrCloudPreflightDenied = errors.New("cloud preflight denied")
 
+// ErrEntryUnscreenable says, for certain, that a PR's entry cannot be screened: not one entry, a path
+// no writer makes, too large to read, or named by the PR and absent from its head. Any other read
+// failure says nothing about the entry and is worth retrying.
+var ErrEntryUnscreenable = errors.New("entry cannot be screened")
+
 // AWSCloudVocabulary is the AWS wording, and the fallback for any CloudProvider that
 // does not implement CloudDescriber.
 //

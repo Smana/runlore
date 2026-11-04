@@ -40,6 +40,9 @@ func (f *recordingForge) ReplaceLabel(_ context.Context, n int, _, add string) e
 	return nil
 }
 func (f *recordingForge) Close(context.Context, int) error { return nil }
+func (f *recordingForge) PREntryText(context.Context, int) ([]byte, error) {
+	return []byte("clean"), nil
+}
 func (f *recordingForge) OpenIssue(context.Context, providers.Investigation) (providers.Ref, error) {
 	return providers.Ref{}, nil
 }
@@ -199,6 +202,14 @@ type queueForge struct {
 	calls    []string
 	failList string // ListPRsByLabel fails for this label
 	failN    int    // ReplaceLabel fails for this PR
+	entries  map[int]string
+	readErr  error
+	reads    int
+}
+
+func (f *queueForge) PREntryText(_ context.Context, n int) ([]byte, error) {
+	f.reads++
+	return []byte(f.entries[n]), f.readErr
 }
 
 func (f *queueForge) ListPRsByLabel(_ context.Context, label string) ([]providers.CuratedIssue, error) {
@@ -384,7 +395,7 @@ func TestQueueOnVerifiedEvidence(t *testing.T) {
 			}
 			if tc.wantRisks != nil {
 				contested := map[int]bool{7: tc.contested}
-				if got := Risks(pr, contested, tc.verified); !slices.Equal(got, tc.wantRisks) {
+				if got := Risks(pr, contested, tc.verified, nil); !slices.Equal(got, tc.wantRisks) {
 					t.Errorf("Risks = %v, want %v", got, tc.wantRisks)
 				}
 			}

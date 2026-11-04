@@ -13,8 +13,10 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -133,12 +135,21 @@ func requireRunLorePR(number int, pr prHead) error {
 
 // prEntryPath names the one catalog entry a pull request changes.
 func (c *Client) prEntryPath(ctx context.Context, number int) (string, error) {
+	path, _, err := c.prEntryFile(ctx, number)
+	return path, err
+}
+
+// prEntryFile names the one catalog entry a pull request changes, and its status in the PR ("added",
+// "modified", "removed", ...). A failed listing is a plain error; a listing that does not name one
+// entry is providers.ErrEntryUnscreenable.
+func (c *Client) prEntryFile(ctx context.Context, number int) (path, status string, err error) {
 	var files []struct {
 		Filename string `json:"filename"`
+		Status   string `json:"status"`
 	}
 	if err := c.do(ctx, http.MethodGet,
 		fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=%d", c.owner, c.repo, number, prFilesPerPage), nil, &files); err != nil {
-		return "", err
+		return "", "", err
 	}
 	// A FULL page means one of two things, and neither permits a write: either
 	// this is not a RunLore curation pull request (they change at most three
@@ -147,7 +158,7 @@ func (c *Client) prEntryPath(ctx context.Context, number int) (string, error) {
 	// changed paths with no way to know it did. "The one .md on page 1" is not a
 	// fact about the pull request, so it is not a file to rewrite.
 	if len(files) >= prFilesPerPage {
-		return "", fmt.Errorf("github PR %d: %d changed files in one page; the listing may be truncated, refusing to pick an entry from it", number, len(files))
+		return "", "", fmt.Errorf("github PR %d: %d changed files in one page; the listing may be truncated, refusing to pick an entry from it: %w", number, len(files), providers.ErrEntryUnscreenable)
 	}
 	changed := make([]string, 0, len(files))
 	for _, f := range files {
@@ -155,9 +166,14 @@ func (c *Client) prEntryPath(ctx context.Context, number int) (string, error) {
 	}
 	entry, err := okf.EntryFile(changed)
 	if err != nil {
-		return "", fmt.Errorf("github PR %d: %w", number, err)
+		return "", "", fmt.Errorf("github PR %d: %w: %w", number, err, providers.ErrEntryUnscreenable)
 	}
-	return entry, nil
+	for _, f := range files {
+		if f.Filename == entry {
+			status = f.Status
+		}
+	}
+	return entry, status, nil
 }
 
 // PREntry reads a pull request's state ("open", "merged", or "closed" when it
@@ -179,6 +195,59 @@ func (c *Client) PREntry(ctx context.Context, number int) (providers.PREntry, er
 		return providers.PREntry{}, err
 	}
 	return providers.PREntry{Path: path, State: state}, nil
+}
+
+// screenablePath is a path RunLore's writers make (entryPath: a type's directory and a slug), the only
+// kind the threat check reads. A name with "#", "?" or "%" reached the contents API as another file's
+// before getFile escaped it; it is refused too, since no writer makes one and nothing good carries one.
+var screenablePath = regexp.MustCompile(`^(?:incidents|playbooks|concepts)/[A-Za-z0-9._-]+\.md$`)
+
+func entryPathScreenable(path string) bool {
+	return screenablePath.MatchString(path) && !strings.Contains(path, "..")
+}
+
+// PREntryText reads the one catalog entry a pull request carries, as it stands at the head. It is
+// read-only and does not ask whose PR it is, since the Queue screens every PR it may label.
+//
+// providers.ErrEntryUnscreenable marks what is certain and will not change on a retry: not one entry,
+// a path no writer makes, too large to read, or a 404 on a file the PR's own list says it adds or
+// changes, with the head unmoved. Everything else says nothing about the entry and is a plain error:
+// a 5xx, a 429, a 404 on the PR or its list, a 404 on a file the PR removes, a head that moved during
+// these reads.
+func (c *Client) PREntryText(ctx context.Context, number int) ([]byte, error) {
+	pr, err := c.readPR(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	path, status, err := c.prEntryFile(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if !entryPathScreenable(path) {
+		return nil, fmt.Errorf("github PR %d: no writer makes this entry path: %w", number, providers.ErrEntryUnscreenable)
+	}
+	raw, _, found, err := c.getFile(ctx, path, pr.headSHA)
+	if errors.Is(err, errNotBase64) {
+		return nil, fmt.Errorf("github PR %d: %w: %w", number, providers.ErrEntryUnscreenable, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		return raw, nil
+	}
+	missing := fmt.Errorf("github PR %d: %s is not on head %s", number, path, pr.headSHA)
+	if status == "removed" {
+		return nil, missing
+	}
+	now, err := c.readPR(ctx, number)
+	if err != nil {
+		return nil, fmt.Errorf("%w; and re-reading the head: %w", missing, err)
+	}
+	if now.headSHA != pr.headSHA {
+		return nil, fmt.Errorf("%w; the head moved to %s", missing, now.headSHA)
+	}
+	return nil, fmt.Errorf("%w: %w", missing, providers.ErrEntryUnscreenable)
 }
 
 // editEntryOnPR is the shared read-edit-put. ownOnly makes it refuse a pull request
@@ -248,10 +317,14 @@ func (c *Client) editEntryOnPR(ctx context.Context, number int, ownOnly bool, me
 	}
 	// A push is new content the label was not earned on: Maku's merge gate checks
 	// who labelled, not when, so a label on the old head would stand on the new one.
-	// A failed removal stops the push; a label already gone (404) does not.
-	if slices.Contains(pr.labels, "ready-to-merge") {
-		if err := c.ReplaceLabel(ctx, number, "ready-to-merge", ""); err != nil {
-			return false, fmt.Errorf("github PR %d: removing ready-to-merge before the push: %w", number, err)
+	// A failed removal stops the push; a label already gone (404) does not. accepted goes too where
+	// it skips a screen of the text a human read: this push is text no human has.
+	for _, label := range []string{"ready-to-merge", "accepted"} {
+		if !slices.Contains(pr.labels, label) || (label == "accepted" && !c.RevokeAcceptedOnEdit) {
+			continue
+		}
+		if err := c.ReplaceLabel(ctx, number, label, ""); err != nil {
+			return false, fmt.Errorf("github PR %d: removing %s before the push: %w", number, label, err)
 		}
 	}
 

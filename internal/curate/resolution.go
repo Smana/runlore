@@ -34,10 +34,13 @@ const (
 // With Evidence set, an open entry PR also becomes ready-to-merge when its fix's
 // latest observation held, and the label is what the merge gate trusts: a risk other
 // than unverified, or a latest observation that failed, keeps it off solved+resolved
-// PRs too and withdraws it from a labelled PR. accepted stays a human override.
+// PRs too and withdraws it from a labelled PR. accepted stays a human override. One such
+// risk is the threat check on the PR's entry at its head, which accepted skips: a human has
+// read the entry, and RunLore's own later write takes accepted off. A hit withholds and
+// withdraws; a failed read adds no label, leaves one, and is retried.
 // Entry edits (isEntryEditProposal) stay a human merge and are never candidates.
 type Queue struct {
-	Forge    Forge
+	Forge    QueueForge
 	Checker  ResolutionChecker // nil: nothing is promoted on resolution alone (Evidence set only)
 	Evidence Evidence
 	KBRepo   string // forge.kb_repo ("owner/name"), which contested KB links must name; Evidence set only
@@ -134,21 +137,29 @@ func (q Queue) applyEvidence(ctx context.Context, pr providers.CuratedIssue, con
 	if isEntryEditProposal(pr.Labels) {
 		return nil
 	}
-	flagged := slices.ContainsFunc(Risks(pr, contested, verified), func(r Risk) bool { return r != RiskUnverified })
 	held, observed := verified[providers.ParseFingerprintMarker(pr.Body)]
 	failed := observed && !held
 	accepted := slices.Contains(pr.Labels, acceptedLabel)
 	solved := slices.Contains(pr.Labels, solvedLabel)
+	ready := slices.Contains(pr.Labels, readyLabel)
+	var threats []string
+	var readErr error
+	if ready || held || solved { // the rest has nothing to earn the label with, so no read is spent on it
+		threats, readErr = entryThreats(ctx, q.Forge, q.Log, pr)
+	}
+	flagged := slices.ContainsFunc(Risks(pr, contested, verified, threats), func(r Risk) bool { return r != RiskUnverified })
 	switch {
-	case slices.Contains(pr.Labels, readyLabel):
+	case ready:
 		if accepted || !flagged && !failed {
-			return nil
+			return readErr // a failed read keeps the label: only a definite hit withdraws it
 		}
 		return q.withdraw(ctx, pr.Number)
 	case solved && accepted:
 		return q.enqueue(ctx, pr.Number, "human-accepted")
 	case flagged || failed:
 		return nil
+	case readErr != nil:
+		return readErr
 	case held:
 		return q.enqueue(ctx, pr.Number, "verified")
 	case solved && q.Checker != nil:

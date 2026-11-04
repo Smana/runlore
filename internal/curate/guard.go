@@ -29,6 +29,7 @@ type GuardedForge interface {
 	ResolveForge
 	QueueIssueForge
 	RefreshForge
+	EntryReader
 }
 
 // ResolveForge is what recording a verified resolution needs: the entry a PR
@@ -46,6 +47,7 @@ type QueueIssueForge interface {
 	ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
 	ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
 	ListMergedPRsByLabel(ctx context.Context, label string, since time.Time) ([]providers.CuratedIssue, error)
+	EntryReader
 	CreateIssue(ctx context.Context, title, body string, labels []string) (int, providers.Ref, error)
 	EditIssue(ctx context.Context, number int, body string) error
 }
@@ -91,6 +93,11 @@ func (g Guard) IsPROpen(ctx context.Context, number int) (bool, error) {
 // PREntry passes through to the wrapped forge.
 func (g Guard) PREntry(ctx context.Context, number int) (providers.PREntry, error) {
 	return g.Inner.PREntry(ctx, number)
+}
+
+// PREntryText passes through to the wrapped forge.
+func (g Guard) PREntryText(ctx context.Context, number int) ([]byte, error) {
+	return g.Inner.PREntryText(ctx, number)
 }
 
 // ListMergedPRsByLabel passes through to the wrapped forge.

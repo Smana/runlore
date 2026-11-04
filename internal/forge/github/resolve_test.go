@@ -4,10 +4,12 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -273,4 +275,194 @@ func TestRefusesAPRThatIsNotRunLores(t *testing.T) {
 	if pe, err := s.start(t).PREntry(ctx, 84); err != nil || pe.State != "open" {
 		t.Fatal(pe, err)
 	}
+}
+
+func TestPREntryText(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("the entry at the head"))
+	type stub struct {
+		pull, files, contents string // "" : 404
+		filesStatus           int
+		contentsStatus        int
+		movedHead             bool // the second read of the PR names another head
+	}
+	serve := func(t *testing.T, st stub) *Client {
+		t.Helper()
+		pulls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/repos/o/r/pulls/84":
+				pulls++
+				if st.pull == "" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if st.movedHead && pulls > 1 {
+					_, _ = w.Write([]byte(`{"state":"open","head":{"ref":"someone/branch","sha":"newhead"}}`))
+					return
+				}
+				_, _ = w.Write([]byte(st.pull))
+			case "/repos/o/r/pulls/84/files":
+				if st.filesStatus != 0 {
+					w.WriteHeader(st.filesStatus)
+					return
+				}
+				_, _ = w.Write([]byte(st.files))
+			case "/repos/o/r/contents/incidents/a.md":
+				if st.contentsStatus != 0 {
+					w.WriteHeader(st.contentsStatus)
+					return
+				}
+				if r.URL.Query().Get("ref") != "headsha" || st.contents == "" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(st.contents))
+			default:
+				t.Errorf("unexpected %s", r.URL.RequestURI())
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return New(srv.URL, "o", "r", "main", staticToken("tok"))
+	}
+	pull := `{"state":"open","head":{"ref":"someone/branch","sha":"headsha"}}`
+	one := `[{"filename":"index.md","status":"modified"},{"filename":"log.md","status":"modified"},{"filename":"incidents/a.md","status":"added"}]`
+	file := `{"sha":"blob","encoding":"base64","content":"` + encoded + `"}`
+
+	t.Run("the entry, at the PR's head, whoever opened it", func(t *testing.T) {
+		got, err := serve(t, stub{pull: pull, files: one, contents: file}).PREntryText(context.Background(), 84)
+		if err != nil || string(got) != "the entry at the head" {
+			t.Fatal(string(got), err)
+		}
+	})
+	for _, dir := range []string{"incidents", "playbooks", "concepts"} {
+		t.Run("a path a writer makes: "+dir, func(t *testing.T) {
+			if !entryPathScreenable(dir + "/a-b_c.1.md") {
+				t.Fatal("real path refused")
+			}
+		})
+	}
+	for name, tc := range map[string]struct {
+		st       stub
+		definite bool
+	}{
+		"two entries":                {stub{pull: pull, files: `[{"filename":"incidents/a.md"},{"filename":"incidents/b.md"}]`, contents: file}, true},
+		"no entry":                   {stub{pull: pull, files: `[{"filename":"index.md"}]`, contents: file}, true},
+		"listed, absent at head":     {stub{pull: pull, files: one}, true},
+		"too large to read":          {stub{pull: pull, files: one, contents: `{"sha":"blob","encoding":"none","content":""}`}, true},
+		"a hostile # in the path":    {stub{pull: pull, files: `[{"filename":"incidents/clean.md#x.md"}]`}, true},
+		"a hostile ? in the path":    {stub{pull: pull, files: `[{"filename":"incidents/clean.md?ref=main&y=.md"}]`}, true},
+		"a hostile % in the path":    {stub{pull: pull, files: `[{"filename":"incidents/cl%65an.md"}]`}, true},
+		"a traversal":                {stub{pull: pull, files: `[{"filename":"incidents/../a.md"}]`}, true},
+		"a path outside the types":   {stub{pull: pull, files: `[{"filename":"a.md"}]`}, true},
+		"the PR read fails":          {stub{pull: `not json`, files: one, contents: file}, false},
+		"the PR is not found":        {stub{files: one, contents: file}, false},
+		"the file list 5xx":          {stub{pull: pull, filesStatus: http.StatusInternalServerError}, false},
+		"the file list 404":          {stub{pull: pull, filesStatus: http.StatusNotFound}, false},
+		"the contents 5xx":           {stub{pull: pull, files: one, contentsStatus: http.StatusBadGateway}, false},
+		"the contents 429":           {stub{pull: pull, files: one, contentsStatus: http.StatusTooManyRequests}, false},
+		"a 404 while the head moves": {stub{pull: pull, files: one, movedHead: true}, false},
+		"a 404 on a removed file":    {stub{pull: pull, files: `[{"filename":"incidents/a.md","status":"removed"}]`}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := serve(t, tc.st).PREntryText(context.Background(), 84)
+			if err == nil {
+				t.Fatal("a read that says nothing about the entry must fail: ", string(got))
+			}
+			if errors.Is(err, providers.ErrEntryUnscreenable) != tc.definite {
+				t.Fatalf("definite = %v, want %v: %v", errors.Is(err, providers.ErrEntryUnscreenable), tc.definite, err)
+			}
+		})
+	}
+}
+
+// A path is one path: a "#", "?" or "%" of the name reaches the contents API as part of it.
+func TestFilePathIsEscaped(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Method+" "+r.URL.EscapedPath()+" ref="+r.URL.Query().Get("ref"))
+		if r.Method == http.MethodPut {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	ctx := context.Background()
+	if _, _, found, err := c.getFile(ctx, "incidents/cl%65an.md#x?.md", "runlore/a&b"); err != nil || found {
+		t.Fatal(found, err)
+	}
+	if err := c.putFile(ctx, "incidents/a b.md", "b", "", "m", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"GET /repos/o/r/contents/incidents/cl%2565an.md%23x%3F.md ref=runlore/a&b",
+		"PUT /repos/o/r/contents/incidents/a%20b.md ref=",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// Text a human accepted is not the text after RunLore's own later write, so with RevokeAcceptedOnEdit
+// accepted goes with the push, under the same rule as ready-to-merge: no removal, no push. Without it,
+// which is an install where accepted alone earns the label, it stays.
+func TestEditAndAccepted(t *testing.T) {
+	ctx := context.Background()
+	edit := func(raw []byte) ([]byte, bool, error) { return append(raw, " edited"...), true, nil }
+	start := func(t *testing.T, s *stubPR, revoke bool) *Client {
+		t.Helper()
+		c := s.start(t)
+		c.RevokeAcceptedOnEdit = revoke
+		return c
+	}
+	for name, tc := range map[string]struct {
+		revoke bool
+		labels []string
+		want   string
+	}{
+		"revoke: both labels, then the push": {true, []string{"runlore", "ready-to-merge", "accepted"}, "DELETE ready-to-merge,DELETE accepted,PUT"},
+		"keep: accepted stays":               {false, []string{"runlore", "ready-to-merge", "accepted"}, "DELETE ready-to-merge,PUT"},
+		"keep: alone, no call":               {false, []string{"runlore", "accepted"}, "PUT"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &stubPR{labels: tc.labels}
+			if _, err := start(t, s, tc.revoke).EditEntryOnPR(ctx, 84, "m", edit); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(s.calls, ","); got != tc.want {
+				t.Fatalf("calls = %s, want %s", got, tc.want)
+			}
+		})
+	}
+	for name, tc := range map[string]struct {
+		revoke bool
+		want   string
+	}{
+		"revoke: a thread note is a push too": {true, "DELETE accepted,PUT"},
+		"keep: a thread note leaves it":       {false, "PUT"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &stubPR{labels: []string{"runlore", "accepted"}}
+			if err := start(t, s, tc.revoke).AppendToEntryOnPR(ctx, 84, "### note\n\nhi", "k1"); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(s.calls, ","); got != tc.want {
+				t.Fatalf("calls = %s, want %s", got, tc.want)
+			}
+		})
+	}
+	t.Run("revoke: a failed removal stops the push", func(t *testing.T) {
+		s := &stubPR{labels: []string{"runlore", "accepted"}, deleteStatus: http.StatusInternalServerError}
+		if _, err := start(t, s, true).EditEntryOnPR(ctx, 84, "m", edit); err == nil || slices.Contains(s.calls, "PUT") {
+			t.Fatal(err, s.calls)
+		}
+	})
+	t.Run("revoke: an edit that changes nothing keeps it", func(t *testing.T) {
+		s := &stubPR{labels: []string{"runlore", "accepted"}}
+		if _, err := start(t, s, true).EditEntryOnPR(ctx, 84, "m", func(raw []byte) ([]byte, bool, error) { return raw, false, nil }); err != nil || len(s.calls) != 0 {
+			t.Fatal(err, s.calls)
+		}
+	})
 }
