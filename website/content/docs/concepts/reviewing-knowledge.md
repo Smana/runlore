@@ -380,30 +380,43 @@ hand does not stick: the next sweep or verification puts it back while the evide
 to hold a PR back, label it `security` or 👎 it.
 
 **The threat check.** Entries quote logs and alert labels and every factory agent reads them, so a
-crafted log line could become a stored injection. With `factory.curation.defer` on, whenever a PR
-could earn or holds `ready-to-merge`, and for each row of Decide, RunLore reads the PR's entry at its
-head and runs a deterministic, offline check over the whole text, frontmatter included. No model is
-called: a model is what the text would attack. Each rule has a name:
+crafted log line could become a stored injection. With `factory.curation.defer` on, at each Queue
+pass and each verification, for a PR that could earn or holds `ready-to-merge`, and at each rewrite,
+for each row of Decide, RunLore reads the PR's entry at its head and runs a deterministic, offline
+check. It reads the whole text and, because readers get them decoded, every frontmatter value. No
+model is called: a model is what the text would attack. Each rule has a name:
 
 | Rule | What it looks for |
 |---|---|
-| `chat-markup` | Chat or role markup: `<\|im_start\|>`, `[INST]`, `<system>`, `</tool_result>`, `<function_calls>`, a line beginning `system:` or `assistant:` |
-| `instruction-override` | "ignore previous instructions" and close variants, "you are now", "disregard the above", "do not tell the user", in any case and spacing |
-| `hidden-character` | Unicode format characters and control characters other than tab and newline, anywhere |
-| `encoded-payload` | A long base64 or hex run outside a code span, unless it has the shape of a SHA or digest |
-| `exfiltration` | `curl ... \| sh`, a pipe to a shell, `gh auth token`, reading a credentials path |
+| `chat-markup` | Chat or role markup, spaced or split across lines: `<\|im_start\|>`, `[INST]`, `<system>`, `</tool_result>`, `<function_calls>`, `{"role":"system"}`, a turn opening `system:` or `assistant:` |
+| `instruction-override` | "ignore previous instructions" and common variants, "you are now", "disregard the above", "do not tell the user", after folding case, spacing, markdown emphasis and `_` or `-` between words |
+| `hidden-character` | Unicode format, private-use and control characters other than tab and newline, anywhere |
+| `encoded-payload` | Outside a code span: a long base64 or hex run without a SHA's length, or a shorter base64, hex or `\x` run that decodes to what another rule catches |
+| `exfiltration` | `curl ... \| sh`, a pipe to a shell, `gh auth token`, a command reading a credentials path such as `~/.aws/credentials`, `/run/secrets/...` or `/etc/shadow` |
+| `malformed-frontmatter` | Frontmatter that does not parse, so its values cannot be read |
 
 A hit keeps `ready-to-merge` off, withdraws it from a labelled PR, and lists the PR in Decide as
 `threat: <rule>`. That row names the PR by number and carries only the rule's name, never the title,
-the evidence or the matched text; open the PR to read the entry. An entry that cannot be read counts
-as a hit, `threat: entry-unreadable`, and the next pass reads it again. The check never edits or
-closes a PR, and blocks nothing a human decides: for a false positive, label the PR `accepted`, which
-skips the check for as long as the label stands, or merge it yourself. A rule that fires costs a
-human look, not an entry.
+the evidence or the matched text; open the PR to read the entry. An entry that certainly cannot be
+screened counts as a hit, `threat: entry-unreadable`: not exactly one entry, a path outside
+`incidents/`, `playbooks/` and `concepts/` or with unusual characters, a file too large to read, or a
+file the PR lists that is absent from its head. Any other read failure (a 5xx, a 429) says nothing
+about the entry: no label is added, a label already there stays, and the read is retried. In Decide
+such a row also reads `threat: entry-unreadable` until the next rewrite, since its text is unknown.
+
+The check never edits or closes a PR, and blocks nothing a human decides: for a false positive, label
+the PR `accepted`, which skips the check for as long as the label stands, or merge it yourself. When
+RunLore writes to the PR again (a resolution, a thread note) it removes `accepted` along with
+`ready-to-merge`, since a human has not read that text: apply it again if the new text is fine. A rule
+that fires costs a human look, not an entry.
 
 It is a screen for obvious injection, not a proof of safety. Rewording, another language, lookalike
-letters or a payload inside a code span all pass it. The real boundary stays that every reader
-receives entries as quoted data. Without `defer` the check does not run.
+letters, percent-encoding, base64 spaced in groups, or a payload inside a code span all pass it. It
+does not read the PR's title and card, or `index.md` and `log.md`. It runs at a pass, so `ready-to-merge`
+is not bound to a head: a push after a pass stands unscreened until the next one, which an adopter's own
+automation on that label must allow for. The intended boundary is that every reader receives entries
+as quoted data (RK11), which this check does not establish. Without `defer` the check does not run,
+and nothing changes for that install.
 
 **Conflicts.** Each merged entry appends to `index.md` and `log.md`, so one merge can make every
 other open entry PR conflict. Rebuilding one costs six writes and a CI run and restarts its stale

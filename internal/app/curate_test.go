@@ -157,6 +157,26 @@ func TestBuildCurateAgentWiresTheQueuesEvidence(t *testing.T) {
 // The Queue's rebuild force-pushes, so it comes with factory.curation.defer ("off by default"), and
 // the agent's Queue has no Promote: Queue.Run lists right after. The queue issue and the command
 // promote through a Queue over the same forge, once there is a ledger to read.
+func TestQueueIssueScreensUnderDeferOnly(t *testing.T) {
+	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Forge.KBRepo = "acme/kb"
+	if q := buildQueueIssue(cfg, forge, ledger, nil, discardLog()); q.ScreenEntries || q.Evidence == nil {
+		t.Fatalf("defer off, with a ledger: Evidence for the rows, and no threat check: %+v", q)
+	}
+	if q := buildQueueIssue(cfg, forge, nil, nil, discardLog()); q.ScreenEntries {
+		t.Fatal("defer off, no ledger: no threat check")
+	}
+	cfg.Factory.Curation.Defer = true
+	if q := buildQueueIssue(cfg, forge, ledger, nil, discardLog()); !q.ScreenEntries {
+		t.Fatal("defer on: the threat check runs")
+	}
+}
+
 func TestRefreshWiring(t *testing.T) {
 	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
 	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))

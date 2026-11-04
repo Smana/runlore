@@ -4,6 +4,7 @@ package curate
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"strings"
@@ -80,25 +81,33 @@ func Risks(pr providers.CuratedIssue, contested map[int]bool, verified map[strin
 	return risks
 }
 
-// ruleEntryUnreadable names a threat that is no rule of the check: the entry could not be read.
+// ruleEntryUnreadable names a threat that is no rule of the check: the entry could not be screened.
 const ruleEntryUnreadable = "entry-unreadable"
 
 // entryThreats runs the threat check on the entry pr carries at its head, and returns the rules it
-// broke. A human's accepted label is the override, so an accepted PR is not read. An entry that
-// cannot be read is withheld too: the check fails closed. What is logged is the rules' names, never
-// the text they matched.
-func entryThreats(ctx context.Context, f EntryReader, log *slog.Logger, pr providers.CuratedIssue) []string {
+// broke. A human's accepted label is the override, so an accepted PR is not read. What is logged is
+// the rules' names, never the text they matched.
+//
+// An entry that certainly cannot be screened (providers.ErrEntryUnscreenable) is a hit. Any other
+// read failure says nothing about the entry, so it comes back as an error: the caller grants nothing
+// on it, takes nothing away for it, and tries again. A missing label is terminal at Maku's merge gate
+// (label_missing), so one 5xx must not hand off every labelled PR.
+func entryThreats(ctx context.Context, f EntryReader, log *slog.Logger, pr providers.CuratedIssue) ([]string, error) {
 	if slices.Contains(pr.Labels, acceptedLabel) {
-		return nil
+		return nil, nil
 	}
 	text, err := f.PREntryText(ctx, pr.Number)
-	if err != nil {
-		log.Warn("threat check: the entry could not be read, so it is withheld", "pr", pr.Number, "rules", ruleEntryUnreadable, "err", err)
-		return []string{ruleEntryUnreadable}
+	switch {
+	case errors.Is(err, providers.ErrEntryUnscreenable):
+		log.Warn("threat check: the entry cannot be screened, so it is withheld", "pr", pr.Number, "rules", ruleEntryUnreadable, "err", err)
+		return []string{ruleEntryUnreadable}, nil
+	case err != nil:
+		log.Warn("threat check: the entry could not be read; no label added, none removed, retried", "pr", pr.Number, "err", err)
+		return nil, err
 	}
 	rules := threatcheck.Check(string(text))
 	if len(rules) > 0 {
 		log.Warn("threat check: the entry is withheld", "pr", pr.Number, "rules", strings.Join(rules, ","))
 	}
-	return rules
+	return rules, nil
 }

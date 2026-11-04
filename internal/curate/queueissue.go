@@ -53,7 +53,10 @@ func parseQueueMarker(body string) (time.Time, bool) {
 type QueueIssue struct {
 	Forge    QueueIssueForge
 	Evidence Evidence // nil: every PR reads as unverified
-	Stats    interface {
+	// ScreenEntries runs the threat check on each row's entry, under factory.curation.defer only. A
+	// field of its own: without defer, a ledger still sets Evidence for contested and verified.
+	ScreenEntries bool
+	Stats         interface {
 		Measures(time.Time) (outcome.Measures, error)
 	} // nil: Measures says the ledger is not configured
 	// Reconcile, when set, is the Queue pass, run before the refresh, so a 👎 since the last sweep
@@ -204,7 +207,7 @@ type decideRow struct {
 
 // decide lists the open entry PRs not labelled ready-to-merge, riskiest first and oldest first within
 // a risk. Retire, revalidate and resolve PRs are entry edits, never rows. refused holds the PRs the
-// refresh would not rebuild. With Evidence set, each row's entry goes through the threat check.
+// refresh would not rebuild. With ScreenEntries, each row's entry goes through the threat check.
 func (q QueueIssue) decide(ctx context.Context, refused map[int]string) ([]decideRow, error) {
 	prs, err := q.Forge.ListPRsByLabel(ctx, runloreLabel)
 	if err != nil {
@@ -225,8 +228,12 @@ func (q QueueIssue) decide(ctx context.Context, refused map[int]string) ([]decid
 		}
 		row := decideRow{pr: pr, risk: "verified", rank: math.MaxInt, created: pr.CreatedAt}
 		var threats []string
-		if q.Evidence != nil {
-			threats = entryThreats(ctx, q.Forge, q.Log, pr)
+		if q.ScreenEntries {
+			var readErr error
+			// An unread entry is withheld like a hit: a row is no label, and it may hold anything.
+			if threats, readErr = entryThreats(ctx, q.Forge, q.Log, pr); readErr != nil {
+				threats = []string{ruleEntryUnreadable}
+			}
 		}
 		risks := Risks(pr, contested, verified, threats)
 		if _, ok := refused[pr.Number]; ok {

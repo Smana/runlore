@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -33,6 +34,8 @@ func TestQueueThreat(t *testing.T) {
 		wantCalls  []string
 		wantReads  int
 		wantLog    []string
+		// wantPromoteErr: PromoteOne returns the failure for the caller to retry, keeping PromoteDue.
+		wantPromoteErr bool
 	}{
 		{name: "a clean, held PR gets the label", labels: []string{"runlore"}, verified: held, entry: "clean", wantCalls: []string{add}, wantReads: 1},
 		{
@@ -45,12 +48,28 @@ func TestQueueThreat(t *testing.T) {
 		},
 		{name: "a labelled, clean PR keeps it", labels: []string{"runlore", "ready-to-merge"}, verified: held, entry: "clean", wantReads: 1},
 		{
-			name: "an unreadable entry withholds the label", labels: []string{"runlore"}, verified: held, readErr: errors.New("forge down"), wantReads: 1,
-			wantLog: []string{"forge down", ruleEntryUnreadable},
+			name: "a read failure adds no label", labels: []string{"runlore"}, verified: held, readErr: errors.New("forge down"), wantReads: 1,
+			wantLog: []string{"forge down"}, wantPromoteErr: true,
 		},
 		{
-			name: "an unreadable entry withdraws the label", labels: []string{"runlore", "ready-to-merge"}, verified: held, readErr: errors.New("forge down"),
-			wantCalls: []string{drop}, wantReads: 1, wantLog: []string{"reason=evidence-withdrawn"},
+			name: "a read failure leaves a label", labels: []string{"runlore", "ready-to-merge"}, verified: held, readErr: errors.New("forge down"), wantReads: 1,
+			wantLog: []string{"forge down"}, wantPromoteErr: true,
+		},
+		{
+			name: "a read failure does not hold back another risk's withdrawal", labels: []string{"runlore", "ready-to-merge", "security"}, verified: held, readErr: errors.New("forge down"),
+			wantCalls: []string{drop}, wantReads: 1,
+		},
+		{
+			name: "a read failure on a solved, resolved PR adds no label", labels: []string{"runlore", "solved"}, resolved: true, readErr: errors.New("forge down"), wantReads: 1,
+			wantPromoteErr: true,
+		},
+		{
+			name: "an entry that cannot be screened gets no label", labels: []string{"runlore"}, verified: held, readErr: fmt.Errorf("two entries: %w", providers.ErrEntryUnscreenable), wantReads: 1,
+			wantLog: []string{ruleEntryUnreadable},
+		},
+		{
+			name: "an entry that cannot be screened loses the label", labels: []string{"runlore", "ready-to-merge"}, verified: held, readErr: fmt.Errorf("two entries: %w", providers.ErrEntryUnscreenable),
+			wantCalls: []string{drop}, wantReads: 1, wantLog: []string{"reason=evidence-withdrawn", ruleEntryUnreadable},
 		},
 		{name: "solved and resolved with a hit gets no label", labels: []string{"runlore", "solved"}, resolved: true, entry: injected, wantReads: 1},
 		{name: "solved and resolved, clean, gets the label", labels: []string{"runlore", "solved"}, resolved: true, entry: "clean", wantCalls: []string{add}, wantReads: 1},
@@ -81,7 +100,11 @@ func TestQueueThreat(t *testing.T) {
 				} else {
 					err = q.PromoteOne(context.Background(), 7)
 				}
-				if err != nil {
+				if how == "Promote" && tc.wantPromoteErr {
+					if !errors.Is(err, tc.readErr) {
+						t.Fatalf("PromoteOne = %v, want the read failure", err)
+					}
+				} else if err != nil {
 					t.Fatal(err)
 				}
 				wantCalls := tc.wantCalls
@@ -116,6 +139,7 @@ func TestQueueIssueThreat(t *testing.T) {
 	}
 	rewrite := func(t *testing.T, q QueueIssue) string {
 		t.Helper()
+		q.ScreenEntries = q.Evidence != nil
 		qiMust(t, q.RunNow(context.Background()))
 		return q.Forge.(*fakeQueueForge).body
 	}
@@ -167,6 +191,23 @@ func TestQueueIssueThreat(t *testing.T) {
 		}
 		if !strings.Contains(logs.String(), "forge down") {
 			t.Fatalf("not logged: %s", logs.String())
+		}
+	})
+	t.Run("an entry that cannot be screened is the same row", func(t *testing.T) {
+		f := &fakeQueueForge{open: []providers.CuratedIssue{qiPR(7, "KB: x", "fp", mon)}, readErr: fmt.Errorf("two: %w", providers.ErrEntryUnscreenable)}
+		q := newQI(f, mon)
+		q.Evidence = qiEvidence{}
+		if b := rewrite(t, q); !strings.Contains(b, "| threat: "+ruleEntryUnreadable+" |") {
+			t.Fatalf("fail closed:\n%s", b)
+		}
+	})
+	t.Run("without defer a ledger changes nothing: nothing is read and the row stands", func(t *testing.T) {
+		f := &fakeQueueForge{open: []providers.CuratedIssue{qiPR(7, "KB: as ever", "fp", mon)}, entries: map[int]string{7: injected}}
+		q := newQI(f, mon)
+		q.Evidence = qiEvidence{verified: map[string]bool{"fp": true}} // what a ledger sets without defer
+		qiMust(t, q.RunNow(context.Background()))
+		if b := f.body; strings.Contains(b, "threat") || !strings.Contains(b, "KB: as ever") || f.reads != 0 {
+			t.Fatalf("reads %d:\n%s", f.reads, b)
 		}
 	})
 	t.Run("accepted lifts the risk, without a read", func(t *testing.T) {

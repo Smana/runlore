@@ -16,8 +16,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -53,6 +55,19 @@ func (c *Client) maintainBundle(ctx context.Context, e providers.KBEntry, entryP
 		"runlore: log "+e.Title, okf.UpdateLog(logMD, e, entryPath, date))
 }
 
+// errNotBase64 is getFile's refusal of a blob the contents API did not send: it is too large.
+var errNotBase64 = errors.New("content is not base64")
+
+// escapePath escapes each segment of a repository path, so a "#", "?" or "%" in a name stays in the
+// name: unescaped, "a.md#x.md" reads "a.md", and the fragment or query drops the ref as well.
+func escapePath(path string) string {
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segs, "/")
+}
+
 // getFile reads a file's content + blob SHA at ref via the contents API.
 // A 404 is not an error: found=false says "the bundle doesn't have this file".
 func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sha string, found bool, err error) {
@@ -60,8 +75,8 @@ func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sh
 	if err != nil {
 		return nil, "", false, fmt.Errorf("token: %w", err)
 	}
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", c.baseURL, c.owner, c.repo, path, ref)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	target := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s", c.baseURL, c.owner, c.repo, escapePath(path), url.QueryEscape(ref))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -95,7 +110,7 @@ func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sh
 	// Failing here degrades to the caller's comment fallback; reading nothing
 	// silently does not.
 	if out.Encoding != "base64" {
-		return nil, "", false, fmt.Errorf("github GET %s: content encoding %q, want base64 (blob too large for the contents API?)", path, out.Encoding)
+		return nil, "", false, fmt.Errorf("github GET %s: content encoding %q, want base64 (blob too large for the contents API?): %w", path, out.Encoding, errNotBase64)
 	}
 	// The contents API base64-wraps with newlines; the std decoder wants them gone.
 	raw, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(out.Content, "\n", ""))
@@ -116,5 +131,5 @@ func (c *Client) putFile(ctx context.Context, path, branch, sha, message string,
 	if sha != "" {
 		body["sha"] = sha
 	}
-	return c.do(ctx, http.MethodPut, fmt.Sprintf("/repos/%s/%s/contents/%s", c.owner, c.repo, path), body, nil)
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/repos/%s/%s/contents/%s", c.owner, c.repo, escapePath(path)), body, nil)
 }

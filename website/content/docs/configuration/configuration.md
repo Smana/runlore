@@ -1110,8 +1110,9 @@ factory:
 
   `defer` also turns on the threat check on an entry's text: a deterministic, offline screen that
   only ever withholds `ready-to-merge` and lists the PR in the Knowledge queue with risk `threat`
-  and the rule's name. It has no key of its own. It screens for obvious injection and is no proof of
-  safety: the boundary stays that every reader receives entries as quoted data. See
+  and the rule's name. It has no key of its own, and without `defer` it does not run, ledger or not.
+  It screens for obvious injection and is no proof of safety: the intended boundary is that every
+  reader receives entries as quoted data. See
   [Reviewing knowledge]({{< relref "reviewing-knowledge.md#8-the-knowledge-queue" >}}).
 
   With `defer` on, the factory notifier is not added to the delivery list, since filing happens at
