@@ -178,7 +178,9 @@ func withdrawApplied(body, fixPR string) string {
 		b++
 	}
 	if b < end && strings.TrimSpace(lines[b]) == suggestedHeading {
-		for b++; b < end && strings.TrimSpace(lines[b]) == ""; b++ {
+		b++
+		for b < end && strings.TrimSpace(lines[b]) == "" {
+			b++
 		}
 	}
 	rest := lines[b:]
