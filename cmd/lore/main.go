@@ -39,6 +39,7 @@ Usage:
   lore eval scorecard -report <replay.json> -dir <out>  render the public scorecard (markdown + badge + history) from a replay report
   lore curate [--config <path>] [--dry-run]           groom the KB backlog (dedup/stale/suppress…)
   lore curate queue-issue [--config <path>] [--dry-run]   rewrite the Knowledge queue issue now
+  lore curate refresh-entries [--config <path>] [--dry-run]   rebuild conflicting entry PRs on the current base
   lore mcp [--config <path>] [<catalog-dir>]          serve what-changed + KB search over MCP (stdio; Claude Code, HolmesGPT, …)
   lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
   lore version                                        print version

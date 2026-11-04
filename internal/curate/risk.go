@@ -21,6 +21,7 @@ const (
 	RiskContested   Risk = iota // a standing 👎 whose KB link is the PR
 	RiskContradicts             // the PR carries the decider's possible-duplicate section
 	RiskSecurity                // a human labelled it security
+	RiskConflict                // it conflicts and RunLore refused to rebuild it; Risks does not report it (RefreshEntries does)
 	RiskUnverified              // the PR's fingerprint has no held latest observation
 )
 
@@ -33,6 +34,8 @@ func (r Risk) String() string {
 		return "contradicts"
 	case RiskSecurity:
 		return "security"
+	case RiskConflict:
+		return "conflict"
 	case RiskUnverified:
 		return "unverified"
 	}

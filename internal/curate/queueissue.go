@@ -56,6 +56,9 @@ type QueueIssue struct {
 	Stats    interface {
 		Measures(time.Time) (outcome.Measures, error)
 	} // nil: Measures says the ledger is not configured
+	// Refresh, when set, rebuilds conflicting entry PRs before each rewrite: a rebuilt, verified PR is
+	// ready-to-merge and absent from Decide, and a refused one is a row with risk conflict.
+	Refresh *RefreshEntries
 	Line    providers.LineNotifier // nil: no Slack line
 	KBRepo  string
 	Weekday time.Weekday
@@ -143,7 +146,11 @@ func (q QueueIssue) rewrite(ctx context.Context, now time.Time, issue *providers
 	if issue != nil {
 		last, _ = parseQueueMarker(issue.Body)
 	}
-	rows, err := q.decide(ctx)
+	refused, err := refreshFirst(ctx, q.Refresh)
+	if err != nil {
+		return err
+	}
+	rows, err := q.decide(ctx, refused)
 	if err != nil {
 		return err
 	}
@@ -184,8 +191,9 @@ type decideRow struct {
 }
 
 // decide lists the open entry PRs not labelled ready-to-merge, riskiest first and oldest first within
-// a risk. Retire, revalidate and resolve PRs are entry edits, never rows.
-func (q QueueIssue) decide(ctx context.Context) ([]decideRow, error) {
+// a risk. Retire, revalidate and resolve PRs are entry edits, never rows. refused holds the PRs the
+// refresh would not rebuild.
+func (q QueueIssue) decide(ctx context.Context, refused map[int]string) ([]decideRow, error) {
 	prs, err := q.Forge.ListPRsByLabel(ctx, runloreLabel)
 	if err != nil {
 		return nil, err
@@ -204,7 +212,12 @@ func (q QueueIssue) decide(ctx context.Context) ([]decideRow, error) {
 			continue
 		}
 		row := decideRow{pr: pr, risk: "verified", rank: math.MaxInt, created: pr.CreatedAt}
-		if risks := Risks(pr, contested, verified); len(risks) > 0 {
+		risks := Risks(pr, contested, verified)
+		if _, ok := refused[pr.Number]; ok {
+			risks = append(risks, RiskConflict)
+			slices.Sort(risks)
+		}
+		if len(risks) > 0 {
 			row.risk, row.rank = risks[0].String(), int(risks[0])
 		}
 		rows = append(rows, row)

@@ -13,6 +13,12 @@ var (
 	ErrNotRunLorePR = errors.New("pull request is not a RunLore entry PR")
 	// ErrPullNotFound means the forge has no such pull request (a 404).
 	ErrPullNotFound = errors.New("pull request not found")
+	// ErrHeadMoved means a pull request's head is not the one a rebuild was decided on, so
+	// the rebuild would overwrite commits nobody looked at. Nothing moved; decide again.
+	ErrHeadMoved = errors.New("pull request head moved")
+	// ErrEntryOnBase means the base branch already has the entry a rebuild would add: the
+	// same path merged from another pull request, so the rebuild cannot keep the PR's shape.
+	ErrEntryOnBase = errors.New("entry already on the base branch")
 )
 
 // PermanentError marks a provider/model failure that will not succeed on retry —

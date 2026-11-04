@@ -21,6 +21,7 @@ var (
 	_ ClosedPRLister  = Guard{}
 	_ ContestedForge  = Guard{}
 	_ QueueIssueForge = Guard{}
+	_ RefreshForge    = Guard{}
 )
 
 // fakeGuarded extends the shared fakeForge with the wider GuardedForge surface.
@@ -86,6 +87,10 @@ func (f *fakeGuarded) EditIssue(context.Context, int, string) error {
 	f.issuesEdited++
 	return nil
 }
+func (f *fakeGuarded) EntryPRState(context.Context, int) (providers.EntryPRState, error) {
+	return providers.EntryPRState{}, nil
+}
+func (f *fakeGuarded) RebuildEntryPR(context.Context, int, string) error { return nil }
 
 // recAudit records audit entries in memory.
 type recAudit struct{ recs []audit.Record }

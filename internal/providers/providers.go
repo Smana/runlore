@@ -2035,6 +2035,15 @@ type AppliedResolution struct {
 // state it is in: "open", "merged", or "closed" (closed without merging).
 type PREntry struct{ Path, State string }
 
+// EntryPRState is what the forge says about an open entry PR when deciding whether to rebuild it.
+type EntryPRState struct {
+	Branch, HeadSHA string
+	Mergeable       *bool    // nil while the forge computes it
+	Fork, Truncated bool     // Truncated: a full page of commits or files, so the lists below may be cut
+	CommitAuthors   []string // one per commit; empty for a commit with no linked account
+	Files           []string
+}
+
 // PullSummary is what the forge says a merged fix changed: the PR's URL, the
 // merge commit, the first few files and the line counts.
 type PullSummary struct {

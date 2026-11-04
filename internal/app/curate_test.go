@@ -154,6 +154,48 @@ func TestBuildCurateAgentWiresTheQueuesEvidence(t *testing.T) {
 	}
 }
 
+// The Queue's rebuild force-pushes, so it comes with factory.curation.defer ("off by default"), and
+// the agent's Queue has no Promote: Queue.Run lists right after. The queue issue and the command
+// promote through a Queue over the same forge, once there is a ledger to read.
+func TestRefreshWiring(t *testing.T) {
+	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Forge.KBRepo = "acme/kb"
+	queue := func() curate.Queue {
+		t.Helper()
+		for _, p := range BuildCurateAgent(cfg, forge, ledger, nil, discardLog()).Passes {
+			if q, ok := p.(curate.Queue); ok {
+				return q
+			}
+		}
+		t.Fatal("no Queue pass")
+		return curate.Queue{}
+	}
+	if q := queue(); q.Refresh != nil {
+		t.Fatal("defer off: the Queue must not rebuild")
+	}
+	cfg.Factory.Curation.Defer = true
+	if q := queue(); q.Refresh == nil || q.Refresh.Forge == nil || q.Refresh.Promote != nil {
+		t.Fatalf("defer on: the Queue rebuilds, and lists right after: %+v", q.Refresh)
+	}
+	if qi := buildQueueIssue(cfg, forge, nil, nil, discardLog()); qi.Refresh == nil || qi.Refresh.Promote != nil {
+		t.Fatalf("no ledger: nothing to promote from: %+v", qi.Refresh)
+	}
+	if qi := buildQueueIssue(cfg, forge, ledger, nil, discardLog()); qi.Refresh == nil || qi.Refresh.Promote == nil {
+		t.Fatalf("a ledger: the queue issue promotes: %+v", qi.Refresh)
+	}
+	if r := buildRefresh(cfg, forge, nil, discardLog()); r.Promote != nil {
+		t.Fatal("no ledger: nothing to promote from")
+	}
+	if r := buildRefresh(cfg, forge, ledger, discardLog()); r.Promote == nil || r.Forge == nil {
+		t.Fatalf("a ledger: the command promotes: %+v", r)
+	}
+}
+
 // TestBuildCurateAgentWiresRevalidation pins the opt-in wiring of the
 // revalidation pass, including that its knobs come from config rather than from
 // the pass's zero value (a MaxOpen of 0 would silently propose nothing).
@@ -271,10 +313,15 @@ func writeCurateConfig(t *testing.T, extra string) string {
 }
 
 func TestRunCurateSubcommand(t *testing.T) {
-	var groomed, issued int
+	var groomed, issued, refreshed int
 	var gotDry bool
-	oldGroom, oldIssue := runGroom, runQueueIssue
-	t.Cleanup(func() { runGroom, runQueueIssue = oldGroom, oldIssue })
+	oldGroom, oldIssue, oldRefresh := runGroom, runQueueIssue, runRefresh
+	t.Cleanup(func() { runGroom, runQueueIssue, runRefresh = oldGroom, oldIssue, oldRefresh })
+	runRefresh = func(_ context.Context, r curate.RefreshEntries) error {
+		refreshed++
+		gotDry = r.Forge.(curate.Guard).DryRun
+		return nil
+	}
 	runGroom = func(context.Context, *config.Config, curate.GuardedForge, *outcome.Ledger, providers.LineNotifier, *slog.Logger) {
 		groomed++
 	}
@@ -284,7 +331,7 @@ func TestRunCurateSubcommand(t *testing.T) {
 		return nil
 	}
 	f := writeCurateConfig(t, "")
-	reset := func() { groomed, issued, gotDry = 0, 0, false }
+	reset := func() { groomed, issued, refreshed, gotDry = 0, 0, 0, false }
 
 	if err := RunCurate([]string{"--config", f}); err != nil || groomed != 1 || issued != 0 {
 		t.Fatalf("plain curate grooms and writes no issue: %v groomed=%d issued=%d", err, groomed, issued)
@@ -297,10 +344,18 @@ func TestRunCurateSubcommand(t *testing.T) {
 	if err := RunCurate([]string{"queue-issue", "--dry-run", "--config", f}); err != nil || groomed != 0 || issued != 1 || !gotDry {
 		t.Fatalf("queue-issue --dry-run passes DryRun: %v groomed=%d issued=%d dry=%v", err, groomed, issued, gotDry)
 	}
-	for _, args := range [][]string{{"--config", f, "queue-issue"}, {"bogus", "--config", f}, {"--config", f, "bogus"}} {
+	reset()
+	if err := RunCurate([]string{"refresh-entries", "--config", f}); err != nil || groomed != 0 || issued != 0 || refreshed != 1 || gotDry {
+		t.Fatalf("refresh-entries runs that pass alone: %v groomed=%d issued=%d refreshed=%d dry=%v", err, groomed, issued, refreshed, gotDry)
+	}
+	reset()
+	if err := RunCurate([]string{"refresh-entries", "--dry-run", "--config", f}); err != nil || groomed != 0 || issued != 0 || refreshed != 1 || !gotDry {
+		t.Fatalf("refresh-entries --dry-run passes DryRun: %v groomed=%d issued=%d refreshed=%d dry=%v", err, groomed, issued, refreshed, gotDry)
+	}
+	for _, args := range [][]string{{"--config", f, "queue-issue"}, {"--config", f, "refresh-entries"}, {"bogus", "--config", f}, {"--config", f, "bogus"}} {
 		reset()
-		if err := RunCurate(args); err == nil || groomed != 0 || issued != 0 {
-			t.Fatalf("%v: a positional that is not the first argument is an error and runs nothing: %v groomed=%d issued=%d", args, err, groomed, issued)
+		if err := RunCurate(args); err == nil || groomed != 0 || issued != 0 || refreshed != 0 {
+			t.Fatalf("%v: a positional that is not the first argument is an error and runs nothing: %v groomed=%d issued=%d refreshed=%d", args, err, groomed, issued, refreshed)
 		}
 	}
 }

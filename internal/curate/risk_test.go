@@ -44,9 +44,16 @@ func TestRisks(t *testing.T) {
 	}
 }
 
+// KP13's order: conflict ranks after security and before unverified.
+func TestRiskConflictRank(t *testing.T) {
+	if RiskSecurity >= RiskConflict || RiskConflict >= RiskUnverified {
+		t.Fatalf("security=%d conflict=%d unverified=%d", RiskSecurity, RiskConflict, RiskUnverified)
+	}
+}
+
 func TestRiskString(t *testing.T) {
 	for r, want := range map[Risk]string{
-		RiskContested: "contested", RiskContradicts: "contradicts", RiskSecurity: "security", RiskUnverified: "unverified",
+		RiskContested: "contested", RiskContradicts: "contradicts", RiskSecurity: "security", RiskConflict: "conflict", RiskUnverified: "unverified",
 	} {
 		if got := r.String(); got != want {
 			t.Errorf("Risk(%d) = %q, want %q", int(r), got, want)

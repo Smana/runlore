@@ -137,11 +137,14 @@ func (c *Client) OpenIssue(ctx context.Context, inv providers.Investigation) (pr
 	return providers.Ref{URL: out.HTMLURL}, nil
 }
 
+// kbBranchPrefix names the branches OpenPR creates, the only ones RebuildEntryPR moves.
+const kbBranchPrefix = "runlore/kb-"
+
 // OpenPR drafts the KB entry on a new branch and opens a PR.
 func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref, error) {
 	slug := slugify(e.Title)
 	now := time.Now().Unix()
-	branch := fmt.Sprintf("runlore/kb-%s-%d", slug, now)
+	branch := fmt.Sprintf("%s%s-%d", kbBranchPrefix, slug, now)
 	path := entryPath(e, slug, now)
 
 	// 1. base ref SHA

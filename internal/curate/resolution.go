@@ -41,14 +41,21 @@ type Queue struct {
 	Checker  ResolutionChecker // nil: nothing is promoted on resolution alone (Evidence set only)
 	Evidence Evidence
 	KBRepo   string // forge.kb_repo ("owner/name"), which contested KB links must name; Evidence set only
-	Log      *slog.Logger
+	// Refresh, when set, rebuilds conflicting entry PRs first (KP19). A rebuilt PR is then labelled
+	// again here, on the same evidence; a refused one never is, for Decide to list it.
+	Refresh *RefreshEntries
+	Log     *slog.Logger
 }
 
 // Run gates the open PRs onto the decision-ready queue. One PR's failure is logged and
 // skipped so it never starves the rest.
 func (q Queue) Run(ctx context.Context) error {
+	refused, err := refreshFirst(ctx, q.Refresh)
+	if err != nil {
+		return err
+	}
 	if q.Evidence == nil {
-		return q.runOnResolution(ctx)
+		return q.runOnResolution(ctx, refused)
 	}
 	contested, err := q.contestedPRs()
 	if err != nil {
@@ -56,6 +63,9 @@ func (q Queue) Run(ctx context.Context) error {
 	}
 	verified := q.Evidence.Verifications()
 	seen := map[int]bool{}
+	for n := range refused {
+		seen[n] = true
+	}
 	for _, label := range []string{solvedLabel, runloreLabel} {
 		prs, err := q.Forge.ListPRsByLabel(ctx, label)
 		if err != nil {
@@ -168,7 +178,7 @@ func (q Queue) withdraw(ctx context.Context, number int) error {
 }
 
 // runOnResolution gates each solved PR on its resolution or a human's accepted label alone.
-func (q Queue) runOnResolution(ctx context.Context) error {
+func (q Queue) runOnResolution(ctx context.Context, refused map[int]string) error {
 	prs, err := q.Forge.ListPRsByLabel(ctx, solvedLabel)
 	if err != nil {
 		return err
@@ -176,6 +186,9 @@ func (q Queue) runOnResolution(ctx context.Context) error {
 	for _, pr := range prs {
 		if slices.Contains(pr.Labels, readyLabel) {
 			continue // already queued
+		}
+		if _, no := refused[pr.Number]; no {
+			continue
 		}
 		accepted := slices.Contains(pr.Labels, acceptedLabel)
 		resolved := false

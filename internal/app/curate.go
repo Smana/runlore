@@ -31,7 +31,8 @@ import (
 // behind it).
 //
 // `lore curate queue-issue` runs one pass instead: it rewrites the Knowledge queue issue at once,
-// whatever curate.queue_issue.schedule says, and no other pass.
+// whatever curate.queue_issue.schedule says, and no other pass. `lore curate refresh-entries` runs
+// one pass too: it rebuilds the conflicting entry PRs on the current base.
 func RunCurate(args []string) error {
 	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
@@ -39,8 +40,8 @@ func RunCurate(args []string) error {
 	sub := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
-		if sub != "queue-issue" {
-			return fmt.Errorf("unknown curate subcommand %q (want queue-issue, or none to groom)", sub)
+		if sub != "queue-issue" && sub != "refresh-entries" {
+			return fmt.Errorf("unknown curate subcommand %q (want queue-issue, refresh-entries, or none to groom)", sub)
 		}
 	}
 	if err := fs.Parse(args); err != nil {
@@ -106,18 +107,23 @@ func RunCurate(args []string) error {
 		log.Info("curate: rewriting the Knowledge queue issue", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
 		return runQueueIssue(context.Background(), buildQueueIssue(cfg, guarded, ledger, line, log))
 	}
+	if sub == "refresh-entries" {
+		log.Info("curate: rebuilding conflicting entry PRs", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
+		return runRefresh(context.Background(), buildRefresh(cfg, guarded, ledger, log))
+	}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
 	runGroom(context.Background(), cfg, guarded, ledger, line, log)
 	return nil
 }
 
-// runGroom and runQueueIssue are what RunCurate runs, package variables so a test can tell which
+// runGroom, runQueueIssue and runRefresh are what RunCurate runs, package variables so a test can tell which
 // of them a command line reached.
 var (
 	runGroom = func(ctx context.Context, cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, line providers.LineNotifier, log *slog.Logger) {
 		BuildCurateAgent(cfg, forge, ledger, line, log).Run(ctx)
 	}
 	runQueueIssue = func(ctx context.Context, q curate.QueueIssue) error { return q.RunNow(ctx) }
+	runRefresh    = func(ctx context.Context, r curate.RefreshEntries) error { return r.Run(ctx) }
 )
 
 // queueLine is the Slack line sink of the Knowledge queue: the configured notifiers when
@@ -143,7 +149,8 @@ func queueLine(cfg *config.Config, dryRun bool, log *slog.Logger) providers.Line
 // agent so the two cannot drift. Evidence and Stats are set only with a ledger: a nil ledger must
 // not become a typed-nil interface.
 func buildQueueIssue(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, line providers.LineNotifier, log *slog.Logger) curate.QueueIssue {
-	q := curate.QueueIssue{Forge: forge, Line: line, KBRepo: cfg.Forge.KBRepo, Log: log}
+	refresh := buildRefresh(cfg, forge, ledger, log)
+	q := curate.QueueIssue{Forge: forge, Line: line, KBRepo: cfg.Forge.KBRepo, Refresh: &refresh, Log: log}
 	if ledger != nil {
 		q.Evidence, q.Stats = ledger, ledger
 	}
@@ -157,6 +164,27 @@ func buildQueueIssue(cfg *config.Config, forge curate.GuardedForge, ledger *outc
 	}
 	q.Unscheduled = true
 	return q
+}
+
+// buildQueue assembles the Queue pass over a ledger. Under factory.curation.defer the ledger holds
+// the factory's verifications, and the label follows them. Otherwise Evidence stays nil and adopters
+// keep the resolution path.
+func buildQueue(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, log *slog.Logger) curate.Queue {
+	queue := curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log}
+	if cfg.Factory.Curation.Defer {
+		queue.Evidence, queue.KBRepo = ledger, cfg.Forge.KBRepo
+	}
+	return queue
+}
+
+// buildRefresh assembles the refresh a caller that does not run the Queue itself uses: with a ledger,
+// a rebuilt PR goes straight back through the Queue's evidence check.
+func buildRefresh(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, log *slog.Logger) curate.RefreshEntries {
+	r := curate.RefreshEntries{Forge: forge, Log: log}
+	if ledger != nil {
+		r.Promote = buildQueue(cfg, forge, ledger, log).PromoteOne
+	}
+	return r
 }
 
 // buildGuardedForge constructs the KB forge client and wraps it in the dry-run +
@@ -205,11 +233,11 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 		addQueueIssue()
 		return agent
 	}
-	queue := curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log}
-	// Under factory.curation.defer the ledger holds the factory's verifications, and the label
-	// follows them. Otherwise Evidence stays nil and adopters keep the resolution path.
+	queue := buildQueue(cfg, forge, ledger, log)
+	// The rebuild force-pushes, so an adopter who has not opted in keeps today's Queue. No Promote:
+	// Queue.Run lists right after.
 	if cfg.Factory.Curation.Defer {
-		queue.Evidence, queue.KBRepo = ledger, cfg.Forge.KBRepo
+		queue.Refresh = &curate.RefreshEntries{Forge: forge, Log: log}
 	}
 	agent.Passes = append(agent.Passes,
 		queue,
