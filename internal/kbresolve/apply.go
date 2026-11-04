@@ -147,6 +147,14 @@ func sectionContent(body, name string) (string, bool) {
 	return strings.TrimSpace(strings.Join(lines[start+1:end], "\n")), true
 }
 
+// newestApplied reports whether m is the first record in "## Resolution", the one
+// the frontmatter's resolution describes.
+func newestApplied(body, m string) bool {
+	old, _ := sectionContent(body, "Resolution")
+	i := strings.Index(old, markerPrefix)
+	return i >= 0 && strings.HasPrefix(old[i:], m)
+}
+
 // withdrawApplied removes fixPR's Applied record from "## Resolution": its three
 // lines and marker, and the "Suggested" heading above the old suggestion, which
 // is then the section's content again.
@@ -177,7 +185,9 @@ func withdrawApplied(body, fixPR string) string {
 	for b < end && strings.TrimSpace(lines[b]) == "" {
 		b++
 	}
-	if b < end && strings.TrimSpace(lines[b]) == suggestedHeading {
+	// The heading belongs to the oldest record: it goes with it only when no
+	// other fix's record sits above.
+	if b < end && strings.TrimSpace(lines[b]) == suggestedHeading && !strings.Contains(strings.Join(lines[start+1:a], "\n"), markerPrefix) {
 		b++
 		for b < end && strings.TrimSpace(lines[b]) == "" {
 			b++
@@ -225,14 +235,15 @@ func withdrawUnresolved(body, fixPR string) string {
 // copied from r is untrusted and goes through oneLine.
 func ApplyBody(body string, r providers.AppliedResolution) string {
 	m := marker(r)
-	if strings.Contains(body, m) {
+	if strings.Contains(body, m) && !(r.Verdict == "resolved" && !newestApplied(body, m)) {
 		return body
 	}
 	// A fix has one latest verdict: recording the other one withdraws its record.
 	if r.Verdict == "persisting" {
 		body = withdrawApplied(body, r.FixPR)
 	} else {
-		body = withdrawUnresolved(body, r.FixPR)
+		// Resolved again after another fix: move this fix's record to the top.
+		body = withdrawApplied(withdrawUnresolved(body, r.FixPR), r.FixPR)
 	}
 	if r.Verdict == "persisting" {
 		line := "- The fix " + prLink(r.FixPR)

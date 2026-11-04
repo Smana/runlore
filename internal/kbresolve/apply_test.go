@@ -237,3 +237,24 @@ func TestApplyTwoFixesBothOrders(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyBodyAgreesWithFrontmatterOnRepeat: after resolved F, G, F the
+// frontmatter says F, so the body shows F first too, with G's record kept and the
+// suggestion still under its heading.
+func TestApplyBodyAgreesWithFrontmatterOnRepeat(t *testing.T) {
+	s := applyAll(t, entry, resFor(fixA, "resolved"), resFor(fixB, "resolved"), resFor(fixA, "resolved"))
+	resolution, _ := frontmatterOf(t, []byte(s))["resolution"].(map[string]any)
+	if resolution["fix_pr"] != fixA {
+		t.Fatal("frontmatter says F: ", s)
+	}
+	f, g := strings.Index(s, "- **Applied:** [#2638]"), strings.Index(s, "- **Applied:** [#2700]")
+	if f < 0 || g < 0 || f > g || strings.Count(s, "- **Applied:** [#2638]") != 1 {
+		t.Fatal("the body shows F first, once, then G: ", s)
+	}
+	if !strings.Contains(s, suggestedHeading+"\n\n- raise the threshold") || strings.Index(s, suggestedHeading) < g {
+		t.Fatal("the suggestion stays under its heading, after both records: ", s)
+	}
+	if again, changed, _ := Apply([]byte(s), resFor(fixA, "resolved")); changed || string(again) != s {
+		t.Fatal("repeating the newest fix is still a no-op")
+	}
+}
