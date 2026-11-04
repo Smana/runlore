@@ -218,7 +218,7 @@ func TestQueueIssueSchedule(t *testing.T) {
 		}
 	})
 	t.Run("two queue issues: the lowest number wins", func(t *testing.T) {
-		f := &fakeQueueForge{issues: []providers.CuratedIssue{{Number: 9, Body: "b"}, {Number: 3, Body: "a", URL: "u3"}}}
+		f := &fakeQueueForge{issues: []providers.CuratedIssue{{Number: 9, Body: queueMarker(mon)}, {Number: 3, Body: queueMarker(mon), URL: "u3"}}}
 		var edited int
 		q := newQI(f, mon)
 		qiMust(t, q.RunNow(ctx))
@@ -286,7 +286,7 @@ func TestQueueIssueSections(t *testing.T) {
 	t.Run("a bracket in a title cannot close the link", func(t *testing.T) {
 		f := &fakeQueueForge{open: []providers.CuratedIssue{qiPR(5, "x](https://evil.example) [y", "fp", mon)}}
 		qiMust(t, newQI(f, mon).RunNow(ctx))
-		if !strings.Contains(f.body, `x\](https://evil.example) \[y`) || strings.Contains(f.body, "x](https://evil.example)") {
+		if !strings.Contains(f.body, `x\](https:&#47;&#47;evil.example) \[y`) || strings.Contains(f.body, "x](") {
 			t.Fatalf("link forged: %s", f.body)
 		}
 	})
@@ -364,5 +364,63 @@ func TestQueueIssueListFailureIsReturned(t *testing.T) {
 	f := &fakeQueueForge{listErr: fmt.Errorf("boom")}
 	if err := newQI(f, time.Now()).RunNow(context.Background()); err == nil {
 		t.Fatal("want the listing error")
+	}
+}
+
+func TestQueueIssueLeavesAHumansIssueAlone(t *testing.T) {
+	human := providers.CuratedIssue{Number: 2, URL: "https://github.com/acme/kb/issues/2", Title: "Our own queue", Body: "my notes, no marker", Labels: []string{"runlore-queue"}}
+	f := &fakeQueueForge{issues: []providers.CuratedIssue{human}}
+	qiMust(t, newQI(f, time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)).RunNow(context.Background()))
+	if f.created != 1 || f.edited != 0 || human.Body != "my notes, no marker" {
+		t.Fatalf("a labelled issue without the marker is not ours: created=%d edited=%d", f.created, f.edited)
+	}
+	// With RunLore's own issue beside it, the marked one is edited, whatever the numbers.
+	mine := providers.CuratedIssue{Number: 9, URL: "u9", Body: queueMarker(time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC))}
+	f = &fakeQueueForge{issues: []providers.CuratedIssue{human, mine}}
+	qiMust(t, newQI(f, time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)).RunNow(context.Background()))
+	if f.created != 0 || f.edited != 1 {
+		t.Fatalf("the marked issue is rewritten: created=%d edited=%d", f.created, f.edited)
+	}
+}
+
+func TestQueueIssueCountsOnlyMergesAfterTheLastRewrite(t *testing.T) {
+	last := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	f := &fakeQueueForge{
+		issues: []providers.CuratedIssue{{Number: 7, URL: "u", Body: queueMarker(last)}},
+		mergedBy: []providers.CuratedIssue{
+			{Number: 1, Labels: []string{"runlore"}, MergedAt: last.Add(-6 * time.Hour)}, // the marker's own day, before it
+			{Number: 2, Labels: []string{"runlore"}, MergedAt: last.Add(time.Hour)},
+			{Number: 3, Labels: []string{"runlore"}}, // no merge time reported: counted
+		}}
+	line := &qiLines{}
+	q := newQI(f, last.Add(3*time.Hour))
+	q.Line = line
+	qiMust(t, q.RunNow(context.Background()))
+	if !strings.Contains(f.body, "| Merged entries | 2 |") || !strings.Contains(line.got[0], "2 merged") {
+		t.Fatalf("%s / %v", f.body, line.got)
+	}
+}
+
+func TestQueueIssueDefusesMentionsAndLinks(t *testing.T) {
+	mon := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	pr := qiPR(5, "KB: ping @octocat and @org/team", "fp", mon)
+	pr.Body = "d\n\n" + providers.CardMarker("solved", 0.5) + "\n\n**Evidence:** see https://evil.example/x and www.evil.example, cc @octocat\n\n" + providers.FingerprintMarker("fp")
+	f := &fakeQueueForge{open: []providers.CuratedIssue{pr}}
+	qiMust(t, newQI(f, mon).RunNow(context.Background()))
+	var row string
+	for _, l := range strings.Split(f.body, "\n") {
+		if strings.HasPrefix(l, "| unverified") {
+			row = l
+		}
+	}
+	own := "](https://github.com/acme/kb/pull/5)"
+	rest := strings.Replace(row, own, "", 1)
+	for _, bad := range []string{"@octocat", "@org", "https://", "http://", "www.evil"} {
+		if strings.Contains(rest, bad) {
+			t.Fatalf("%q survives in %q", bad, row)
+		}
+	}
+	if !strings.Contains(row, "](https://github.com/acme/kb/pull/5)") {
+		t.Fatalf("the PR's own link stays clickable: %q", row)
 	}
 }

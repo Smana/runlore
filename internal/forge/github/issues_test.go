@@ -96,3 +96,17 @@ func TestListPRsByLabelCarriesCreatedAt(t *testing.T) {
 		t.Fatalf("%+v %v", prs, err)
 	}
 }
+
+func TestListMergedPRsByLabelIsExactToTheInstant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"total_count":2,"items":[
+		 {"number":1,"title":"early","labels":[],"pull_request":{"merged_at":"2026-11-02T03:00:00Z"}},
+		 {"number":2,"title":"late","labels":[],"pull_request":{"merged_at":"2026-11-02T09:30:00Z"}}]}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListMergedPRsByLabel(context.Background(), "runlore", time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC))
+	if err != nil || len(prs) != 1 || prs[0].Number != 2 || !prs[0].MergedAt.Equal(time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)) {
+		t.Fatalf("a merge before the instant on the same day is dropped: %+v %v", prs, err)
+	}
+}

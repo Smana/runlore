@@ -1808,6 +1808,7 @@ type CuratedIssue struct {
 	Labels    []string
 	UpdatedAt time.Time // forge last-update time; used by the curate lifecycle sweep
 	CreatedAt time.Time // forge creation time; the Knowledge queue compares it with its last rewrite
+	MergedAt  time.Time // zero unless the forge reported the merge time (the merged-PR search does)
 }
 
 // ReinvestForge lists curated issues flagged for re-investigation and posts results

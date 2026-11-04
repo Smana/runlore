@@ -113,7 +113,7 @@ func (q QueueIssue) RunNow(ctx context.Context) error {
 	return q.rewrite(ctx, q.now(), issue)
 }
 
-// find returns the open queue issue, nil when there is none. With two, the lowest number wins.
+// find returns the open queue issue RunLore wrote, nil when there is none. With two, the lowest number wins.
 func (q QueueIssue) find(ctx context.Context) (*providers.CuratedIssue, error) {
 	issues, err := q.Forge.ListIssuesByLabel(ctx, queueIssueLabel)
 	if err != nil {
@@ -122,9 +122,18 @@ func (q QueueIssue) find(ctx context.Context) (*providers.CuratedIssue, error) {
 	if len(issues) == 0 {
 		return nil, nil
 	}
+	// Only an issue RunLore wrote, which carries the marker, is ours to rewrite: a human's issue
+	// that happens to wear the label is left alone and a new one is filed.
+	issues = slices.DeleteFunc(slices.Clone(issues), func(is providers.CuratedIssue) bool {
+		_, ok := parseQueueMarker(is.Body)
+		return !ok
+	})
+	if len(issues) == 0 {
+		return nil, nil
+	}
 	best := slices.MinFunc(issues, func(a, b providers.CuratedIssue) int { return a.Number - b.Number })
 	if len(issues) > 1 {
-		q.Log.Warn("queue-issue: several open issues carry the queue label; rewriting the lowest number", "issue", best.Number, "count", len(issues))
+		q.Log.Warn("queue-issue: several open issues carry the queue label and marker; rewriting the lowest number", "issue", best.Number, "count", len(issues))
 	}
 	return &best, nil
 }
@@ -214,7 +223,7 @@ func (q QueueIssue) decide(ctx context.Context) ([]decideRow, error) {
 }
 
 // merged counts the entries merged since the last rewrite. The forge's date filter has day
-// granularity, so a merge earlier the same day is counted again.
+// granularity, so the exact instant is applied here from each PR's merge time.
 func (q QueueIssue) merged(ctx context.Context, since time.Time) (int, error) {
 	prs, err := q.Forge.ListMergedPRsByLabel(ctx, runloreLabel, since)
 	if err != nil {
@@ -222,7 +231,7 @@ func (q QueueIssue) merged(ctx context.Context, since time.Time) (int, error) {
 	}
 	n := 0
 	for _, pr := range prs {
-		if !isEntryEditProposal(pr.Labels) {
+		if !isEntryEditProposal(pr.Labels) && (since.IsZero() || pr.MergedAt.IsZero() || !pr.MergedAt.Before(since)) {
 			n++
 		}
 	}
@@ -327,7 +336,9 @@ func cell(s string) string {
 	for i, seg := range segs {
 		seg = strings.ReplaceAll(seg, "|", `\|`)
 		if i%2 == 0 {
-			seg = strings.NewReplacer("[", `\[`, "]", `\]`).Replace(seg)
+			// An @ notifies a user or team, and a scheme or www. makes a link: both as entities.
+			seg = strings.NewReplacer("@", "&#64;", "://", ":&#47;&#47;", "www.", "www&#46;", "WWW.", "WWW&#46;",
+				"[", `\[`, "]", `\]`).Replace(seg)
 		}
 		segs[i] = seg
 	}

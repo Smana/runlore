@@ -33,8 +33,8 @@ func (c *Client) EditIssue(ctx context.Context, number int, body string) error {
 }
 
 // ListMergedPRsByLabel returns the PRs carrying the label that merged on or after since (a
-// zero since lists every merge). It uses the Search API, which filters server-side, and its
-// date qualifier has day granularity: a caller wanting an exact instant filters the result.
+// zero since lists every merge). It uses the Search API, which filters server-side with day
+// granularity, then drops the PRs merged before the exact instant.
 func (c *Client) ListMergedPRsByLabel(ctx context.Context, label string, since time.Time) ([]providers.CuratedIssue, error) {
 	query := fmt.Sprintf("repo:%s/%s is:pr is:merged label:%s", c.owner, c.repo, label)
 	if !since.IsZero() {
@@ -49,7 +49,14 @@ func (c *Client) ListMergedPRsByLabel(ctx context.Context, label string, since t
 		if ri.PullRequest == nil {
 			continue // a plain issue, not a PR
 		}
-		out = append(out, ri.curated())
+		ci := ri.curated()
+		if ri.PullRequest.MergedAt != nil {
+			ci.MergedAt = *ri.PullRequest.MergedAt
+			if !since.IsZero() && ci.MergedAt.Before(since) {
+				continue
+			}
+		}
+		out = append(out, ci)
 	}
 	return out, nil
 }
