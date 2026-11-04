@@ -2494,6 +2494,11 @@ type ToolCall struct {
 	Args string // JSON
 }
 
+// PossibleDuplicateHeading opens the section a forge writes into a KB PR's body when a
+// dedup decider flags the finding (KBEntry.SuspectedDuplicate). The curate Queue reads it
+// as a refusal, so a PR carrying it never gets ready-to-merge on evidence alone.
+const PossibleDuplicateHeading = "## Possible duplicate"
+
 const fingerprintMarkerPrefix = "<!-- runlore-fingerprint: "
 
 // FingerprintMarker renders a hidden PR-body marker carrying the dedup fingerprint,

@@ -253,7 +253,7 @@ func TestQueueOnVerifiedEvidence(t *testing.T) {
 	const (
 		add      = "7:>ready-to-merge"
 		withdraw = "7:ready-to-merge>"
-		dup      = "## Possible duplicate\n\nflagged\n\n"
+		dup      = providers.PossibleDuplicateHeading + "\n\nflagged\n\n"
 	)
 	marked := providers.FingerprintMarker
 	cases := []struct {
@@ -408,6 +408,32 @@ func TestQueueContestedLinkMustNameThisPR(t *testing.T) {
 			}
 			if !slices.Equal(f.calls, []string{"7:>ready-to-merge"}) {
 				t.Fatalf("a foreign link contests nothing: %v", f.calls)
+			}
+		})
+	}
+}
+
+// GitHub's URLs carry the canonical case and its API takes kb_repo in any case, so a deployment with
+// another case works normally: the contest must still join, or the top refusal fails open silently.
+func TestQueueContestedLinkJoinsAcrossCase(t *testing.T) {
+	body := providers.FingerprintMarker("fp")
+	ev := fakeEvidence{verified: map[string]bool{"fp": true}, urls: []string{"https://github.com/Smana/KB/pull/7"}}
+	for name, tc := range map[string]struct {
+		labels []string
+		want   []string
+	}{
+		"unlabelled: no label": {[]string{"runlore"}, nil},
+		"labelled: withdrawn":  {[]string{"runlore", "ready-to-merge"}, []string{"7:ready-to-merge>"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &queueForge{}
+			f.prs = []providers.CuratedIssue{{Number: 7, Body: body, Labels: tc.labels}}
+			q := Queue{Forge: f, KBRepo: "smana/kb", Log: discardLog(), Evidence: ev}
+			if err := q.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(f.calls, tc.want) {
+				t.Fatalf("calls = %v, want %v", f.calls, tc.want)
 			}
 		})
 	}

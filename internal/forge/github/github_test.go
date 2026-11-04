@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -701,6 +702,18 @@ func TestPRBodyCarriesReviewCard(t *testing.T) {
 	}
 	if _, _, ok := providers.ParseCardMarker(c.prBody(providers.KBEntry{Title: "T"})); ok {
 		t.Fatal("no card without a verdict")
+	}
+}
+
+// The Queue refuses a PR carrying this heading: a body without it would silently lose that refusal.
+func TestPRBodyCarriesThePossibleDuplicateHeading(t *testing.T) {
+	c := &Client{}
+	flagged := c.prBody(providers.KBEntry{Title: "T", SuspectedDuplicate: &providers.RelatedEntry{Path: "a.md", Title: "A"}})
+	if !slices.Contains(strings.Split(flagged, "\n"), providers.PossibleDuplicateHeading) {
+		t.Fatalf("no heading on a line of its own:\n%s", flagged)
+	}
+	if strings.Contains(c.prBody(providers.KBEntry{Title: "T"}), providers.PossibleDuplicateHeading) {
+		t.Fatal("an unflagged PR must not carry the heading")
 	}
 }
 

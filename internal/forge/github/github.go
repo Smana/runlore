@@ -480,7 +480,7 @@ func (c *Client) suspectedDuplicateSection(e providers.KBEntry) string {
 	}
 	r := e.SuspectedDuplicate
 	var b strings.Builder
-	b.WriteString("## Possible duplicate\n\n")
+	b.WriteString(providers.PossibleDuplicateHeading + "\n\n")
 	fmt.Fprintf(&b, "The decision model flagged this finding as a probable duplicate of [%s](%s)", r.Title, c.blobURL(r.Path))
 	if r.Resource != "" {
 		fmt.Fprintf(&b, " · resource %s", r.Resource)

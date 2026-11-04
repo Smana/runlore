@@ -153,14 +153,16 @@ func contestedMarker(triggerKey string) string {
 // malformed URL. The match is on the URL path (/{owner}/{repo}/pull/{n}), not
 // the host: the pass only knows the API base, and the web host differs from it
 // on both github.com and GHES, while the owner/repo path identifies the repo on
-// both.
+// both. Owner and repo compare without case, as GitHub's own do: its URLs carry the
+// canonical case and forge.kb_repo may not, and a miss here would read a contest as
+// none.
 func prNumberInRepo(rawURL, owner, repo string) (int, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return 0, false
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
-	if len(segs) != 4 || segs[0] != owner || segs[1] != repo || segs[2] != "pull" {
+	if len(segs) != 4 || !strings.EqualFold(segs[0], owner) || !strings.EqualFold(segs[1], repo) || segs[2] != "pull" {
 		return 0, false
 	}
 	n, err := strconv.Atoi(segs[3])

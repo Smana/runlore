@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -656,6 +657,18 @@ func TestBlobURLSelfManaged(t *testing.T) {
 	want := "https://gitlab.example.com/acme/kb/-/blob/main/incidents/a.md"
 	if got := c.blobURL("incidents/a.md"); got != want {
 		t.Errorf("blobURL = %q, want %q", got, want)
+	}
+}
+
+// The Queue refuses a PR carrying this heading: a body without it would silently lose that refusal.
+func TestMRBodyCarriesThePossibleDuplicateHeading(t *testing.T) {
+	c := &Client{}
+	flagged := c.mrBody(providers.KBEntry{Title: "T", SuspectedDuplicate: &providers.RelatedEntry{Path: "a.md", Title: "A"}})
+	if !slices.Contains(strings.Split(flagged, "\n"), providers.PossibleDuplicateHeading) {
+		t.Fatalf("no heading on a line of its own:\n%s", flagged)
+	}
+	if strings.Contains(c.mrBody(providers.KBEntry{Title: "T"}), providers.PossibleDuplicateHeading) {
+		t.Fatal("an unflagged MR must not carry the heading")
 	}
 }
 

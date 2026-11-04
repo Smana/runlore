@@ -11,7 +11,7 @@ import (
 
 func TestRisks(t *testing.T) {
 	marked := providers.FingerprintMarker("fp")
-	dup := "## Possible duplicate\n\nflagged\n\n" + marked
+	dup := providers.PossibleDuplicateHeading + "\n\nflagged\n\n" + marked
 	cases := []struct {
 		name      string
 		pr        providers.CuratedIssue

@@ -10,10 +10,6 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// possibleDuplicateHeading is the section the forge writes into a PR's body when the dedup decider
-// flags the finding as a probable duplicate of an entry (suspectedDuplicateSection in each forge).
-const possibleDuplicateHeading = "## Possible duplicate"
-
 // securityLabel is applied by humans only: nothing in RunLore writes it.
 const securityLabel = "security"
 
@@ -58,7 +54,7 @@ func Risks(pr providers.CuratedIssue, contested map[int]bool, verified map[strin
 	if contested[pr.Number] {
 		risks = append(risks, RiskContested)
 	}
-	if strings.Contains(pr.Body, possibleDuplicateHeading) {
+	if strings.Contains(pr.Body, providers.PossibleDuplicateHeading) {
 		risks = append(risks, RiskContradicts)
 	}
 	if slices.Contains(pr.Labels, securityLabel) {
