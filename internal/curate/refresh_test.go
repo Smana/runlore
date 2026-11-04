@@ -605,3 +605,32 @@ func TestQueueIssueRefreshesFirst(t *testing.T) {
 		}
 	})
 }
+
+// A pass whose every attempted rebuild failed for a reason other than a rate limit did not do its
+// work, so the command fails and says why; a pass with nothing to rebuild still succeeds.
+func TestRefreshRunFailsWhenEveryRebuildFailed(t *testing.T) {
+	two := func() *fakeRefresh {
+		return &fakeRefresh{open: []providers.CuratedIssue{rfPR(1, "ready-to-merge"), rfPR(2, "ready-to-merge")}, states: map[int]providers.EntryPRState{1: rfState(), 2: rfState()}}
+	}
+	t.Run("all fail", func(t *testing.T) {
+		f := two()
+		f.rebuildErr = errors.New("push refused")
+		err := RefreshEntries{Forge: f, Log: discardLog()}.Run(context.Background())
+		if err == nil || errors.Is(err, providers.ErrRateLimited) || !strings.Contains(err.Error(), "push refused") || !strings.Contains(err.Error(), "[1 2]") {
+			t.Fatalf("want a failure naming the PRs and the cause, got %v", err)
+		}
+	})
+	t.Run("some rebuilt", func(t *testing.T) {
+		f := two()
+		f.states[1] = rfState(func(st *providers.EntryPRState) { st.CommitAuthors = []string{"Smana"} }) // refused, not failed
+		if err := (RefreshEntries{Forge: f, Log: discardLog()}).Run(context.Background()); err != nil {
+			t.Fatalf("a refusal is not a failure: %v", err)
+		}
+	})
+	t.Run("nothing to do", func(t *testing.T) {
+		f := &fakeRefresh{}
+		if err := (RefreshEntries{Forge: f, Log: discardLog()}).Run(context.Background()); err != nil {
+			t.Fatalf("an empty pass succeeds: %v", err)
+		}
+	})
+}

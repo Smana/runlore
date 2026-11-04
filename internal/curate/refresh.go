@@ -38,7 +38,8 @@ type RefreshForge interface {
 type RefreshResult struct {
 	Rebuilt []int
 	Refused map[int]string
-	Stopped bool // the forge answered 403 or 429: the rest was not looked at
+	Stopped bool          // the forge answered 403 or 429: the rest was not looked at
+	Failed  map[int]error // PRs whose rebuild failed for another reason, retried next pass
 }
 
 // RefreshEntries rebuilds a conflicting entry PR on the current base, when every commit on it is
@@ -74,13 +75,18 @@ func (r RefreshEntries) Run(ctx context.Context) error {
 	if res.Stopped {
 		return fmt.Errorf("refresh-entries: stopped after rebuilding %v: %w", res.Rebuilt, providers.ErrRateLimited)
 	}
+	// Some failures among successes are retried next pass; a pass that did nothing but fail did not do its work.
+	if len(res.Rebuilt) == 0 && len(res.Failed) > 0 {
+		failed := slices.Sorted(maps.Keys(res.Failed))
+		return fmt.Errorf("refresh-entries: every attempted rebuild failed, PRs %v; first: PR %d: %w", failed, failed[0], res.Failed[failed[0]])
+	}
 	return nil
 }
 
 // Once runs one pass. One PR's failure is logged and retried next pass, so it never starves the
 // rest, unless the forge answered 403 or 429; only a failed listing is returned.
 func (r RefreshEntries) Once(ctx context.Context) (RefreshResult, error) {
-	res := RefreshResult{Refused: map[int]string{}}
+	res := RefreshResult{Refused: map[int]string{}, Failed: map[int]error{}}
 	prs, err := r.Forge.ListPRsByLabel(ctx, runloreLabel)
 	if err != nil {
 		return res, err
@@ -109,6 +115,7 @@ func (r RefreshEntries) Once(ctx context.Context) (RefreshResult, error) {
 			res.Stopped = true
 			return res, nil
 		}
+		res.Failed[pr.Number] = err
 	}
 	return res, nil
 }
