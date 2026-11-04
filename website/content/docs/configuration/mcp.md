@@ -56,6 +56,30 @@ The catalog directory resolves from the positional argument first, then
 `catalog.dir` in the config. The catalog is indexed once at startup; re-run
 `lore catalog sync` (or `git pull`) and restart to pick up new entries.
 
+## Over HTTP
+
+`lore serve` can also answer the two knowledge-base tools over MCP's StreamableHTTP at
+`POST /mcp`, on the serve port. It is off by default:
+
+```yaml
+catalog:
+  dir: /var/lib/runlore/catalog
+server:
+  mcp:
+    enabled: true
+    token_env: RUNLORE_MCP_TOKEN # optional: callers send "Authorization: Bearer <token>"
+```
+
+- It serves exactly `kb_search` and `kb_get`, read-only, from the replica's own catalog. **Every
+  replica answers**, leader or follower: a request is never relayed.
+- Replies are plain JSON, one per request, with no session. Only `POST` is accepted.
+- With `token_env` set, a request without that bearer token gets `401`, and so does every request
+  when the variable is empty. Without `token_env`, **any caller allowed on RunLore's serve port
+  reaches `/mcp`**; the endpoint is read-only and serves public text, but the serve port is shared
+  with the Alertmanager webhook, so restrict who can reach it.
+- `server.mcp.enabled` needs `catalog.dir`; without a catalog (no model configured) the endpoint
+  is off and start-up logs a warning.
+
 ## Client configuration
 
 Claude Code:

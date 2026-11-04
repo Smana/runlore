@@ -14,9 +14,14 @@ import (
 // for merge — auto-closing it would discard that editorial work.
 var protectedLabels = []string{"solved", "ready-to-merge", "accepted", "investigating", "knowledge-gap"}
 
+// resolveLabel marks the entry-edit PR `lore kb resolve` opens to record a verified
+// resolution on a merged entry. It stays a human merge (KP17): it is not the shape
+// a merge automation admits, and the Queue never labels it ready-to-merge.
+const resolveLabel = "runlore-resolve"
+
 // entryEditLabels mark the lifecycle proposals the decay-driven passes open —
-// Retirement's retire PRs and Revalidation's revalidate PRs. RunLore must never
-// close one itself, by ANY pass.
+// Retirement's retire PRs, Revalidation's revalidate PRs and the resolve PRs.
+// RunLore must never close one itself, by ANY pass.
 //
 // Those passes keep no store: an entry's history is reconstructed from the forge
 // on every run, where a still-open proposal means "already asked" and a
@@ -28,7 +33,7 @@ var protectedLabels = []string{"solved", "ready-to-merge", "accepted", "investig
 // proposal stays open indefinitely; Revalidation's MaxOpen is what bounds that
 // queue instead, and closing one by hand is then a real veto rather than an
 // accident.
-var entryEditLabels = []string{retireLabel, revalidateLabel}
+var entryEditLabels = []string{retireLabel, revalidateLabel, resolveLabel}
 
 // isEntryEditProposal reports whether a PR is a retire/revalidate proposal about
 // an EXISTING merged entry rather than a draft of a new one.

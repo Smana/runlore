@@ -379,3 +379,19 @@ func TestEntryResourceRefNarrowsToTheMergeGatesShape(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCardMarkerReadsLastAndRejectsBadValues(t *testing.T) {
+	body := providers.CardMarker("resolved", 0.99) + "\n" + providers.CardMarker("no_action", 0.5)
+	if v, c, ok := providers.ParseCardMarker(body); !ok || v != "no_action" || c != 0.5 {
+		t.Fatalf("%q %v %v", v, c, ok)
+	}
+	for _, bad := range []string{
+		"<!-- runlore:card verdict=zzz confidence=0.5 -->",
+		"<!-- runlore:card verdict=resolved confidence=NaN -->",
+		"<!-- runlore:card verdict=no_action confidence=7 -->",
+	} {
+		if _, _, ok := providers.ParseCardMarker(bad); ok {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+}

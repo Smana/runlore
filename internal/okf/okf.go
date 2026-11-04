@@ -8,6 +8,7 @@ package okf
 
 import (
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -28,18 +29,28 @@ type Meta struct {
 // formatted) so a newline-bearing title/description from LLM output can't
 // inject extra frontmatter keys. Keys mirror catalog.entryMeta (the loader).
 type frontmatter struct {
-	Type          string   `yaml:"type"`
-	Title         string   `yaml:"title"`
-	Description   string   `yaml:"description"`
-	Resource      string   `yaml:"resource,omitempty"`
-	AlertResource string   `yaml:"alert_resource,omitempty"`
-	Tags          []string `yaml:"tags,omitempty"`
-	Timestamp     string   `yaml:"timestamp,omitempty"`
-	Status        string   `yaml:"status,omitempty"`
-	LastValidated string   `yaml:"last_validated,omitempty"`
-	Fingerprint   string   `yaml:"fingerprint,omitempty"`
-	Confidence    float64  `yaml:"confidence,omitempty"`
-	Provenance    []string `yaml:"provenance,omitempty"`
+	Type          string        `yaml:"type"`
+	Title         string        `yaml:"title"`
+	Description   string        `yaml:"description"`
+	Resource      string        `yaml:"resource,omitempty"`
+	AlertResource string        `yaml:"alert_resource,omitempty"`
+	Tags          []string      `yaml:"tags,omitempty"`
+	Timestamp     string        `yaml:"timestamp,omitempty"`
+	Status        string        `yaml:"status,omitempty"`
+	LastValidated string        `yaml:"last_validated,omitempty"`
+	Fingerprint   string        `yaml:"fingerprint,omitempty"`
+	Confidence    float64       `yaml:"confidence,omitempty"`
+	Provenance    []string      `yaml:"provenance,omitempty"`
+	Origin        string        `yaml:"origin,omitempty"`
+	Resolution    *resolutionFM `yaml:"resolution,omitempty"`
+}
+
+// resolutionFM is the verified-fix frontmatter block (KP11).
+type resolutionFM struct {
+	FixPR      string `yaml:"fix_pr"`
+	MergeSHA   string `yaml:"merge_sha,omitempty"`
+	Verdict    string `yaml:"verdict"`
+	VerifiedAt string `yaml:"verified_at"`
 }
 
 // Render serializes a KBEntry as OKF markdown. The body is written verbatim —
@@ -47,11 +58,16 @@ type frontmatter struct {
 // (the GitHub forge neutralizes image markdown); a human runbook being
 // imported must survive byte-for-byte.
 func Render(e providers.KBEntry, m Meta) string {
+	var res *resolutionFM
+	if r := e.Resolution; r != nil && r.Verdict == "resolved" {
+		res = &resolutionFM{FixPR: r.FixPR, MergeSHA: r.MergeSHA, Verdict: r.Verdict, VerifiedAt: r.VerifiedAt.UTC().Format(time.RFC3339)}
+	}
 	fm, _ := yaml.Marshal(frontmatter{
 		Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource,
 		AlertResource: e.AlertResource, Tags: e.Tags,
 		Timestamp: m.Timestamp, Status: m.Status, LastValidated: m.LastValidated,
 		Fingerprint: e.Fingerprint, Confidence: e.Confidence, Provenance: e.Provenance,
+		Origin: e.Origin, Resolution: res,
 	})
 	var b strings.Builder
 	b.WriteString("---\n")

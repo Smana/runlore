@@ -26,6 +26,16 @@ type GuardedForge interface {
 	RetireForge
 	RevalidateForge
 	ContestedForge
+	ResolveForge
+}
+
+// ResolveForge is what recording a verified resolution needs: the entry a PR
+// carries, an edit pushed onto an open PR, and an entry-edit PR for a merged one.
+// *github.Client satisfies it, and so does Guard.
+type ResolveForge interface {
+	PREntry(ctx context.Context, number int) (providers.PREntry, error)
+	EditEntryOnPR(ctx context.Context, number int, message string, edit func([]byte) ([]byte, bool, error)) (bool, error)
+	OpenResolvePR(ctx context.Context, path string, edit func([]byte) ([]byte, bool, error), body string) (providers.Ref, error)
 }
 
 // Guard is the sweep-safety seam around the forge: reads pass through untouched;
@@ -64,6 +74,11 @@ func (g Guard) ListIssueCommentBodies(ctx context.Context, number int) ([]string
 // IsPROpen passes through to the wrapped forge.
 func (g Guard) IsPROpen(ctx context.Context, number int) (bool, error) {
 	return g.Inner.IsPROpen(ctx, number)
+}
+
+// PREntry passes through to the wrapped forge.
+func (g Guard) PREntry(ctx context.Context, number int) (providers.PREntry, error) {
+	return g.Inner.PREntry(ctx, number)
 }
 
 // Writes are audited and dry-run-able through the single write() choke point below.
@@ -130,6 +145,31 @@ func (g Guard) OpenRevalidatePR(ctx context.Context, entryPath string, validated
 	return ref, err
 }
 
+// EditEntryOnPR pushes a resolution edit onto an open PR (audited as kb.resolve;
+// skipped in dry-run, where it reports changed=true: the push that would happen,
+// so a dry-run caller does not read it as "already recorded").
+func (g Guard) EditEntryOnPR(ctx context.Context, number int, message string, edit func([]byte) ([]byte, bool, error)) (bool, error) {
+	changed := g.DryRun
+	err := g.write("kb.resolve", fmt.Sprintf("pr/%d", number), firstLine(message), func() error {
+		var ierr error
+		changed, ierr = g.Inner.EditEntryOnPR(ctx, number, message, edit)
+		return ierr
+	})
+	return changed, err
+}
+
+// OpenResolvePR opens an entry-edit PR recording a resolution on a merged entry
+// (audited as kb.resolve; skipped in dry-run).
+func (g Guard) OpenResolvePR(ctx context.Context, path string, edit func([]byte) ([]byte, bool, error), body string) (providers.Ref, error) {
+	var ref providers.Ref
+	err := g.write("kb.resolve", path, firstLine(body), func() error {
+		var ierr error
+		ref, ierr = g.Inner.OpenResolvePR(ctx, path, edit, body)
+		return ierr
+	})
+	return ref, err
+}
+
 // write is the single choke point for every forge mutation a grooming pass performs.
 // Dry-run returns nil so a pass's comment-then-close sequencing (Lifecycle, Dedup,
 // Suppress) walks both steps and both are visible in the dry-run report.
@@ -159,7 +199,8 @@ func doneSkipOrFailed(err error) audit.Decision {
 	switch {
 	case errors.Is(err, github.ErrRecentlyValidated),
 		errors.Is(err, github.ErrEntryInactive),
-		errors.Is(err, github.ErrAlreadyRetired):
+		errors.Is(err, github.ErrAlreadyRetired),
+		errors.Is(err, providers.ErrAlreadyResolved):
 		return audit.DecisionSkipped
 	default:
 		return audit.DecisionFailed

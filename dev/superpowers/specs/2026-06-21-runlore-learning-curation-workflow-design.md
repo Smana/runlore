@@ -27,7 +27,7 @@ This design makes the **curation gate actually work** so the catalog compounds, 
 
 | # | Decision | Rationale |
 |---|---|---|
-| D1 | **Human stays the merge approver**, but the system delivers a short, deduped, high-quality, **decision-ready** queue | RunLore's design treats human merge review as the load-bearing quality gate; the fix is to make that decision trivial, not to automate it away. |
+| D1 | D1 (amended 2026-11-03): **A human owns the merge policy and decides every entry the evidence does not cover.** An entry whose fix merged and whose outcome a machine verified (the alert resolved after a soak, the post-merge monitor healthy) may be merged by the adopter's merge automation, as `status: draft`, and is audited in the queue. D6 is unchanged: the curator never merges. | RunLore's design treats human merge review as the load-bearing quality gate where the evidence is thin; the fix is to make that decision trivial, and to let an adopter's automation take the entries a machine has verified. |
 | D2 | **Drop the per-investigation issue.** Uncertain findings → **chat alert only**, no KB-repo artifact | Issues never enter recall (only merged entries do); per-finding issues are a redundant pile-up nobody works (7 open, 0 promoted). |
 | D3 | **The only issues that exist** are rare **knowledge-gap** issues opened when a pattern *recurs unresolved* | The one genuinely useful signal an issue carries: "RunLore is blind here" → author seeded knowledge or fix RunLore. Requires the cross-incident view (Phase 2). |
 | D4 | **Both layers, sequenced**: Phase 1 file-time gate (stop new noise) → Phase 2 `lore curate` agent (groom backlog + ongoing) | File-time stops the flood cheaply; only a groomer can clean the standing backlog and do cross-incident dedup/upgrade/recurrence. |
@@ -153,7 +153,7 @@ Each phase is its own implementation plan (à la the eval-harness engine/catalog
 
 ## 8. Out of scope
 
-- **Auto-merge** of any kind (human stays the gate, D1).
+- **Auto-merge inside RunLore** (D6). An adopter's merge automation may merge a verified entry (D1, amended 2026-11-03).
 - **Cross-incident pattern *synthesis*** into higher-order playbooks (per-incident entries are fine, D5) — a possible later phase, not now.
 - Vector/embedding retrieval (the catalog is BM25 today; orthogonal).
 - GitLab forge support (GitHub only, as today).

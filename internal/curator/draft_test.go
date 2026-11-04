@@ -3,8 +3,12 @@
 package curator
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/catalog"
@@ -495,5 +499,40 @@ func TestDraftKBEntryResourceClearsTheMergeGate(t *testing.T) {
 	inv.AlertResource = providers.Workload{Namespace: "argocd", Name: "essentials, monitoring"}
 	if got := draftKBEntry(inv).AlertResource; strings.ContainsAny(got, " \t\r\n") {
 		t.Errorf("KBEntry.AlertResource = %q still carries whitespace", got)
+	}
+}
+
+func TestDraftKBEntryOriginVerdictAndEvidenceLine(t *testing.T) {
+	long := strings.Repeat("e", 300)
+	e := draftKBEntry(providers.Investigation{
+		Title: "T", Verdict: providers.VerdictActionRequired, Confidence: 0.86,
+		RootCauses: []providers.Hypothesis{{Summary: "s", Confidence: 0.86, Evidence: []string{long, "second"}}},
+	})
+	if e.Origin != "runlore" || e.Verdict != "action_required" || e.EvidenceLine != long[:200] {
+		t.Fatalf("origin=%q verdict=%q evidence=%d bytes", e.Origin, e.Verdict, len(e.EvidenceLine))
+	}
+}
+
+func TestRenderedEntryWithOriginAndResolutionValidatesClean(t *testing.T) {
+	e := draftKBEntry(providers.Investigation{
+		Title: "T", Confidence: 0.8,
+		RootCauses: []providers.Hypothesis{{Summary: "s", Confidence: 0.8, Evidence: []string{"ev"}, SuggestedAction: "a"}},
+	})
+	plain := okf.Render(e, okf.Meta{})
+	e.Resolution = &providers.AppliedResolution{FixPR: "https://github.com/o/r/pull/1", MergeSHA: "abc", Verdict: "resolved", VerifiedAt: time.Now()}
+	rich := okf.Render(e, okf.Meta{})
+	dir := t.TempDir()
+	issues := func(doc string) []kbvalidate.Issue {
+		if err := os.WriteFile(filepath.Join(dir, "e.md"), []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		es, _, err := catalog.Load(dir)
+		if err != nil || len(es) != 1 {
+			t.Fatalf("load: %v %d", err, len(es))
+		}
+		return kbvalidate.ValidateStructural(es[0])
+	}
+	if got, want := issues(rich), issues(plain); !reflect.DeepEqual(got, want) {
+		t.Fatalf("new fields changed validation: %v vs %v", got, want)
 	}
 }

@@ -100,6 +100,7 @@ type Server struct {
 	guard            *authGuard         // failed-auth backoff for the shared-token endpoints
 	threads          ThreadHandler      // nil unless notify.slack.thread_capture is on
 	factory          http.Handler       // nil unless factory.url is set; serves POST /factory/webhook
+	mcp              http.Handler       // nil unless server.mcp.enabled; serves /mcp from this replica's own catalog
 	seenEvents       *seenSet           // Slack event_id dedup for delivery retries
 	telemetryMetrics *telemetry.Metrics // nil unless telemetry is configured; nil-safe throughout
 	// eventDispatcher and busyDispatcher run detached mention handlers and the
@@ -224,6 +225,7 @@ type Actions struct {
 	ApproverIDs  []string           // Slack user IDs permitted to approve actions
 	Threads      ThreadHandler      // opt-in thread capture (notify.slack.thread_capture)
 	Factory      http.Handler       // opt-in agent factory webhook receiver (factory.url); mounted at POST /factory/webhook
+	MCP          http.Handler       // opt-in read-only KB tools (server.mcp); mounted at /mcp, never forwarded
 	Metrics      *telemetry.Metrics // optional; nil-safe — powers the mentions-dropped-on-saturation counter
 	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
 	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions) — a
@@ -262,6 +264,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		guard:            newAuthGuard(),
 		threads:          liveIface(acts.Threads),
 		factory:          liveIface(acts.Factory),
+		mcp:              liveIface(acts.MCP),
 		seenEvents:       newSeenSet(1024),
 		telemetryMetrics: acts.Metrics,
 		eventDispatcher:  thread.NewDispatcher(maxConcurrentMentions, mentionHandlerTimeout, log),
@@ -302,6 +305,11 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	// authenticates itself (Standard Webhooks signature); it is not behind the shared token.
 	if s.factory != nil {
 		mux.Handle("POST /factory/webhook", work(s.factory))
+	}
+	// /mcp is not work-bearing: it only reads this replica's own warm catalog, so every
+	// replica answers it, follower or leader. It handles its own methods and bearer token.
+	if s.mcp != nil {
+		mux.Handle("/mcp", s.mcp)
 	}
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)

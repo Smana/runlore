@@ -504,6 +504,16 @@ type ServerConfig struct {
 	// POST /webhook/alertmanager as "Authorization: Bearer <token>". Empty leaves
 	// the webhook unauthenticated (rejected by Validate when actions.mode=auto).
 	WebhookTokenEnv string `yaml:"webhook_token_env"`
+	// MCP serves kb_search and kb_get over StreamableHTTP at POST /mcp on the serve port.
+	MCP ServerMCP `yaml:"mcp"`
+}
+
+// ServerMCP configures the read-only /mcp endpoint. Off by default.
+type ServerMCP struct {
+	Enabled bool `yaml:"enabled"`
+	// TokenEnv names an env var holding a bearer token required on /mcp. Empty leaves it
+	// open to any caller the serve port admits; set but empty, every request gets 401.
+	TokenEnv string `yaml:"token_env"`
 }
 
 // Investigation holds cost/throughput controls on the alert→investigation→LLM path.
@@ -2093,6 +2103,9 @@ var (
 func (c *Config) Validate() error {
 	if err := validateFactory(c.Factory); err != nil {
 		return err
+	}
+	if c.Server.MCP.Enabled && c.Catalog.Dir == "" {
+		return fmt.Errorf("server.mcp.enabled needs catalog.dir")
 	}
 	if err := validateCloud(c.Cloud); err != nil {
 		return err

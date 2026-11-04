@@ -17,7 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -2012,6 +2014,25 @@ func ValidVerdict(v Verdict) bool {
 	return v.Conclusive() || v == VerdictInconclusive
 }
 
+// AppliedResolution is a fix RunLore saw merged and soaked: what was applied
+// and the verdict the soak returned. Written by RunLore, never by the model.
+type AppliedResolution struct {
+	FixPR, MergeSHA, Verdict, Why, Diff, Evidence string
+	VerifiedAt                                    time.Time
+}
+
+// PREntry is the catalog entry a knowledge-base pull request carries and the
+// state it is in: "open", "merged", or "closed" (closed without merging).
+type PREntry struct{ Path, State string }
+
+// PullSummary is what the forge says a merged fix changed: the PR's URL, the
+// merge commit, the first few files and the line counts.
+type PullSummary struct {
+	URL, MergeSHA        string
+	Files                []string
+	Additions, Deletions int
+}
+
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
 	Title      string
@@ -2022,8 +2043,11 @@ type Investigation struct {
 	RuledOut   []string // hypotheses considered and rejected, one line each with the disproving evidence
 	DataGaps   []string // signals that could not be obtained (tool errors, missing metrics, truncation) — a data limitation, not a question for a human
 	Confidence float64
-	Recalled   bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
-	Resource   Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
+	// Resolutions are the fixes RunLore verified after merge. Set by RunLore at
+	// runtime, never by the model.
+	Resolutions []AppliedResolution
+	Recalled    bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
+	Resource    Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
 	// AlertResource is the workload the ORIGINATING ALERT fired on, stamped verbatim
 	// from the Request and never touched by the model. It is NOT Resource: Resource is
 	// where the fault was FOUND, which the investigation routinely refines to a deeper
@@ -2251,6 +2275,14 @@ type KBEntry struct {
 	Fingerprint string   // deterministic dedup fingerprint (see curator.DupFingerprint)
 	Confidence  float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
 	Provenance  []string // distinct causing-change refs; queryable extension frontmatter
+	// Origin is who wrote the entry ("runlore"); queryable extension frontmatter.
+	Origin string
+	// Resolution is the verified fix; okf.Render writes it for a "resolved" verdict only.
+	Resolution *AppliedResolution
+	// Verdict and EvidenceLine render in the PR body review card only, never in
+	// the committed entry.
+	Verdict      string
+	EvidenceLine string
 	// Reviewer context, rendered in the PR BODY only — never in the committed
 	// entry file (renderEntry ignores these), so the catalog and validator are
 	// untouched. Related is the draft-time BM25 neighborhood; the recurrence
@@ -2482,4 +2514,39 @@ func ParseFingerprintMarker(body string) string {
 		return ""
 	}
 	return strings.TrimSpace(rest[:j])
+}
+
+const cardMarkerPrefix = "<!-- runlore:card verdict="
+
+// CardMarker renders the hidden PR-body review card marker. The verdict is
+// checked against ValidVerdict (the text is model-influenced); anything else is
+// written as "unknown" so it cannot break out of the comment.
+func CardMarker(verdict string, confidence float64) string {
+	if !ValidVerdict(Verdict(verdict)) {
+		verdict = "unknown"
+	}
+	return fmt.Sprintf("%s%s confidence=%.2f -->", cardMarkerPrefix, verdict, confidence)
+}
+
+// ParseCardMarker reads the review card marker back from a PR body.
+func ParseCardMarker(body string) (verdict string, confidence float64, ok bool) {
+	// The LAST marker: RunLore writes its own after every untrusted segment.
+	i := strings.LastIndex(body, cardMarkerPrefix)
+	if i < 0 {
+		return "", 0, false
+	}
+	rest := body[i+len(cardMarkerPrefix):]
+	j := strings.Index(rest, " -->")
+	if j < 0 {
+		return "", 0, false
+	}
+	v, c, found := strings.Cut(rest[:j], " confidence=")
+	if !found {
+		return "", 0, false
+	}
+	f, err := strconv.ParseFloat(c, 64)
+	if err != nil || math.IsNaN(f) || f < 0 || f > 1 || (v != "unknown" && !ValidVerdict(Verdict(v))) {
+		return "", 0, false
+	}
+	return v, f, true
 }

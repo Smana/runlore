@@ -556,6 +556,11 @@ func RunServe(version string, args []string) error {
 		acts.Factory = rc
 		log.Info("agent factory webhook enabled", "endpoint", "/factory/webhook")
 	}
+	// The read-only KB tools at /mcp, behind the same nil check (typed-nil) as above.
+	if h := BuildKBMCPHandler(cfg, cat, version, log); h != nil {
+		acts.MCP = h
+		log.Info("kb mcp enabled", "endpoint", "/mcp")
+	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds
 	// with replicaCount>1) and the Service may route a webhook to any of them —
