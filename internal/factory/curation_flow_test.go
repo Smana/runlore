@@ -365,13 +365,16 @@ func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		state    string
-		entryErr error
+		entryErr error // what PREntry answers: it also fails on a missing label or a second entry
+		openErr  error // what IsPROpen answers
 		fixRoom  string
 		filed    bool
 	}{
 		{name: "an open PR, no fix", state: "open"},
 		{name: "a merged PR, no fix files as before", state: "merged", filed: true},
-		{name: "a PR that cannot be read, no fix", entryErr: fmt.Errorf("a blip")},
+		{name: "a merged PR PREntry cannot read still files", state: "merged", entryErr: providers.ErrNotRunLorePR, filed: true},
+		{name: "a closed PR PREntry cannot read still files", state: "closed", entryErr: providers.ErrNotRunLorePR, filed: true},
+		{name: "a PR that cannot be read, no fix", openErr: fmt.Errorf("a blip")},
 		{name: "a PR closed unmerged restarts", state: "closed", filed: true},
 		{name: "an open PR, a bound decided fix", state: "open", fixRoom: "fix1", filed: true},
 	} {
@@ -379,7 +382,7 @@ func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
 			f := newFlowRig(t)
 			f.g.cu.Drafts = f.g
 			f.g.entries[164] = providers.PREntry{Path: draftEntry, State: tc.state}
-			f.g.entryErr = func(int) error { return tc.entryErr }
+			f.g.entryErr, f.g.openErr = func(int) error { return tc.entryErr }, func(int) error { return tc.openErr }
 			f.detect("first", 201, "room0001")
 			must(t, f.g.l.Upsert("k1", func(r *Record) {
 				r.Curation.Drafted, r.Curation.Entry, r.Curation.Investigation = draftURL, draftEntry, nil
@@ -398,6 +401,74 @@ func TestCurateADraftedEntryWithALivePRAndNoFixFilesNothing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An unreadable PR holds filing for 30 counted repeats past the window, logged each time, then files.
+// A read that works clears the count, and a cancelled context counts nothing.
+func TestCurateAnUnreadablePRHoldsForABoundedNumberOfRepeats(t *testing.T) {
+	setup := func(t *testing.T) *flowRig {
+		f := newFlowRig(t)
+		f.g.cu.Drafts = f.g
+		f.g.entries[164] = providers.PREntry{Path: draftEntry, State: "open"}
+		f.detect("first", 201, "room0001")
+		must(t, f.g.l.Upsert("k1", func(r *Record) {
+			r.Curation.Drafted, r.Curation.Entry, r.Curation.Investigation = draftURL, draftEntry, nil
+		}))
+		f.g.openErr = func(int) error { return fmt.Errorf("a blip") }
+		f.g.now = f.g.now.Add(30 * 24 * time.Hour)
+		return f
+	}
+	failures := func(f *flowRig) int { return f.record().Curation.PastWindowFailures[stepPRState] }
+
+	t.Run("a blip holds and logs", func(t *testing.T) {
+		f := setup(t)
+		f.detect("again", 201, "room0002")
+		if len(f.factory.keys) != 1 || failures(f) != 1 || !strings.Contains(f.g.logs.String(), "reading the entry PR failed") {
+			t.Fatalf("%d tasks, %d failures, log %q", len(f.factory.keys), failures(f), f.g.logs.String())
+		}
+	})
+	t.Run("thirty failures then it files", func(t *testing.T) {
+		f := setup(t)
+		for i := 1; i < maxPastWindowFailures; i++ {
+			f.detect("again", 201, "room0002")
+			if len(f.factory.keys) != 1 || failures(f) != i {
+				t.Fatalf("repeat %d: %d tasks, %d failures", i, len(f.factory.keys), failures(f))
+			}
+		}
+		f.detect("again", 201, "room0002")
+		if len(f.factory.keys) != 2 || failures(f) != 0 || !strings.Contains(f.g.logs.String(), "not trying again") {
+			t.Fatalf("%d tasks, %d failures, log %q", len(f.factory.keys), failures(f), f.g.logs.String())
+		}
+	})
+	t.Run("a read that works clears the count", func(t *testing.T) {
+		f := setup(t)
+		for range 5 {
+			f.detect("again", 201, "room0002")
+		}
+		f.g.openErr = nil
+		f.detect("again", 201, "room0002")
+		if len(f.factory.keys) != 1 || failures(f) != 0 {
+			t.Fatalf("an open PR still holds: %d tasks, %d failures", len(f.factory.keys), failures(f))
+		}
+	})
+	t.Run("a cancelled context counts nothing", func(t *testing.T) {
+		f := setup(t)
+		c, cancel := context.WithCancel(ctx)
+		cancel()
+		if !f.g.cu.prHolds(c, "k1", f.record().Curation) || failures(f) != 0 {
+			t.Fatalf("%d failures", failures(f))
+		}
+	})
+	t.Run("a restart on a closed PR starts a clean count", func(t *testing.T) {
+		f := setup(t)
+		f.detect("again", 201, "room0002")
+		f.g.openErr = nil
+		f.g.entries[164] = providers.PREntry{Path: draftEntry, State: "closed"}
+		f.detect("again", 201, "room0003")
+		if h := f.record().Curation; h.Drafted != "" || failures(f) != 0 {
+			t.Fatalf("%+v", h)
+		}
+	})
 }
 
 // A merged entry is acted on: a recurrence months later reaches the factory, and its verified fix edits
