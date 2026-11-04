@@ -259,11 +259,14 @@ func TestRefusesAPRThatIsNotRunLores(t *testing.T) {
 				if _, err := c.EditEntryOnPR(ctx, 84, "m", addLine("x")); !errors.Is(err, providers.ErrNotRunLorePR) || len(s.calls) != 0 {
 					t.Fatal("EditEntryOnPR: ", err, s.calls)
 				}
-				if err := c.AppendToEntryOnPR(ctx, 84, "note", "k"); !errors.Is(err, providers.ErrNotRunLorePR) || len(s.writes()) != 0 {
-					t.Fatal("AppendToEntryOnPR: ", err)
-				}
 			}
 		})
+	}
+	// A thread note keeps its old contract: an unlabelled PR on a RunLore branch
+	// (the best-effort label failed) still takes the note.
+	u := &stubPR{labels: []string{}}
+	if err := u.start(t).AppendToEntryOnPR(ctx, 84, "### note\n\nhi", "k"); err != nil || len(u.writes()) != 1 {
+		t.Fatal("a thread note on an unlabelled RunLore-branch PR appends: ", err)
 	}
 	// The showcase shape: label runlore, head runlore/kb-...
 	s := &stubPR{labels: []string{"runlore", "solved"}, branch: "runlore/kb-oom-1"}

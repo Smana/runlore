@@ -83,7 +83,14 @@ func runKBResolve(args []string, w io.Writer) error {
 		}
 		text = redact.Secrets(string(raw))
 	}
-	r := providers.AppliedResolution{FixPR: *fix, MergeSHA: *sha, Verdict: *verdict, Evidence: text, VerifiedAt: time.Now().UTC()}
+	r := providers.AppliedResolution{FixPR: *fix, MergeSHA: *sha, Verdict: *verdict, VerifiedAt: time.Now().UTC()}
+	// A resolved fix carries the evidence as its soak evidence; a persisting one as
+	// the reason it did not hold: ApplyBody reads only Why for that verdict.
+	if *verdict == "persisting" {
+		r.Why = text
+	} else {
+		r.Evidence = text
+	}
 	if err := kbresolve.Validate(r); err != nil {
 		return usage("%v", err)
 	}

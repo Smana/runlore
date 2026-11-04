@@ -104,3 +104,17 @@ type closedStub struct{ resolveStub }
 func (*closedStub) PREntry(context.Context, int) (providers.PREntry, error) {
 	return providers.PREntry{State: "closed"}, nil
 }
+
+func TestKBResolvePersistingKeepsEvidence(t *testing.T) {
+	stub := &resolveStub{raw: resolveEntry}
+	swapResolveForge(t, stub)
+	evidence := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(evidence, []byte("the alert fired again after 20m"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	err := runKBResolve([]string{"--pr", "157", "--fix", "https://github.com/Smana/cloud-native-ref/pull/2638", "--verdict", "persisting", "--evidence", evidence}, &out)
+	if err != nil || !strings.Contains(stub.raw, "did not hold: the alert fired again after 20m.") {
+		t.Fatal(err, stub.raw)
+	}
+}

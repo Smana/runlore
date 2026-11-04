@@ -59,7 +59,7 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 	// fields (author, thread title) around it, and on the first-draft path those
 	// are covered by renderEntry, not by NoteBody.
 	block := okf.WithNoteMarker(okf.NeutralizeImages(body), key)
-	_, err := c.editEntryOnPR(ctx, number, func(entry string) string { return "runlore: append operator note to " + entry },
+	_, err := c.editEntryOnPR(ctx, number, false, func(entry string) string { return "runlore: append operator note to " + entry },
 		func(raw []byte) ([]byte, bool, error) {
 			if okf.HasNoteMarker(raw, key) {
 				// Already recorded: a replayed chat delivery, or a retry of a write whose
@@ -82,7 +82,7 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 // removal means no push. An edit must be idempotent: after a failed PUT it is run
 // once more over what is on the branch, and "no change" means the write landed.
 func (c *Client) EditEntryOnPR(ctx context.Context, number int, message string, edit func([]byte) ([]byte, bool, error)) (bool, error) {
-	return c.editEntryOnPR(ctx, number, func(string) string { return message }, edit)
+	return c.editEntryOnPR(ctx, number, true, func(string) string { return message }, edit)
 }
 
 // prHead is what the one read of a pull request returns.
@@ -178,7 +178,12 @@ func (c *Client) PREntry(ctx context.Context, number int) (providers.PREntry, er
 	return providers.PREntry{Path: path, State: state}, nil
 }
 
-func (c *Client) editEntryOnPR(ctx context.Context, number int, message func(entry string) string, edit func([]byte) ([]byte, bool, error)) (bool, error) {
+// editEntryOnPR is the shared read-edit-put. ownOnly makes it refuse a pull request
+// RunLore did not open (requireRunLorePR): set for EditEntryOnPR, whose number comes
+// from an operator, and not for a thread note, whose caller only holds a PR that
+// capture itself opened, and whose label may be missing when the best-effort
+// labelling failed.
+func (c *Client) editEntryOnPR(ctx context.Context, number int, ownOnly bool, message func(entry string) string, edit func([]byte) ([]byte, bool, error)) (bool, error) {
 	pr, err := c.readPR(ctx, number)
 	if err != nil {
 		return false, err
@@ -195,8 +200,10 @@ func (c *Client) editEntryOnPR(ctx context.Context, number int, message func(ent
 	if pr.branch == "" {
 		return false, fmt.Errorf("github PR %d: no head branch to commit onto", number)
 	}
-	if err := requireRunLorePR(number, pr); err != nil {
-		return false, err
+	if ownOnly {
+		if err := requireRunLorePR(number, pr); err != nil {
+			return false, err
+		}
 	}
 	// head.ref is a bare BRANCH NAME while every write below addresses
 	// c.owner/c.repo, so for a pull request opened from a FORK the branch named
