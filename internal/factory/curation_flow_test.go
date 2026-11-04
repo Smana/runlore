@@ -235,6 +235,7 @@ func TestCurateARedetectionFilesNothingWhileAGenerationIsUndecided(t *testing.T)
 		{name: "a fix bound", set: bound},
 		{name: "a fix bound, past the window", set: bound, wait: 168 * time.Hour, files: true},
 		{name: "a fix merged and soaking", set: func(r *Record) { bound(r); r.MergedAt, r.SoakUntil = time.Unix(1, 0), time.Unix(2, 0) }},
+		{name: "a fix merged and soaking, past the window", set: func(r *Record) { bound(r); r.MergedAt, r.SoakUntil = time.Unix(1, 0), time.Unix(2, 0) }, wait: 168 * time.Hour},
 		{name: "a fix bound on a drafted hold", set: func(r *Record) { bound(r); r.Curation.Drafted = draftURL }, ref: draftURL},
 		{name: "a fix bound on a settled hold", set: func(r *Record) { bound(r); r.Curation.Drafted = "none" }},
 		{name: "a task done with its PR still open", set: func(r *Record) { bound(r); r.FixEnded = "done" }},

@@ -1107,7 +1107,8 @@ factory:
   fix room binds, and then while a bound fix has no soak verdict, no refused
   verdict, no revert and no `regression`. So one stub waits for its maintainer, and a repeat of the
   alert cannot reset a fix or its soak. It is released when the fix room ends without a merge, and
-  in every case when `window` passes. A stub nobody publishes therefore gets no newer one until
+  when `window` passes with the fix unmerged; a merged fix keeps its soak until its verdict. A stub
+  nobody publishes therefore gets no newer one until
   `window`, and its entry arrives without a verified fix.
 
   Once a generation is decided, the next re-detection files the next generation. If a held incident

@@ -175,7 +175,9 @@ func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte,
 
 // undecided reports whether r's hold should keep the next re-detection from filing. A bound fix is
 // undecided until a verdict, a refusal, a revert or a regression, until its room ends without a merge,
-// or until the window, so a fix that never ends and never merges cannot block filing for good.
+// or, while it is unmerged, until the window, so a fix that never ends and never merges cannot block
+// filing for good. A merged fix keeps its soak past the window: the verifier always reaches a verdict or
+// an outcome.
 // A hold not drafted, with no fix yet, is one stub waiting for its human until the window: a new triager
 // and stub each repeat buy nothing. An observe-only hold has nothing of its own to protect.
 func (c *Curation) undecided(r Record) bool {
@@ -186,7 +188,7 @@ func (c *Curation) undecided(r Record) bool {
 	case r.FixRoom == "":
 		return h.Drafted == "" && !c.windowPassed(h)
 	}
-	return r.Verdict == "" && r.Outcome == "" && !r.Reverted && r.Monitor != "regression" && !r.fixEndedUnmerged() && !c.windowPassed(h)
+	return r.Verdict == "" && r.Outcome == "" && !r.Reverted && r.Monitor != "regression" && !r.fixEndedUnmerged() && (!r.MergedAt.IsZero() || !c.windowPassed(h))
 }
 
 // noLiveArtifact reports whether h settled with nothing to its name: no PR and no entry, or a PR the
