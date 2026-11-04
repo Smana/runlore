@@ -14,6 +14,20 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.19.0](https://github.com/Smana/runlore/compare/v0.18.0...v0.19.0) (2026-11-04)
+
+
+### Features
+
+* **curate:** ready-to-merge from verified evidence, rebuilt entry PRs and the Knowledge queue ([#606](https://github.com/Smana/runlore/issues/606)) ([263678c](https://github.com/Smana/runlore/commit/263678c1367e6e88e2bfc4fdbf46661a82603d76))
+* **factory:** an incident's entry is drafted once its fix is verified, and the verdict earns it trust ([#605](https://github.com/Smana/runlore/issues/605)) ([053a374](https://github.com/Smana/runlore/commit/053a3749b5d71bb028ccae63ff3a73b4a6882ec8))
+* **kb:** knowledge over HTTP, the entry's origin and resolution, lore kb resolve ([#604](https://github.com/Smana/runlore/issues/604)) ([0642d9d](https://github.com/Smana/runlore/commit/0642d9d08a2fd93064428d8871a13c956e060ed9))
+
+
+### Bug Fixes
+
+* **factory:** log at Info the merge seen, the soak scheduled, the verdict posted, and an event that matches no incident ([#601](https://github.com/Smana/runlore/issues/601)) ([b730f1c](https://github.com/Smana/runlore/commit/b730f1cb0c8792c4a23b0fe2a7a98c8266e4a0ac))
+
 ## [0.18.0](https://github.com/Smana/runlore/compare/v0.17.0...v0.18.0) (2026-10-28)
 
 
