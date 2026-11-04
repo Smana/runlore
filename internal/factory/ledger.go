@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +28,8 @@ const (
 	seenWindow = 10 * time.Minute
 	// maxEvents is how many event types a Record keeps.
 	maxEvents = 20
+	// maxLineBytes is the longest line Reload reads; a longer one is treated as torn.
+	maxLineBytes = 4 << 20
 	// compactFactor and compactFloor decide when the file is rewritten: once it holds
 	// compactFactor times the live lines, and at least compactFloor lines.
 	compactFactor = 4
@@ -52,6 +57,133 @@ type Record struct {
 	Verdict       string    `json:"verdict,omitempty"`
 	Outcome       string    `json:"outcome,omitempty"`
 	Events        []string  `json:"events,omitempty"` // the last 20 event types seen
+	// Repo is the fix's repository ("owner/name"), from any event that carried a valid one.
+	Repo string `json:"repo,omitempty"`
+	// Monitor is the factory monitor's verdict on the fix (healthy, regression or inconclusive).
+	Monitor   string    `json:"monitor,omitempty"`
+	MonitorAt time.Time `json:"monitor_at,omitzero"`
+	// Evidence is one line: the soak's firing state and the first root cause's first evidence.
+	Evidence string `json:"evidence,omitempty"`
+	// Observed and Resolved are the outcome last observed and last written into the entry; they
+	// travel with the generation across the reset.
+	Observed string `json:"observed,omitempty"`
+	Resolved string `json:"resolved,omitempty"`
+	Reverted bool   `json:"reverted,omitempty"`
+	// FixEnded is the state the fix room's task ended in ("done", "failed", "stopped"); empty while it runs.
+	FixEnded string `json:"fix_ended,omitempty"`
+	// Curation is the hold the deferral keeps for this incident; nil without one.
+	Curation *Hold `json:"curation,omitempty"`
+	// DraftFingerprint is the fingerprint of the first PR today's path opened for this incident. It
+	// survives the reset and seeds a later hold, so that hold's draft adopts the PR.
+	DraftFingerprint string `json:"draft_fingerprint,omitempty"`
+}
+
+// Generation is one fix attempt of an incident: what the soak, the factory's monitor and a revert
+// said of it. Record.Generation is the current one; Hold.Generations archives the closed ones.
+type Generation struct {
+	Room      string    `json:"room,omitempty"`
+	FixRoom   string    `json:"fix_room,omitempty"`
+	Repo      string    `json:"repo,omitempty"`
+	PR        int       `json:"pr,omitempty"`
+	MergedAt  time.Time `json:"merged_at,omitzero"`
+	MonitorAt time.Time `json:"monitor_at,omitzero"`
+	Verdict   string    `json:"verdict,omitempty"`
+	Monitor   string    `json:"monitor,omitempty"`
+	Evidence  string    `json:"evidence,omitempty"`
+	Observed  string    `json:"observed,omitempty"`
+	Resolved  string    `json:"resolved,omitempty"`
+	Reverted  bool      `json:"reverted,omitempty"`
+}
+
+// Hold is the curation the deferral keeps for an incident until its window ends.
+type Hold struct {
+	AcceptedAt    time.Time       `json:"accepted_at,omitzero"`
+	Investigation json.RawMessage `json:"investigation,omitempty"`
+	Generations   []Generation    `json:"generations,omitempty"`
+	Fingerprint   string          `json:"fingerprint,omitempty"`
+	Entry         string          `json:"entry,omitempty"`
+	Drafted       string          `json:"drafted,omitempty"`
+	DraftedAt     time.Time       `json:"drafted_at,omitzero"`
+	ObserveOnly   bool            `json:"observe_only,omitempty"`
+	PromoteDue    bool            `json:"promote_due,omitempty"`
+	// LinkDue is true from the draft until the outcome ledger links the trigger to the drafted PR.
+	LinkDue bool `json:"link_due,omitempty"`
+	// EntryDue is true from the moment a PR opens until its entry path has been read.
+	EntryDue bool `json:"entry_due,omitempty"`
+	// PastWindowFailures counts each step's failed attempts since the window passed; a success clears
+	// its count. It lives here so a restart keeps it.
+	PastWindowFailures map[string]int `json:"past_window_failures,omitempty"`
+}
+
+// fixEndedUnmerged reports whether the fix room's task is over with nothing left to merge. A task can end
+// done with its PR still open, a human merge following later, so that alone keeps waiting.
+func (r Record) fixEndedUnmerged() bool {
+	return r.FixEnded != "" && r.MergedAt.IsZero() && (r.FixEnded != "done" || r.PR == 0)
+}
+
+// recordVerdict writes the soak's verdict on the generation of fix room room, current or archived: the
+// record may have moved to a new generation while the verdict was being gathered.
+func (r *Record) recordVerdict(room, verdict, evidence string) {
+	if r.FixRoom == room {
+		r.Verdict, r.Evidence = verdict, evidence
+		return
+	}
+	if r.Curation != nil {
+		for i := range r.Curation.Generations {
+			if g := &r.Curation.Generations[i]; g.FixRoom == room {
+				g.Verdict, g.Evidence = verdict, evidence
+			}
+		}
+	}
+}
+
+// Generation is the record's current generation.
+func (r Record) Generation() Generation {
+	return Generation{
+		Room: r.Room, FixRoom: r.FixRoom, Repo: r.Repo, PR: r.PR, MergedAt: r.MergedAt, MonitorAt: r.MonitorAt,
+		Verdict: r.Verdict, Monitor: r.Monitor, Evidence: r.Evidence, Observed: r.Observed, Resolved: r.Resolved, Reverted: r.Reverted,
+	}
+}
+
+// Outcome is "held" (the soak resolved, the monitor said healthy, no revert), "failed" (the soak
+// persisted, the monitor saw a regression, or the fix was reverted) or "" while it is pending: an
+// inconclusive or missing monitor verdict waits for the window.
+func (g Generation) Outcome() string {
+	switch {
+	case g.Reverted, g.Verdict == "persisting", g.Monitor == "regression":
+		return "failed"
+	case g.Verdict == "resolved" && g.Monitor == "healthy":
+		return "held"
+	}
+	return ""
+}
+
+// startGeneration resets r for a new generation of its TriggerKey (the incident re-fired after the
+// old task ended), or a stale merge would trigger the old soak. The hold and the draft's fingerprint
+// survive, the hold first archiving a generation that had a fix; the Slack root stays unless clearSlack.
+func (r *Record) startGeneration(clearSlack bool) {
+	hold := r.Curation
+	if hold != nil && r.FixRoom != "" {
+		hold.Generations = append(hold.Generations, r.Generation())
+	}
+	next := Record{TriggerKey: r.TriggerKey, Curation: hold, DraftFingerprint: r.DraftFingerprint}
+	if !clearSlack {
+		next.SlackRoot, next.SlackChannel = r.SlackRoot, r.SlackChannel
+	}
+	*r = next
+}
+
+// clone is a deep copy: nothing in it aliases r.
+func (r Record) clone() Record {
+	r.Events = slices.Clone(r.Events)
+	if r.Curation != nil {
+		h := *r.Curation
+		h.Generations = slices.Clone(h.Generations)
+		h.Investigation = slices.Clone(h.Investigation)
+		h.PastWindowFailures = maps.Clone(h.PastWindowFailures)
+		r.Curation = &h
+	}
+	return r
 }
 
 // line is one ledger line: a whole record, or a webhook-id seen at a time.
@@ -90,19 +222,19 @@ func OpenLedger(path string, now func() time.Time) (*Ledger, error) {
 }
 
 // Reload replays the file, replacing the in-memory state: a replica that becomes leader must see
-// what another replica appended. A torn line is skipped with a warning and the file is rewritten
-// clean, so the next append cannot fuse with the torn bytes.
+// what another replica appended. A failed read leaves that state as it was. A torn or oversized line
+// is skipped with a warning and the file is rewritten clean, so the next append cannot fuse with the
+// torn bytes and one line never costs the rest of the ledger.
 func (l *Ledger) Reload() error {
 	if l.path == "" {
 		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.records = map[string]Record{}
-	l.seen = map[string]time.Time{}
-	l.lines = 0
+	records, seen, lines := map[string]Record{}, map[string]time.Time{}, 0
 	f, err := os.Open(l.path)
 	if errors.Is(err, fs.ErrNotExist) {
+		l.records, l.seen, l.lines = records, seen, lines
 		return nil
 	}
 	if err != nil {
@@ -110,31 +242,37 @@ func (l *Ledger) Reload() error {
 	}
 	defer func() { _ = f.Close() }()
 	torn := false
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	br := bufio.NewReaderSize(f, 64<<10)
 	cutoff := l.now().Add(-seenWindow)
-	for sc.Scan() {
-		raw := bytes.TrimSpace(sc.Bytes())
-		if len(raw) == 0 {
-			continue
+	for {
+		raw, rerr := br.ReadBytes('\n')
+		if rerr != nil && !errors.Is(rerr, io.EOF) {
+			return fmt.Errorf("factory ledger: read: %w", rerr)
 		}
-		var ln line
-		if err := json.Unmarshal(raw, &ln); err != nil || (ln.Record == nil && ln.Seen == "") {
-			slog.Warn("factory ledger: skipping an unreadable line", "path", l.path)
-			torn = true
-			continue
+		if raw = bytes.TrimSpace(raw); len(raw) > 0 {
+			var ln line
+			switch {
+			case len(raw) > maxLineBytes:
+				slog.Warn("factory ledger: skipping an oversized line", "path", l.path, "bytes", len(raw))
+				torn = true
+			case json.Unmarshal(raw, &ln) != nil || (ln.Record == nil && ln.Seen == ""):
+				slog.Warn("factory ledger: skipping an unreadable line", "path", l.path)
+				torn = true
+			default:
+				lines++
+				switch {
+				case ln.Record != nil && ln.Record.TriggerKey != "":
+					records[ln.Record.TriggerKey] = *ln.Record
+				case ln.Seen != "" && ln.At != nil && ln.At.After(cutoff):
+					seen[ln.Seen] = *ln.At
+				}
+			}
 		}
-		l.lines++
-		switch {
-		case ln.Record != nil && ln.Record.TriggerKey != "":
-			l.records[ln.Record.TriggerKey] = *ln.Record
-		case ln.Seen != "" && ln.At != nil && ln.At.After(cutoff):
-			l.seen[ln.Seen] = *ln.At
+		if rerr != nil {
+			break
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return fmt.Errorf("factory ledger: read: %w", err)
-	}
+	l.records, l.seen, l.lines = records, seen, lines
 	if torn {
 		return l.compactLocked()
 	}
@@ -148,8 +286,7 @@ func (l *Ledger) Upsert(key string, fn func(*Record)) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	r := l.records[key]
-	r.Events = slices.Clone(r.Events)
+	r := l.records[key].clone() // fn works on a copy: a failed append leaves memory as it was
 	fn(&r)
 	r.TriggerKey = key
 	if len(r.Events) > maxEvents {
@@ -158,7 +295,7 @@ func (l *Ledger) Upsert(key string, fn func(*Record)) error {
 	if err := l.appendLocked(line{Record: &r}); err != nil {
 		return err
 	}
-	l.records[key] = r
+	l.records[key] = r.clone() // the caller's fn may have kept pointers into r
 	l.compactBestEffortLocked()
 	return nil
 }
@@ -168,10 +305,11 @@ func (l *Ledger) Get(key string) (Record, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	r, ok := l.records[key]
-	return r, ok
+	return r.clone(), ok
 }
 
-// ByRoom returns the record whose task room or fix room is room.
+// ByRoom returns the record whose task room or fix room is room, else the one that archived a
+// generation whose fix room is room.
 func (l *Ledger) ByRoom(room string) (Record, bool) {
 	if room == "" {
 		return Record{}, false
@@ -180,10 +318,29 @@ func (l *Ledger) ByRoom(room string) (Record, bool) {
 	defer l.mu.Unlock()
 	for _, r := range l.records {
 		if r.Room == room || r.FixRoom == room {
-			return r, true
+			return r.clone(), true
+		}
+	}
+	for _, r := range l.records {
+		if r.Curation != nil && slices.ContainsFunc(r.Curation.Generations, func(g Generation) bool { return g.FixRoom == room }) {
+			return r.clone(), true
 		}
 	}
 	return Record{}, false
+}
+
+// Held returns clones of the records that carry a curation hold, in key order.
+func (l *Ledger) Held() []Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []Record
+	for _, r := range l.records {
+		if r.Curation != nil {
+			out = append(out, r.clone())
+		}
+	}
+	slices.SortFunc(out, func(a, b Record) int { return strings.Compare(a.TriggerKey, b.TriggerKey) })
+	return out
 }
 
 // Due returns the records merged, whose soak ended at or before at, with no verdict and no
@@ -194,7 +351,7 @@ func (l *Ledger) Due(at time.Time) []Record {
 	var out []Record
 	for _, r := range l.records {
 		if !r.MergedAt.IsZero() && !r.SoakUntil.IsZero() && !r.SoakUntil.After(at) && r.Verdict == "" && r.Outcome == "" {
-			out = append(out, r)
+			out = append(out, r.clone())
 		}
 	}
 	slices.SortFunc(out, func(a, b Record) int { return a.SoakUntil.Compare(b.SoakUntil) })
@@ -210,7 +367,7 @@ func (l *Ledger) Unscheduled() []Record {
 	var out []Record
 	for _, r := range l.records {
 		if !r.MergedAt.IsZero() && r.SoakUntil.IsZero() && r.Verdict == "" && r.Outcome == "" {
-			out = append(out, r)
+			out = append(out, r.clone())
 		}
 	}
 	return out

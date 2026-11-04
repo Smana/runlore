@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Smana/runlore/internal/kbresolve"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
 )
@@ -29,6 +30,16 @@ const (
 	verdictPersisting = "persisting"
 )
 
+// Findings is what a re-investigation found: Text goes to the factory, Cause (the first root
+// cause's first evidence, "" when there is none) into the ledger's one-line evidence.
+type Findings struct{ Text, Cause string }
+
+// EvidenceLine is the one line of evidence a generation keeps: the soak's two firing readings and
+// the cause, flattened so it cannot open a section or carry a marker.
+func EvidenceLine(firingAtMerge, firingNow bool, cause string) string {
+	return kbresolve.FlattenEvidence(fmt.Sprintf("firing at merge: %t, firing now: %t. %s", firingAtMerge, firingNow, cause))
+}
+
 // Verifier is the leader-only soak check: once a fix has merged and soaked, it asks Alertmanager
 // whether the alert still fires, re-investigates briefly for the evidence and tells the factory.
 // Alertmanager's answer is the verdict; the re-investigation's text is only the evidence.
@@ -37,8 +48,8 @@ type Verifier struct {
 	Client *Client
 	// Firing reports whether the alert is firing now; an error means unknown (nothing is posted).
 	Firing func(ctx context.Context, alert, ns string) (bool, error)
-	// Reinvestigate runs the short check on the record's TriggerKey and returns its text.
-	Reinvestigate func(ctx context.Context, r Record) (string, error)
+	// Reinvestigate runs the short check on the record's TriggerKey and returns its findings.
+	Reinvestigate func(ctx context.Context, r Record) (Findings, error)
 	// Replier posts into the incident's Slack thread; nil posts nothing.
 	Replier providers.ThreadNotifier
 	Soak    time.Duration
@@ -48,7 +59,7 @@ type Verifier struct {
 	once sync.Mutex // one pass at a time: a slow pass must not overlap the next tick
 	// evidence caches the re-investigation of each key until its verdict is settled, so a factory
 	// outage does not rerun the paid investigation on every tick. Guarded by once.
-	evidence map[string]string
+	evidence map[string]Findings
 }
 
 func (v *Verifier) now() time.Time {
@@ -150,7 +161,7 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 	if !ok {
 		ev = v.gather(ctx, rec)
 		if v.evidence == nil {
-			v.evidence = map[string]string{}
+			v.evidence = map[string]Findings{}
 		}
 		v.evidence[rec.TriggerKey] = ev
 	}
@@ -160,7 +171,7 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 		Verdict:   verdict,
 		Alert:     VerifiedAlert{Name: rec.Alert, FiringAtMerge: rec.FiringAtMerge, FiringNow: firing},
 		CheckedAt: v.now().UTC(),
-		Evidence:  ev,
+		Evidence:  ev.Text,
 	})
 	if err != nil {
 		v.log().Warn("factory verifier: the factory did not take the verdict; retrying next tick", "alert", rec.Alert, "err", err)
@@ -168,9 +179,10 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 	}
 	switch status {
 	case http.StatusCreated, http.StatusOK:
+		line := EvidenceLine(rec.FiringAtMerge, firing, ev.Cause)
 		delete(v.evidence, rec.TriggerKey)
 		v.log().Info("factory verifier: verdict posted", "key", rec.TriggerKey, "alert", rec.Alert, "verdict", verdict, "status", status, "reason", reason)
-		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.Verdict = verdict }); err != nil {
+		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.recordVerdict(rec.FixRoom, verdict, line) }); err != nil {
 			v.log().Error("factory verifier: recording the verdict failed", "err", err)
 			return
 		}
@@ -187,7 +199,12 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 		if reason == "" {
 			outcome = fmt.Sprintf("http_%d", status)
 		}
-		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) { r.Outcome = outcome }); err != nil {
+		// An archived generation is soaked no more, so only the current one needs the outcome.
+		if err := v.Ledger.Upsert(rec.TriggerKey, func(r *Record) {
+			if r.FixRoom == rec.FixRoom {
+				r.Outcome = outcome
+			}
+		}); err != nil {
 			v.log().Error("factory verifier: recording the outcome failed", "err", err)
 			return
 		}
@@ -202,21 +219,23 @@ func (v *Verifier) check(ctx context.Context, rec Record) {
 
 // evidence is the re-investigation's text, redacted and cut to the factory's ceiling; when it
 // cannot run, a fixed line with the error's class (never its text).
-func (v *Verifier) gather(ctx context.Context, rec Record) string {
+func (v *Verifier) gather(ctx context.Context, rec Record) Findings {
 	note := ""
 	if rec.FiringAssumed != "" {
 		note = "firing at merge assumed: " + rec.FiringAssumed + "\n"
 	}
-	return truncate(note+v.reinvestigate(ctx, rec), maxEvidence)
+	f := v.reinvestigate(ctx, rec)
+	f.Text = truncate(note+f.Text, maxEvidence)
+	return f
 }
 
-func (v *Verifier) reinvestigate(ctx context.Context, rec Record) string {
+func (v *Verifier) reinvestigate(ctx context.Context, rec Record) Findings {
 	if v.Reinvestigate == nil {
-		return "re-investigation unavailable: not configured"
+		return Findings{Text: "re-investigation unavailable: not configured"}
 	}
 	rctx, cancel := context.WithTimeout(ctx, reinvestigateTimeout)
 	defer cancel()
-	text, err := v.Reinvestigate(rctx, rec)
+	found, err := v.Reinvestigate(rctx, rec)
 	if err != nil {
 		class := "error"
 		switch {
@@ -226,9 +245,9 @@ func (v *Verifier) reinvestigate(ctx context.Context, rec Record) string {
 			class = "canceled"
 		}
 		v.log().Warn("factory verifier: re-investigation failed", "alert", rec.Alert, "err", err)
-		return "re-investigation unavailable: " + class
+		return Findings{Text: "re-investigation unavailable: " + class}
 	}
-	return truncate(redact.Secrets(text), maxEvidence)
+	return Findings{Text: truncate(redact.Secrets(found.Text), maxEvidence), Cause: redact.Secrets(found.Cause)}
 }
 
 func (v *Verifier) reply(ctx context.Context, rec Record, line string) {

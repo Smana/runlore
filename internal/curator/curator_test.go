@@ -617,3 +617,24 @@ func TestCurateLogsDedupScoreBothWays(t *testing.T) {
 		t.Errorf("the suppressing branch must still say it suppressed the PR; got:\n%s", above)
 	}
 }
+
+func TestMeetsBarIsCuratesFirstTwoGates(t *testing.T) {
+	good := providers.Investigation{Verified: true, Confidence: 0.9, Verdict: "action_required",
+		RootCauses: []providers.Hypothesis{{Summary: "s", Evidence: []string{"e"}, SuggestedAction: "a"}}}
+	c := &Curator{MinConfidence: 0.7, SkipVerdicts: map[providers.Verdict]bool{"no_action": true}}
+	if !c.MeetsBar(good) {
+		t.Fatal("a verified finding with evidence and a remedy meets the bar")
+	}
+	for name, change := range map[string]func(*providers.Investigation){
+		"unverified":      func(i *providers.Investigation) { i.Verified = false },
+		"low confidence":  func(i *providers.Investigation) { i.Confidence = 0.1 },
+		"no root cause":   func(i *providers.Investigation) { i.RootCauses = nil },
+		"skipped verdict": func(i *providers.Investigation) { i.Verdict = "no_action" },
+	} {
+		inv := good
+		change(&inv)
+		if c.MeetsBar(inv) {
+			t.Errorf("%s: Curate would drop it", name)
+		}
+	}
+}

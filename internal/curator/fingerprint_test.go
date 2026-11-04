@@ -257,3 +257,15 @@ func TestDupFingerprintStableAcrossPodSuffix(t *testing.T) {
 		t.Fatalf("same incident on different pods must share a DupFingerprint: %q vs %q", fa, fb)
 	}
 }
+
+func TestDraftResolutionsPinnedFingerprintWins(t *testing.T) {
+	if got := DupFingerprint(providers.Investigation{TriggerKey: "k1", PinnedFingerprint: "abc", Resource: providers.Workload{Name: "web"}}); got != "abc" {
+		t.Fatalf("%q", got)
+	}
+	if got := draftKBEntry(providers.Investigation{Title: "t", PinnedFingerprint: "abc"}).Fingerprint; got != "abc" {
+		t.Fatalf("the draft's marker reads the pin: %q", got)
+	}
+	if got := DupFingerprint(providers.Investigation{TriggerKey: "k1"}); got == "" || got == "abc" {
+		t.Fatalf("no pin, the computed one: %q", got)
+	}
+}

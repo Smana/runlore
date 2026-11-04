@@ -1068,6 +1068,57 @@ factory:
   until the factory answers `409 window_closed`; a refusal the factory will not change (400, 403,
   404, 409) is recorded and not retried.
 
+- **Deferring the entry (opt-in).** With `factory.curation.defer` on, an incident the factory
+  accepted does not get its knowledge-base entry at once: the entry waits for the fix's outcome, so
+  it records what the fix did.
+
+  <!-- docsguard:ignore partial: only the factory.curation keys; the block above is the whole factory config -->
+  ```yaml
+  factory:
+    curation:
+      defer: true      # default false; the entry is drafted once the fix is verified
+      window: 7d       # default 7d, at least 24h; whole days are accepted (7d, 7d12h)
+  ```
+
+  `defer` needs `factory.url`, `outcome.ledger_path`, `factory.verify.alertmanager_url`,
+  `forge.kb_repo` and `forge.provider: github`; startup refuses it without them.
+  The order of events:
+
+  1. RunLore files the incident with the factory first. On a `201` (or a `200` with no hold yet) it
+     holds the entry in `factory.jsonl` and opens no pull request; any other answer drafts today's
+     entry at once.
+  2. Each minute the leader looks at every held incident. Once the fix is verified, it drafts the
+     entry through the curator's own gates, or adopts an open pull request with the same
+     fingerprint, and writes the outcome into the entry.
+  3. If no outcome arrives, the entry is drafted as it stands when `window` has passed, counted
+     from the factory's first acceptance. The 24h floor covers a 30m soak, a 2h class and a
+     same-day publish and merge. RunLore cannot read the factory's own follow-up window.
+
+  `curate.sweeps.mode` gates only the writes that go through the audited forge guard: the outcome
+  written into an entry (`kb resolve`) and the `ready-to-merge` label. In `dry-run`, the default,
+  those are logged and audited, not made, and no generation is marked resolved. The draft itself is
+  the curator's own write, as without `defer`, so a verified entry still opens its pull request in
+  `dry-run`. Set `apply` to let the outcome and the label be written too.
+  With `defer` on, the factory notifier is not added to the delivery list, since filing happens at
+  curation. The Slack line of a new generation can be lost when the factory's first webhook beats
+  the delivery.
+
+  A re-detection files nothing while a generation is undecided: from the first acceptance until the
+  fix room binds, and then while a bound fix has no soak verdict, no refused
+  verdict, no revert and no `regression`. So one stub waits for its maintainer, and a repeat of the
+  alert cannot reset a fix or its soak. It is released when the fix room ends without a merge, and
+  when `window` passes with the fix unmerged; a merged fix keeps its soak until its verdict. A stub
+  nobody publishes therefore gets no newer one until
+  `window`, and its entry arrives without a verified fix.
+
+  Once a generation is decided, the next re-detection files the next generation. If a held incident
+  settled with nothing to show, no pull request and no entry, or its pull request was closed unmerged,
+  a `201` starts the hold again with the same fingerprint and a new `window`.
+
+  The next generation of a still-firing alert needs RunLore to detect it again. A set
+  `investigation.recurrence_cooldown` suppresses that detection for an alert whose prior
+  investigation concluded, so keep it at 0, or below Alertmanager's repeat interval.
+
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook). The listen address is the
 `--addr` CLI flag (`:8080` in the chart), **not** a config key. TLS is terminated externally

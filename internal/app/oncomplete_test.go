@@ -9,16 +9,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/factory"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
@@ -762,4 +766,103 @@ func reachableStrings(inv providers.Investigation) map[string]string {
 	}
 	walk("Investigation", reflect.ValueOf(inv))
 	return out
+}
+
+// countingCurator stands in for the curator under a Curation: it must never be called while the
+// entry is held.
+type countingCurator struct{ calls int }
+
+func (c *countingCurator) Curate(context.Context, providers.Investigation) (providers.Ref, error) {
+	c.calls++
+	return providers.Ref{URL: "https://kb/should-not-open"}, nil
+}
+
+func (c *countingCurator) MeetsBar(providers.Investigation) bool { return true }
+
+// openEvent is the subset of an open event the wiring tests read back.
+type openEvent struct {
+	Event      string `json:"event"`
+	CuratedURL string `json:"curated_url"`
+	Tokens     int    `json:"tokens"`
+}
+
+// openEvents returns every open event of the ledger file, in order.
+func openEvents(t *testing.T, path string) []openEvent {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []openEvent
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		var e openEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("decode %q: %v", line, err)
+		}
+		if e.Event == "open" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestOnCompleteWithCurationFilesOnceAndDraftsNothing: with a Curation in the curator's place the
+// factory is asked once for the key, the open carries no KB link, and the curator is never called.
+func TestOnCompleteWithCurationFilesOnceAndDraftsNothing(t *testing.T) {
+	var tasks atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/v2/token":
+			_, _ = w.Write([]byte(`{"access_token":"t","expires_in":3600}`))
+		case "/v1/tasks":
+			tasks.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"task":"abcdefgh","room":"abcdefgh","issue":42}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	env := map[string]string{"ID": "runlore", "SECRET": "s", "PROJ": "p"}
+	client := factory.NewClient(config.Factory{URL: srv.URL, TokenURL: srv.URL + "/oauth/v2/token", ClientIDEnv: "ID",
+		ClientSecretEnv: "SECRET", ProjectIDEnv: "PROJ", Repository: "Smana/cloud-native-ref", MaxCostUSD: 2}, // pragma: allowlist secret
+		func(k string) string { return env[k] }, srv.Client(), time.Now)
+	dir := t.TempDir()
+	fl, err := factory.OpenLedger(filepath.Join(dir, "factory.jsonl"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := &countingCurator{}
+	cu := &factory.Curation{Inner: inner, Filer: &factory.Notifier{Client: client, Ledger: fl, Repository: "Smana/cloud-native-ref", MaxCostUSD: 2, Log: discardLog()},
+		Ledger: fl, Log: discardLog()}
+
+	found := providers.Investigation{
+		Title: "disk pressure", Fingerprints: []string{"fp1", "fp2"}, TriggerKey: "k1", Verified: true, Confidence: 0.9,
+		Verdict: providers.VerdictActionRequired,
+		Usage:   providers.UsageTotals{InputTokens: 1200, OutputTokens: 300},
+	}
+	onInvestigationComplete(context.Background(), found, ledger, nil, cu, notify.NewMulti(discardLog()), nil, nil, nil, discardLog())
+
+	if tasks.Load() != 1 {
+		t.Errorf("tasks posted = %d, want 1", tasks.Load())
+	}
+	if inner.calls != 0 {
+		t.Errorf("the curator ran %d times while the entry is held", inner.calls)
+	}
+	opens := openEvents(t, path)
+	if len(opens) != 2 {
+		t.Fatalf("opens = %d, want one per fingerprint", len(opens))
+	}
+	if opens[0].CuratedURL != "" || opens[1].CuratedURL != "" {
+		t.Errorf("a held entry has no KB link yet: %q %q", opens[0].CuratedURL, opens[1].CuratedURL)
+	}
+	if opens[0].Tokens != 1500 || opens[1].Tokens != 0 {
+		t.Errorf("tokens: first %d (want 1500), later %d (want none)", opens[0].Tokens, opens[1].Tokens)
+	}
+	if r, ok := fl.Get("k1"); !ok || r.Curation == nil {
+		t.Errorf("the entry must be held: %+v", r)
+	}
 }

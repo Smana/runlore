@@ -20,9 +20,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
-	"github.com/Smana/runlore/internal/factory"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/notify"
@@ -225,14 +225,19 @@ func RunServe(version string, args []string) error {
 	if factoryLedger != nil {
 		threadSink = notify.Sinks{threadRegistry, factoryLedger}
 	}
-	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadSink, log)
+	// With factory.curation.defer on, the Curation files, holds and drafts in the curator's place.
+	// deps is nil without a model, so the catalog is read behind a check. nil unless defer is on.
+	var depsCatalog *catalog.Catalog
+	if deps != nil {
+		depsCatalog = deps.Catalog
+	}
+	factoryCuration := BuildFactoryCuration(cfg, factoryLedger, factoryClient, ledger, depsCatalog, aud, log)
+	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadSink, log,
+		WithFactoryCuration(factoryCuration))
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
 	}
-	if notifier != nil && factoryClient.Enabled() {
-		notifier.Add(&factory.Notifier{Client: factoryClient, Ledger: factoryLedger,
-			Repository: cfg.Factory.Repository, MaxCostUSD: cfg.Factory.MaxCostUSD, Log: log})
-	}
+	addFactoryNotifier(notifier, cfg, factoryLedger, factoryClient, factoryCuration, log)
 	// The soak check: leader-only (started in startWork), and told of each merge by the receiver.
 	factoryVerifier := BuildFactoryVerifier(cfg, deps, factoryLedger, factoryClient, notifier, metrics, log)
 	// One responder, two transports: built ONCE and shared by both Slack's and
@@ -415,6 +420,10 @@ func RunServe(version string, args []string) error {
 			if rerr := factoryLedger.Reload(); rerr != nil {
 				log.Warn("factory ledger reload on leadership failed; serving prior state", "err", rerr)
 			}
+		}
+		// Draft, link, observe and record the held entries; the ledgers above are reloaded first.
+		if factoryCuration != nil {
+			go factoryCuration.Run(workCtx, time.Minute)
 		}
 		// Resume the soak checks the previous leader left in the file (the deadline is in the
 		// ledger, reloaded above).

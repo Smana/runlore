@@ -9,6 +9,7 @@ package outcome
 
 import (
 	"bufio"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -61,7 +62,7 @@ func Derived(fp string) bool {
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {
-	Event          string `json:"event"`                     // "open" | "resolve" | "feedback" | "silence" | "checkpoint" | "confirm"
+	Event          string `json:"event"`                     // "open" | "resolve" | "feedback" | "silence" | "checkpoint" | "confirm" | "verify" | "link"
 	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
 	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
 
@@ -86,6 +87,13 @@ type Event struct {
 	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
 	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
 	Verdict    string `json:"verdict,omitempty"`     // curator's machine verdict on the investigation
+
+	// Room is, on a verify, the fix room the observation belongs to: the key of the
+	// latest-wins fold. Empty on every other kind.
+	Room string `json:"room,omitempty"`
+	// Tokens is, on the first open of an investigation, its model spend (input plus
+	// output), the numerator of Measures.TokensPerIncident. Zero elsewhere.
+	Tokens int `json:"tokens,omitempty"`
 
 	// User identifies the human behind a feedback or silence event (a Slack user id
 	// or a Matrix user id). On feedback it is the dedup key that keeps one live vote
@@ -212,6 +220,12 @@ type Ledger struct {
 	// reached this same conclusion". Rebuilt on load, checkpointed on compaction.
 	triggerConfirms map[string]int
 
+	// verifies holds the latest factory verification per fix room: whether the fix
+	// held, which entry it credited and when. Latest wins by At, so a replayed event
+	// counts once and a revert moves a room from held to failed. Rebuilt on load,
+	// checkpointed on compaction.
+	verifies map[string]verifyState
+
 	// droppedResolves counts orphan resolves discarded by the pendingResolves bound
 	// (see maxPendingResolvesPerFingerprint) — spurious duplicate/replayed resolve
 	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
@@ -280,8 +294,11 @@ type checkpointData struct {
 	// ordering and resolves in the 👎's favour — conservative (RunLore investigates).
 	SilencedAt      map[string]time.Time `json:"silenced_at,omitempty"`
 	TriggerConfirms map[string]int       `json:"trigger_confirms,omitempty"`
-	DroppedResolves int                  `json:"dropped_resolves,omitempty"`
-	StaleResolves   int                  `json:"stale_resolves,omitempty"`
+	// Verifies carries the latest verification per fix room across compaction; absent
+	// from an older checkpoint, where the replay degrades to the retained tail.
+	Verifies        map[string]verifyJSON `json:"verifies,omitempty"`
+	DroppedResolves int                   `json:"dropped_resolves,omitempty"`
+	StaleResolves   int                   `json:"stale_resolves,omitempty"`
 	// ResolvesSeen carries the resolve-channel liveness proof across compaction. Absent
 	// from a checkpoint written before this field existed; a replay then reconstructs it
 	// from the retained tail only, which degrades to "channel not proven" — conservative
@@ -312,6 +329,15 @@ type triggerAggJSON struct {
 	// lossy: the raw verdict travels with it, so Concluded re-checks it on every read
 	// and a future migration can re-derive whatever it needs.
 	Conclusive ConclusivePrior `json:"conclusive,omitzero"`
+	// LinkedURL mirrors triggerAgg.linkedURL.
+	LinkedURL string `json:"linked_url,omitempty"`
+}
+
+type verifyJSON struct {
+	Entry          string    `json:"entry"`
+	DupFingerprint string    `json:"dup_fingerprint,omitempty"`
+	Held           bool      `json:"held,omitempty"`
+	At             time.Time `json:"at"`
 }
 
 type feedbackVoteJSON struct {
@@ -348,6 +374,10 @@ type triggerAgg struct {
 	// standing behind it — the distinction the suppression gate turns on (#471).
 	// Zero value when this trigger has never concluded.
 	conclusive ConclusivePrior
+	// linkedURL is the KB link a "link" event gave the trigger (a deferred draft). An
+	// open with an empty CuratedURL falls back to it, so the next detection cannot
+	// erase the link and hide a contested PR.
+	linkedURL string
 }
 
 // feedbackVote is the fold state of one (TriggerKey, user) feedback: the rating
@@ -509,6 +539,7 @@ func (l *Ledger) resetStateLocked() {
 	l.votes = map[string]feedbackVote{}
 	l.silences = map[string]silenceState{}
 	l.triggerConfirms = map[string]int{}
+	l.verifies = map[string]verifyState{}
 	l.droppedResolves = 0
 	l.staleResolves = 0
 	l.resolvesSeen = 0
@@ -542,6 +573,10 @@ func (l *Ledger) foldLocked(e Event) {
 		l.applySilenceLocked(e)
 	case "confirm":
 		l.applyConfirmLocked(e)
+	case "verify":
+		l.applyVerifyLocked(e)
+	case "link":
+		l.applyLinkLocked(e)
 	case "checkpoint":
 		l.seedCheckpointLocked(e.Checkpoint)
 	}
@@ -569,7 +604,11 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	}
 	for k, v := range cd.ByTrigger {
 		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL,
-			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive, fingerprint: v.Fingerprint}
+			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive, fingerprint: v.Fingerprint,
+			linkedURL: v.LinkedURL}
+	}
+	for room, v := range cd.Verifies {
+		l.verifies[room] = verifyState{entry: v.Entry, dupFP: v.DupFingerprint, held: v.Held, at: v.At}
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry, at: v.At}
@@ -674,7 +713,14 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
 			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL,
-				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive, Fingerprint: v.fingerprint}
+				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive, Fingerprint: v.fingerprint,
+				LinkedURL: v.linkedURL}
+		}
+	}
+	if len(l.verifies) > 0 {
+		cd.Verifies = make(map[string]verifyJSON, len(l.verifies))
+		for room, v := range l.verifies {
+			cd.Verifies[room] = verifyJSON{Entry: v.entry, DupFingerprint: v.dupFP, Held: v.held, At: v.at}
 		}
 	}
 	if len(l.votes) > 0 {
@@ -1068,7 +1114,7 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 	a.count++
 	if !e.At.Before(a.last) {
 		a.last = e.At
-		a.curatedURL = e.CuratedURL
+		a.curatedURL = cmp.Or(e.CuratedURL, a.linkedURL)
 		// Feedback attribution follows the newest open: a fresh open (Entry "")
 		// deliberately CLEARS it — a vote on a fresh investigation must not credit
 		// an older recall's entry. The verdict tracks the newest open the same way.
@@ -1082,7 +1128,7 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 	// completing out of order (opens are stamped at completion) cannot rewind it to an
 	// older answer.
 	if providers.Verdict(e.Verdict).Conclusive() && !e.At.Before(a.conclusive.At) {
-		a.conclusive = ConclusivePrior{At: e.At, Verdict: e.Verdict, Title: e.Title, CuratedURL: e.CuratedURL}
+		a.conclusive = ConclusivePrior{At: e.At, Verdict: e.Verdict, Title: e.Title, CuratedURL: cmp.Or(e.CuratedURL, a.linkedURL)}
 	}
 	l.byTrigger[e.TriggerKey] = a
 }
@@ -1287,6 +1333,12 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 	if err != nil {
 		return nil, err
 	}
+	return episodesOf(events), nil
+}
+
+// episodesOf pairs the opens and resolves of events into one Episode per open, in
+// open order.
+func episodesOf(events []Event) []Episode {
 	var out []Episode
 	pendingOpens := map[string][]int{}          // fingerprint → stack of indices into out (LIFO)
 	pendingResolves := map[string][]time.Time{} // fingerprint → buffered resolve times (resolve-before-open)
@@ -1335,7 +1387,7 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 			resolveAt(i, e.At)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Aggregate is a per-entry roll-up of recall episodes: how often the entry was
@@ -1353,6 +1405,11 @@ type Aggregate struct {
 	// standing 👎 forces into existence. Weighted at half a human observation in
 	// Factor (confirmWeight); see Ledger.Confirm.
 	Confirms int
+	// Verified and Failed count the fix rooms whose latest factory verification held
+	// or failed (one live observation per room, see Ledger.Verify). Each weighs 1, as
+	// a resolved or an unresolved recall does.
+	Verified int `json:",omitempty"`
+	Failed   int `json:",omitempty"`
 }
 
 // confirmWeight is how much of one human observation a machine confirmation is
@@ -1370,15 +1427,19 @@ const confirmWeight = 0.5
 // means failure depends entirely on whether a resolve could have arrived — see
 // Ledger.ResolveChannelLive, the other half of this decision.
 func (a Aggregate) HasEvidence() bool {
-	return a.Resolved > 0 || a.FeedbackUp > 0 || a.FeedbackDown > 0 || a.Confirms > 0
+	return a.Resolved > 0 || a.FeedbackUp > 0 || a.FeedbackDown > 0 || a.Confirms > 0 ||
+		a.Verified > 0 || a.Failed > 0
 }
 
 // Factor is the entry's outcome-decay factor: the posterior mean of a symmetric
 // Beta(k/2, k/2) prior over the success rate, folding resolves, human votes, and
 // machine confirmations into one trust signal:
 //
-//	factor = (Resolved + FeedbackUp + confirmWeight·Confirms + k/2) /
-//	         (Recalls + FeedbackUp + FeedbackDown + confirmWeight·Confirms + k)
+//	factor = (Resolved + FeedbackUp + Verified + confirmWeight·Confirms + k/2) /
+//	         (Recalls + FeedbackUp + FeedbackDown + Verified + Failed + confirmWeight·Confirms + k)
+//
+// A factory-verified fix is a success observation like a resolve, and a failed one an
+// unsuccessful observation (it joins the denominator only).
 //
 // Confirms are recovery evidence at HALF the weight of a human observation
 // (confirmWeight): a fresh re-investigation independently reaching an entry's
@@ -1391,7 +1452,8 @@ func (a Aggregate) HasEvidence() bool {
 // investigate's gate docs for the full statistical rationale.
 func (a Aggregate) Factor(k float64) float64 {
 	c := confirmWeight * float64(a.Confirms)
-	return (float64(a.Resolved+a.FeedbackUp) + c + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + c + k)
+	return (float64(a.Resolved+a.FeedbackUp+a.Verified) + c + k/2) /
+		(float64(a.Recalls+a.FeedbackUp+a.FeedbackDown+a.Verified+a.Failed) + c + k)
 }
 
 // ResolveChannelLive reports whether a ground-truth resolve signal can actually
@@ -1684,4 +1746,176 @@ func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
 		DupFingerprint: o.DupFingerprint,
 		OpenedAt:       o.At, ResolvedAt: at, Duration: at.Sub(o.At), Resolved: true,
 	}, true, nil
+}
+
+// verifyState is the fold state of one fix room's latest verification.
+type verifyState struct {
+	entry string // agg key credited
+	dupFP string
+	held  bool
+	at    time.Time
+}
+
+// Verification is a factory-verified fix observation: the fix room's outcome,
+// credited to the entry the fix produced.
+type Verification struct {
+	Entry, DupFingerprint, TriggerKey, Room string
+	Held                                    bool
+	At                                      time.Time
+}
+
+// Verify appends a verification observation: one live observation per fix room, the
+// latest by At winning. A replayed event counts once, a revert moves the room from
+// held to failed, and an older event arriving after a newer one is dropped. Entry and
+// Room are required.
+func (l *Ledger) Verify(v Verification) error {
+	if v.Entry == "" || v.Room == "" {
+		return fmt.Errorf("verify: entry and room are required")
+	}
+	if !l.enabled() {
+		return nil
+	}
+	kind := "failed"
+	if v.Held {
+		kind = "held"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := Event{Event: "verify", Entry: v.Entry, DupFingerprint: v.DupFingerprint, TriggerKey: v.TriggerKey, Room: v.Room, Kind: kind, At: v.At}
+	if err := l.appendLocked(e); err != nil {
+		return err // durable-first, like Confirm
+	}
+	l.applyVerifyLocked(e)
+	return nil
+}
+
+// applyVerifyLocked folds one verify event: it un-credits the observation it replaces
+// and credits its own, unless it is older than the one stored for the room.
+func (l *Ledger) applyVerifyLocked(e Event) {
+	if e.Entry == "" || e.Room == "" || (e.Kind != "held" && e.Kind != "failed") {
+		return // malformed replayed line: never folded
+	}
+	held := e.Kind == "held"
+	if prev, ok := l.verifies[e.Room]; ok {
+		if e.At.Before(prev.at) {
+			return // an older observation after a newer one
+		}
+		if prev.entry == e.Entry && prev.held == held {
+			prev.at, prev.dupFP = e.At, e.DupFingerprint // a replay: counted once
+			l.verifies[e.Room] = prev
+			return
+		}
+		l.creditVerifyLocked(prev.entry, prev.held, -1)
+	}
+	l.verifies[e.Room] = verifyState{entry: e.Entry, dupFP: e.DupFingerprint, held: held, at: e.At}
+	l.creditVerifyLocked(e.Entry, held, +1)
+}
+
+func (l *Ledger) creditVerifyLocked(entry string, held bool, delta int) {
+	a := l.agg[entry]
+	if held {
+		a.Verified += delta
+	} else {
+		a.Failed += delta
+	}
+	l.agg[entry] = a
+}
+
+// Verifications maps each curator dedup fingerprint to whether its latest
+// observation held (the newest by At across its fix rooms; a failure wins a tie).
+func (l *Ledger) Verifications() map[string]bool {
+	out := map[string]bool{}
+	if !l.enabled() {
+		return out
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	newest := map[string]time.Time{}
+	for _, v := range l.verifies {
+		if v.dupFP == "" {
+			continue
+		}
+		at, seen := newest[v.dupFP]
+		if !seen || v.at.After(at) || (v.at.Equal(at) && !v.held) {
+			newest[v.dupFP], out[v.dupFP] = v.at, v.held
+		}
+	}
+	return out
+}
+
+// Link gives a trigger the KB link of its deferred draft. It sets the trigger's
+// curated URL, and the conclusive prior's when that is empty, and leaves the
+// occurrence count alone. A later open with an empty CuratedURL keeps the link.
+func (l *Ledger) Link(triggerKey, curatedURL string, at time.Time) error {
+	if triggerKey == "" || curatedURL == "" {
+		return fmt.Errorf("link: trigger key and URL are required")
+	}
+	if !l.enabled() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := Event{Event: "link", TriggerKey: triggerKey, CuratedURL: curatedURL, At: at}
+	if err := l.appendLocked(e); err != nil {
+		return err
+	}
+	l.applyLinkLocked(e)
+	return nil
+}
+
+func (l *Ledger) applyLinkLocked(e Event) {
+	if e.TriggerKey == "" || e.CuratedURL == "" {
+		return
+	}
+	a := l.byTrigger[e.TriggerKey]
+	a.curatedURL, a.linkedURL = e.CuratedURL, e.CuratedURL
+	if !a.conclusive.At.IsZero() && a.conclusive.CuratedURL == "" {
+		a.conclusive.CuratedURL = e.CuratedURL
+	}
+	l.byTrigger[e.TriggerKey] = a
+}
+
+// Measures are the ledger's per-window numbers: investigations opened for a trigger,
+// how many were instant recalls, how many of those resolved, and the mean model spend
+// per incident.
+type Measures struct {
+	Incidents, InstantRecalls, RecallsResolved, TokensPerIncident int
+}
+
+// Measures counts the opens carrying a TriggerKey since the given instant.
+func (l *Ledger) Measures(since time.Time) (Measures, error) {
+	var m Measures
+	if !l.enabled() {
+		return m, nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	events, _, err := l.readEvents()
+	if err != nil {
+		return m, err
+	}
+	eps := episodesOf(events)
+	tokens, i := 0, 0
+	for _, e := range events {
+		if e.Event != "open" {
+			continue
+		}
+		ep := eps[i]
+		i++
+		if e.TriggerKey == "" || e.At.Before(since) {
+			continue
+		}
+		m.Incidents++
+		tokens += e.Tokens
+		if e.Kind == "recall" && e.Entry != "" {
+			m.InstantRecalls++
+			if ep.Resolved {
+				m.RecallsResolved++
+			}
+		}
+	}
+	if m.Incidents > 0 {
+		m.TokensPerIncident = tokens / m.Incidents
+	}
+	return m, nil
 }

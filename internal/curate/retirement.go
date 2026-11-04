@@ -79,7 +79,7 @@ func (p Retirement) Run(ctx context.Context) error {
 		if !agg.HasEvidence() && !resolveChannelLive {
 			continue
 		}
-		obs := agg.Recalls + agg.FeedbackUp + agg.FeedbackDown
+		obs := agg.Recalls + agg.FeedbackUp + agg.FeedbackDown + agg.Verified + agg.Failed
 		if obs < p.MinObservations {
 			continue
 		}
@@ -128,7 +128,8 @@ func (p Retirement) Run(ctx context.Context) error {
 			continue // per-item isolation: one flaky entry never starves the rest
 		}
 		p.Log.Info("retirement: proposed retiring decayed entry", "entry", path, "factor", factor,
-			"recalls", agg.Recalls, "resolved", agg.Resolved, "up", agg.FeedbackUp, "down", agg.FeedbackDown)
+			"recalls", agg.Recalls, "resolved", agg.Resolved, "up", agg.FeedbackUp, "down", agg.FeedbackDown,
+			"verified", agg.Verified, "failed", agg.Failed)
 	}
 	return nil
 }
@@ -140,8 +141,8 @@ func (p Retirement) Run(ctx context.Context) error {
 func retireBody(path string, agg outcome.Aggregate, factor, floor float64, marker string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "**RunLore proposes retiring `%s`** — its outcome track record decayed below the trust floor.\n\n", path)
-	fmt.Fprintf(&b, "| recalls | resolved | 👍 | 👎 | factor | floor |\n|---|---|---|---|---|---|\n| %d | %d | %d | %d | %.2f | %.2f |\n\n",
-		agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, factor, floor)
+	fmt.Fprintf(&b, "| recalls | resolved | 👍 | 👎 | verified fixes | failed fixes | factor | floor |\n|---|---|---|---|---|---|---|---|\n| %d | %d | %d | %d | %d | %d | %.2f | %.2f |\n\n",
+		agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, agg.Verified, agg.Failed, factor, floor)
 	b.WriteString("Recall already rejects this entry at the same floor, so every recurrence pays a full investigation; ")
 	b.WriteString("merging this PR retires the entry (`status: retired` — it stops being recallable but stays in git history). ")
 	b.WriteString("Close this PR to keep the entry: RunLore will not propose it again.\n\n")

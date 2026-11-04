@@ -1795,6 +1795,7 @@ type CurationForge interface {
 // loop to re-run and post results back.
 type CuratedIssue struct {
 	Number    int
+	URL       string // the web URL; set by the GitHub forge only
 	Title     string
 	Body      string
 	Labels    []string
@@ -2046,8 +2047,12 @@ type Investigation struct {
 	// Resolutions are the fixes RunLore verified after merge. Set by RunLore at
 	// runtime, never by the model.
 	Resolutions []AppliedResolution
-	Recalled    bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
-	Resource    Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
+	// PinnedFingerprint is the identity a hold froze for this incident. Set by RunLore at runtime,
+	// never by the model: when non-empty, curator.DupFingerprint returns it, so the draft's marker,
+	// the coalesce and the catalog check all read the hold's identity.
+	PinnedFingerprint string
+	Recalled          bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
+	Resource          Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
 	// AlertResource is the workload the ORIGINATING ALERT fired on, stamped verbatim
 	// from the Request and never touched by the model. It is NOT Resource: Resource is
 	// where the fault was FOUND, which the investigation routinely refines to a deeper
