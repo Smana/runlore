@@ -74,8 +74,14 @@ func TestVerifyIsAnObservation(t *testing.T) {
 			t.Fatal("reload and compaction keep the link")
 		}
 	}
-	if got := mustNew(t, p).ContestedTriggers(); len(got) != 1 || got[0].CuratedURL != url {
+	fresh := mustNew(t, p)
+	if got := fresh.ContestedTriggers(); len(got) != 1 || got[0].CuratedURL != url {
 		t.Fatalf("a reopen after compaction keeps the link: %+v", got)
+	}
+	// The checkpoint's LinkedURL, not only its CuratedURL, must survive: one more empty open.
+	must(t, fresh.Open(Event{TriggerKey: "k1", Verdict: "action_required", At: at.Add(4 * time.Hour)}))
+	if got := fresh.ContestedTriggers(); len(got) != 1 || got[0].CuratedURL != url {
+		t.Fatalf("an empty open after a reopen keeps the link: %+v", got)
 	}
 }
 
