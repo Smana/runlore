@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,10 @@ func BuildFactory(cfg *config.Config, log *slog.Logger) (*factory.Ledger, *facto
 	if !f.Enabled() {
 		return nil, nil, nil
 	}
+	hc, err := factoryHTTPClient(f)
+	if err != nil {
+		return nil, nil, err
+	}
 	path := ""
 	if cfg.Outcome.LedgerPath != "" {
 		path = filepath.Join(filepath.Dir(cfg.Outcome.LedgerPath), "factory.jsonl")
@@ -47,7 +52,7 @@ func BuildFactory(cfg *config.Config, log *slog.Logger) (*factory.Ledger, *facto
 	if err != nil {
 		return nil, nil, err
 	}
-	client := factory.NewClient(f, os.Getenv, httpx.SecureClient(factoryHTTPTimeout), time.Now)
+	client := factory.NewClient(f, os.Getenv, hc, time.Now)
 	if !client.Enabled() {
 		var empty []string
 		for _, name := range []string{f.ClientIDEnv, f.ClientSecretEnv, f.ProjectIDEnv} {
@@ -59,6 +64,20 @@ func BuildFactory(cfg *config.Config, log *slog.Logger) (*factory.Ledger, *facto
 			"empty_env", strings.Join(empty, ","))
 	}
 	return ledger, client, nil
+}
+
+// factoryHTTPClient is the client of the factory API and of its token endpoint: httpx.SecureClient,
+// and with factory.ca_file set, one that also trusts that PEM, added to the system roots. No other
+// client of the process sees the file. An unreadable or invalid file is an error naming the key.
+func factoryHTTPClient(f config.Factory) (*http.Client, error) {
+	if f.CAFile == "" {
+		return httpx.SecureClient(factoryHTTPTimeout), nil
+	}
+	roots, err := httpx.RootsWithCAFile(nil, f.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("factory.ca_file: %w", err)
+	}
+	return httpx.SecureClientWithRoots(factoryHTTPTimeout, roots), nil
 }
 
 // BuildFactoryReceiver builds the POST /factory/webhook handler; nil when the factory is off (a nil
