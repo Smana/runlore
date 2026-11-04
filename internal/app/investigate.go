@@ -21,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
+	"github.com/Smana/runlore/internal/factory"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs"
@@ -672,12 +673,27 @@ func warnSilenceWithoutFeedback(cfg *config.Config, log *slog.Logger) {
 		"max_window", cfg.Notify.Silence.MaxWindow.Std())
 }
 
+// InvestigatorOption adjusts BuildInvestigator.
+type InvestigatorOption func(*investigatorOptions)
+
+type investigatorOptions struct{ curation *factory.Curation }
+
+// WithFactoryCuration makes c curate in the curator's place: BuildInvestigator sets c.Inner to the
+// curator it built, when there is one, and onInvestigationComplete calls c. A nil c changes nothing.
+func WithFactoryCuration(c *factory.Curation) InvestigatorOption {
+	return func(o *investigatorOptions) { o.curation = c }
+}
+
 // BuildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired) and the notifier it builds
 // internally (nil on the log-only path), so a caller that needs a handle on the
 // replier — e.g. to wire thread capture — does not have to build a second one.
-func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, threads notify.ThreadSink, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, *notify.Multi, error) {
+func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, threads notify.ThreadSink, log *slog.Logger, opts ...InvestigatorOption) (investigate.Investigator, *catalog.Catalog, *notify.Multi, error) {
+	var o investigatorOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if deps == nil {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}, nil, nil, nil
@@ -700,6 +716,13 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		// Confirm, so this wiring is unconditional.
 		cur.Confirmations = ledger
 		curOrNil = cur
+	}
+	if o.curation != nil {
+		// The concrete-nil check again: a nil *curator.Curator in Inner would pass Curation's nil check.
+		if cur != nil {
+			o.curation.Inner = cur
+		}
+		curOrNil = o.curation
 	}
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
@@ -966,9 +989,11 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 			// keeps the count right by construction on both paths. CuratedURL/Verdict
 			// stay on every open (the index ignores TriggerKey-less events, and a
 			// complete per-fingerprint record keeps future readers from seeing gaps).
-			triggerKey := ""
+			triggerKey, tokens := "", 0
 			if i == 0 {
 				triggerKey = found.TriggerKey
+				// The investigation's spend rides its first open only, so Measures counts it once.
+				tokens = found.Usage.InputTokens + found.Usage.OutputTokens
 			}
 			// Whether a resolve signal can ever arrive for this open: true for sources
 			// with a resolve channel (Alertmanager/PagerDuty — real fingerprints), false
@@ -984,6 +1009,7 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 				Title:          found.Title,
 				Resource:       found.Resource.Ref(),
 				TriggerKey:     triggerKey,
+				Tokens:         tokens,
 				CuratedURL:     found.CuratedURL,
 				Verdict:        string(found.Verdict),
 				Resolvable:     &resolvable,

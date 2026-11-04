@@ -55,16 +55,11 @@ func buildForge(cfg *config.Config, log *slog.Logger) forgeClient {
 	}
 	switch cfg.Forge.Provider {
 	case "", "github":
-		token := BuildForgeTokenSource(cfg, log)
-		if token == nil {
-			return nil
+		// A nil *github.Client must not become a non-nil forgeClient.
+		if c := buildGitHubClient(cfg, log); c != nil {
+			return c
 		}
-		owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
-		if !ok {
-			log.Warn("forge disabled: kb_repo must be owner/name", "kb_repo", cfg.Forge.KBRepo)
-			return nil
-		}
-		return github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
+		return nil
 	case "gitlab":
 		token := BuildGitLabTokenSource(cfg, log)
 		if token == nil {
@@ -77,6 +72,30 @@ func buildForge(cfg *config.Config, log *slog.Logger) forgeClient {
 		log.Warn("forge disabled: unknown forge.provider", "provider", cfg.Forge.Provider)
 		return nil
 	}
+}
+
+// buildGitHubClient is the KB repository's GitHub client, or nil when forge.provider is not github,
+// there is no kb_repo or usable credential, or kb_repo is not owner/name. buildForge returns the
+// narrower forgeClient, which lacks PullSummary and PREntry, and one of its branches is GitLab, so
+// the factory's wiring cannot assert its way back to a *github.Client.
+func buildGitHubClient(cfg *config.Config, log *slog.Logger) *github.Client {
+	if cfg.Forge.KBRepo == "" || (cfg.Forge.Provider != "" && cfg.Forge.Provider != "github") {
+		return nil
+	}
+	token := BuildForgeTokenSource(cfg, log)
+	if token == nil {
+		return nil
+	}
+	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
+	if !ok {
+		log.Warn("forge disabled: kb_repo must be owner/name", "kb_repo", cfg.Forge.KBRepo)
+		return nil
+	}
+	base := cfg.Forge.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	return github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
 }
 
 // BuildCurator returns a Curator when the forge credentials + KB repo are

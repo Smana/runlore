@@ -11,11 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/audit"
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/factory"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/kbresolve"
 	"github.com/Smana/runlore/internal/notify"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 )
@@ -143,5 +148,64 @@ func verifyRequest(r factory.Record) investigate.Request {
 		Workload:   w,
 		Reason:     fmt.Sprintf("the fix merged in #%d should have resolved this alert; check whether it still fires and why", r.PR),
 		TriggerKey: r.TriggerKey,
+	}
+}
+
+// newFactoryNotifier is the notifier that files an incident with the factory.
+func newFactoryNotifier(cfg *config.Config, ledger *factory.Ledger, client *factory.Client, log *slog.Logger) *factory.Notifier {
+	return &factory.Notifier{Client: client, Ledger: ledger,
+		Repository: cfg.Factory.Repository, MaxCostUSD: cfg.Factory.MaxCostUSD, Log: log}
+}
+
+// addFactoryNotifier puts the factory notifier into the delivery Multi, unless a Curation files
+// instead: filing then happens at curation, ahead of delivery, and a second post would only repeat it.
+func addFactoryNotifier(notifier *notify.Multi, cfg *config.Config, ledger *factory.Ledger, client *factory.Client,
+	curation *factory.Curation, log *slog.Logger) {
+	if notifier == nil || !client.Enabled() || curation != nil {
+		return
+	}
+	notifier.Add(newFactoryNotifier(cfg, ledger, client, log))
+}
+
+// BuildFactoryCuration builds what replaces the curator when factory.curation.defer is on: it files
+// the incident first, holds its entry, and drafts it once the fix has an outcome or the window ends.
+// Nil unless defer is on, and nil with a warning when the KB's GitHub client cannot be built. The
+// caller passes it to BuildInvestigator through WithFactoryCuration, which sets Inner; cat may be nil.
+//
+// Drafts and Resolve go through one audited curate.Guard over the same KB repository as Inner's forge,
+// since a PR number names no repository. Promote stays nil until the Queue's PromoteOne exists.
+func BuildFactoryCuration(cfg *config.Config, ledger *factory.Ledger, client *factory.Client, outcomes *outcome.Ledger,
+	cat *catalog.Catalog, aud audit.Auditor, log *slog.Logger) *factory.Curation {
+	if !cfg.Factory.Curation.Defer || ledger == nil {
+		return nil
+	}
+	gh := buildGitHubClient(cfg, log)
+	if gh == nil {
+		log.Warn("factory.curation.defer is on but the KB's GitHub client cannot be built: entries are drafted as without it",
+			"kb_repo", cfg.Forge.KBRepo, "provider", forgeProviderName(cfg))
+		return nil
+	}
+	dry := cfg.Curate.Sweeps.DryRun()
+	guard := curate.Guard{Inner: gh, DryRun: dry, Audit: aud, Log: log}
+	return &factory.Curation{
+		Filer:   newFactoryNotifier(cfg, ledger, client, log),
+		Ledger:  ledger,
+		Outcome: outcomes,
+		Pulls:   gh,
+		Drafts:  guard,
+		Resolve: func(ctx context.Context, t kbresolve.Target, r providers.AppliedResolution) (kbresolve.Result, error) {
+			return kbresolve.Resolve(ctx, guard, t, r)
+		},
+		FindEntry: func(fingerprint string) (string, bool) {
+			if cat == nil {
+				return "", false
+			}
+			e, ok := cat.FindFingerprint(fingerprint)
+			return e.Path, ok
+		},
+		Window:     cfg.Factory.Curation.Window.Std(),
+		Repository: cfg.Factory.Repository,
+		DryRun:     dry,
+		Log:        log,
 	}
 }

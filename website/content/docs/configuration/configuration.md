@@ -1068,6 +1068,41 @@ factory:
   until the factory answers `409 window_closed`; a refusal the factory will not change (400, 403,
   404, 409) is recorded and not retried.
 
+- **Deferring the entry (opt-in).** With `factory.curation.defer` on, an incident the factory
+  accepted does not get its knowledge-base entry at once: the entry waits for the fix's outcome, so
+  it records what the fix did.
+
+  ```yaml
+  factory:
+    curation:
+      defer: true      # default false; the entry is drafted once the fix is verified
+      window: 7d       # default 7d, at least 24h; whole days are accepted (7d, 7d12h)
+  ```
+
+  `defer` needs `factory.url`, `outcome.ledger_path`, `factory.verify.alertmanager_url`,
+  `forge.kb_repo` and `forge.provider: github`; startup refuses it without them.
+  The order of events:
+
+  1. RunLore files the incident with the factory first. On a `201` (or a `200` with no hold yet) it
+     holds the entry in `factory.jsonl` and opens no pull request; any other answer drafts today's
+     entry at once.
+  2. Each minute the leader looks at every held incident. Once the fix is verified, it drafts the
+     entry through the curator's own gates, or adopts an open pull request with the same
+     fingerprint, and writes the outcome into the entry.
+  3. If no outcome arrives, the entry is drafted as it stands when `window` has passed, counted
+     from the factory's first acceptance. The 24h floor covers a 30m soak, a 2h class and a
+     same-day publish and merge. RunLore cannot read the factory's own follow-up window.
+
+  The writes follow `curate.sweeps.mode`: in `dry-run`, the default, nothing is written to the
+  knowledge base and no generation is marked resolved. Set `apply` to let the entries be written.
+  With `defer` on, the factory notifier is not added to the delivery list, since filing happens at
+  curation. The Slack line of a new generation can be lost when the factory's first webhook beats
+  the delivery.
+
+  The next generation of a still-firing alert needs RunLore to detect it again. A set
+  `investigation.recurrence_cooldown` suppresses that detection for an alert whose prior
+  investigation concluded, so keep it at 0, or below Alertmanager's repeat interval.
+
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook). The listen address is the
 `--addr` CLI flag (`:8080` in the chart), **not** a config key. TLS is terminated externally
