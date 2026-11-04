@@ -57,6 +57,7 @@ type onceRig struct {
 	listErr    error
 	entries    map[int]providers.PREntry
 	entryErr   func(number int) error
+	openErr    func(number int) error
 	pullErr    func() error
 	verifyErr  error
 	linkErr    error
@@ -128,6 +129,15 @@ func (g *onceRig) PREntry(_ context.Context, n int) (providers.PREntry, error) {
 		return e, nil
 	}
 	return providers.PREntry{}, fmt.Errorf("no PR %d", n)
+}
+
+func (g *onceRig) IsPROpen(_ context.Context, n int) (bool, error) {
+	if g.openErr != nil {
+		if err := g.openErr(n); err != nil {
+			return false, err
+		}
+	}
+	return g.entries[n].State == "open", nil
 }
 
 func (g *onceRig) ReplaceLabel(_ context.Context, n int, remove, add string) error {
@@ -303,6 +313,8 @@ func (f *entryForge) ListPRsByLabel(context.Context, string) ([]providers.Curate
 }
 
 func (f *entryForge) CommentOnPR(context.Context, int, string) error { return nil }
+
+func (f *entryForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
 
 func (f *entryForge) ReplaceLabel(context.Context, int, string, string) error { return nil }
 

@@ -57,6 +57,7 @@ type PullReader interface {
 type DraftLister interface {
 	ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
 	PREntry(ctx context.Context, number int) (providers.PREntry, error)
+	IsPROpen(ctx context.Context, number int) (bool, error)
 	ReplaceLabel(ctx context.Context, number int, remove, add string) error
 }
 
@@ -93,7 +94,7 @@ type Curation struct {
 // incident's entry. A 200 with a hold standing is no new generation and touches nothing. A 201 on a
 // hold with no live artifact starts it again. A recall is filed and observed, never drafted.
 func (c *Curation) Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
-	if r, ok := c.Ledger.Get(inv.TriggerKey); ok && c.undecided(r) {
+	if r, ok := c.Ledger.Get(inv.TriggerKey); ok && c.undecided(ctx, r) {
 		c.log().Info("a generation is undecided; filing nothing for this re-detection", "alert", inv.AlertName, "key", inv.TriggerKey)
 		if inv.Recalled {
 			return providers.Ref{}, nil
@@ -179,14 +180,19 @@ func (c *Curation) hold(r *Record, inv providers.Investigation, snapshot []byte,
 // filing for good. A merged fix keeps its soak past the window: the verifier always reaches a verdict or
 // an outcome.
 // A hold not drafted, with no fix yet, is one stub waiting for its human until the window: a new triager
-// and stub each repeat buy nothing. An observe-only hold has nothing of its own to protect.
-func (c *Curation) undecided(r Record) bool {
+// and stub each repeat buy nothing. So is a drafted hold whose PR is open (or, for a bounded number of
+// repeats, unreadable) with no fix bound, at any time: it waits until someone acts on it. A merge is that act, so a merged entry files
+// again; so does a PR closed unmerged, and a bound, decided fix. An observe-only hold has nothing of its own to protect.
+func (c *Curation) undecided(ctx context.Context, r Record) bool {
 	h := r.Curation
 	switch {
 	case h == nil || h.ObserveOnly:
 		return false
 	case r.FixRoom == "":
-		return h.Drafted == "" && !c.windowPassed(h)
+		if h.Drafted == "" {
+			return !c.windowPassed(h)
+		}
+		return h.Drafted != draftedNone && c.prHolds(ctx, r.TriggerKey, h)
 	}
 	return r.Verdict == "" && r.Outcome == "" && !r.Reverted && r.Monitor != "regression" && !r.fixEndedUnmerged() && (!r.MergedAt.IsZero() || !c.windowPassed(h))
 }
@@ -203,6 +209,25 @@ func (c *Curation) noLiveArtifact(ctx context.Context, h *Hold) bool {
 	}
 	pe, err := c.Drafts.PREntry(ctx, n)
 	return err == nil && pe.State == "closed"
+}
+
+// prHolds reports whether the PR h drafted keeps a repeat from filing: it is open, or its state cannot
+// be read. IsPROpen answers from the state alone, so a merged or closed PR never reads as unreadable. An
+// unreadable one holds for the next 30 repeats past the window (see retries), then files; a read that
+// works clears that count.
+func (c *Curation) prHolds(ctx context.Context, key string, h *Hold) bool {
+	n, ok := prNumber(h.Drafted)
+	if !ok || c.Drafts == nil {
+		return true
+	}
+	open, err := c.Drafts.IsPROpen(ctx, n)
+	if err != nil {
+		return c.retries(ctx, h, stepPRState, "reading the entry PR failed", key, err)
+	}
+	if h.PastWindowFailures[stepPRState] > 0 {
+		c.update(key, func(h *Hold) { delete(h.PastWindowFailures, stepPRState) })
+	}
+	return open
 }
 
 // failedGenerations is the failed ones of gens, in order.
@@ -771,6 +796,7 @@ const (
 	stepVerify  = "verify:"
 	stepResolve = "resolve:"
 	stepPromote = "promote"
+	stepPRState = "pr_state"
 )
 
 // retries reports whether a failed step should try again on the next tick. Within the window it always
