@@ -14,6 +14,14 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.20.0](https://github.com/Smana/runlore/compare/v0.19.1...v0.20.0) (2026-11-04)
+
+
+### Features
+
+* **curate:** a threat check on an entry's text withholds ready-to-merge ([#609](https://github.com/Smana/runlore/issues/609)) ([a55e781](https://github.com/Smana/runlore/commit/a55e78139866c6e3ee6c0cf2cef930a8749ad6f9))
+* **factory:** factory.ca_file trusts a private CA; refresh exit code and queue cap ([#611](https://github.com/Smana/runlore/issues/611)) ([dfa08c9](https://github.com/Smana/runlore/commit/dfa08c9e78baf3993b38d6a59c215ce42ca620c6))
+
 ## [0.19.1](https://github.com/Smana/runlore/compare/v0.19.0...v0.19.1) (2026-11-04)
 
 
