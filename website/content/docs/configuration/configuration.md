@@ -1104,11 +1104,11 @@ factory:
   the delivery.
 
   A re-detection files nothing while a generation is undecided: from the first acceptance until the
-  fix room binds or `window` passes, and then while a bound fix has no soak verdict, no refused
+  fix room binds, and then while a bound fix has no soak verdict, no refused
   verdict, no revert and no `regression`. So one stub waits for its maintainer, and a repeat of the
-  alert cannot reset a fix or its soak. It is released when the fix room ends without a merge. A
-  stub nobody publishes therefore gets no newer one until `window`, and its entry arrives without
-  a verified fix.
+  alert cannot reset a fix or its soak. It is released when the fix room ends without a merge, and
+  in every case when `window` passes. A stub nobody publishes therefore gets no newer one until
+  `window`, and its entry arrives without a verified fix.
 
   Once a generation is decided, the next re-detection files the next generation. If a held incident
   settled with nothing to show, no pull request and no entry, or its pull request was closed unmerged,
