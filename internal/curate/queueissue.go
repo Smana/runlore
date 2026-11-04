@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/outcome"
@@ -24,6 +25,8 @@ const (
 	queueMarkerHead = "<!-- runlore:knowledge-queue at="
 	nothingNewLine  = "Nothing new since the last rewrite."
 	auditLine       = "Nothing merged by automation to sample since the last rewrite."
+	// maxIssueBody is GitHub's limit on an issue body, in characters. The Decide table is cut to fit.
+	maxIssueBody = 65536
 )
 
 // queueMarker is the hidden first line of the issue body: the instant of the rewrite. The command,
@@ -279,40 +282,79 @@ func (q QueueIssue) merged(ctx context.Context, since time.Time) (int, error) {
 }
 
 func (q QueueIssue) render(now, last time.Time, rows []decideRow, merged int) string {
-	var b strings.Builder
-	b.WriteString(queueMarker(now) + "\n\n")
-	fmt.Fprintf(&b, "Rewritten %s UTC by `lore curate`.\n\n## Decide\n\n", now.Format("2006-01-02 15:04"))
+	return q.renderLimit(now, last, rows, merged, maxIssueBody)
+}
+
+// renderLimit is render with the body held to limit characters: the Decide table keeps its riskiest
+// rows, and a line says how many more are not listed.
+func (q QueueIssue) renderLimit(now, last time.Time, rows []decideRow, merged, limit int) string {
+	var head, table, tail strings.Builder
+	head.WriteString(queueMarker(now) + "\n\n")
+	fmt.Fprintf(&head, "Rewritten %s UTC by `lore curate`.\n\n## Decide\n\n", now.Format("2006-01-02 15:04"))
 	if !last.IsZero() && !slices.ContainsFunc(rows, func(r decideRow) bool { return r.pr.CreatedAt.After(last) }) {
-		b.WriteString(nothingNewLine + "\n\n")
+		head.WriteString(nothingNewLine + "\n\n")
 	}
+	tail.WriteString("\n## Audit\n\n" + auditLine + "\n\n## Measures\n\n")
+	tail.WriteString("| Measure | Value |\n|---|---|\n")
+	fmt.Fprintf(&tail, "| Merged entries | %d |\n| Queue age | %s |\n", merged, queueAge(rows, now))
+	tail.WriteString(q.ledgerMeasures(last))
+
 	if len(rows) == 0 {
-		b.WriteString("Nothing waits for a decision.\n")
-	} else {
-		b.WriteString("| Risk | Entry | Verdict | Confidence | Evidence |\n|---|---|---|---|---|\n")
-		for _, r := range rows {
-			verdict, conf := "—", "—"
-			if v, c, ok := providers.ParseCardMarker(r.pr.Body); ok {
-				verdict, conf = v, fmt.Sprintf("%d%%", int(math.Round(c*100)))
-			}
-			evidence := "—"
-			if ev := providers.ParseCardEvidence(r.pr.Body); ev != "" && !r.withheld {
-				evidence = cell(truncateRunes(ev, 200))
-			}
-			text := fmt.Sprintf("#%d", r.pr.Number)
-			if !r.withheld {
-				text = cell(truncateRunes(text+" "+r.pr.Title, 160))
-			}
-			if r.pr.URL != "" {
-				text = "[" + text + "](" + r.pr.URL + ")"
-			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", r.risk, text, cell(verdict), conf, evidence)
-		}
+		return head.String() + "Nothing waits for a decision.\n" + tail.String()
 	}
-	b.WriteString("\n## Audit\n\n" + auditLine + "\n\n## Measures\n\n")
-	b.WriteString("| Measure | Value |\n|---|---|\n")
-	fmt.Fprintf(&b, "| Merged entries | %d |\n| Queue age | %s |\n", merged, queueAge(rows, now))
-	b.WriteString(q.ledgerMeasures(last))
-	return b.String()
+	const tableHead = "| Risk | Entry | Verdict | Confidence | Evidence |\n|---|---|---|---|---|\n"
+	lines := make([]string, len(rows))
+	total := 0
+	for i, r := range rows {
+		lines[i] = decideLine(r)
+		total += utf8.RuneCountInString(lines[i])
+	}
+	fixed := utf8.RuneCountInString(head.String()) + utf8.RuneCountInString(tableHead) + utf8.RuneCountInString(tail.String())
+	shown, note := len(rows), ""
+	if fixed+total > limit {
+		// The note is sized for the largest count it can name, so it always fits where it is written.
+		budget := limit - fixed - utf8.RuneCountInString(omittedNote(len(rows)))
+		shown = 0
+		for _, l := range lines {
+			n := utf8.RuneCountInString(l)
+			if n > budget {
+				break
+			}
+			budget -= n
+			shown++
+		}
+		note = omittedNote(len(rows) - shown)
+	}
+	table.WriteString(tableHead)
+	for _, l := range lines[:shown] {
+		table.WriteString(l)
+	}
+	return head.String() + table.String() + note + tail.String()
+}
+
+// omittedNote is the line that says how many Decide rows the issue body had no room for.
+func omittedNote(n int) string {
+	return fmt.Sprintf("\n%d more waiting, riskiest first above: not listed, the issue body is at GitHub's size limit.\n", n)
+}
+
+// decideLine is one row of the Decide table.
+func decideLine(r decideRow) string {
+	verdict, conf := "—", "—"
+	if v, c, ok := providers.ParseCardMarker(r.pr.Body); ok {
+		verdict, conf = v, fmt.Sprintf("%d%%", int(math.Round(c*100)))
+	}
+	evidence := "—"
+	if ev := providers.ParseCardEvidence(r.pr.Body); ev != "" && !r.withheld {
+		evidence = cell(truncateRunes(ev, 200))
+	}
+	text := fmt.Sprintf("#%d", r.pr.Number)
+	if !r.withheld {
+		text = cell(truncateRunes(text+" "+r.pr.Title, 160))
+	}
+	if r.pr.URL != "" {
+		text = "[" + text + "](" + r.pr.URL + ")"
+	}
+	return fmt.Sprintf("| %s | %s | %s | %s | %s |\n", r.risk, text, cell(verdict), conf, evidence)
 }
 
 // ledgerMeasures renders the rows the outcome ledger answers, and a line saying why when it cannot.
