@@ -63,6 +63,8 @@ type onceRig struct {
 	resolveErr error
 	promoteErr error
 	catalog    map[string]string
+	labelled   []string
+	labelErr   error
 }
 
 // recordingInner is the curator, remembering what it was asked to draft.
@@ -126,6 +128,14 @@ func (g *onceRig) PREntry(_ context.Context, n int) (providers.PREntry, error) {
 		return e, nil
 	}
 	return providers.PREntry{}, fmt.Errorf("no PR %d", n)
+}
+
+func (g *onceRig) ReplaceLabel(_ context.Context, n int, remove, add string) error {
+	if g.labelErr != nil {
+		return g.labelErr
+	}
+	g.labelled = append(g.labelled, fmt.Sprintf("%d -%s +%s", n, remove, add))
+	return nil
 }
 
 func newOnceRig(t *testing.T) *onceRig {
@@ -293,6 +303,8 @@ func (f *entryForge) ListPRsByLabel(context.Context, string) ([]providers.Curate
 }
 
 func (f *entryForge) CommentOnPR(context.Context, int, string) error { return nil }
+
+func (f *entryForge) ReplaceLabel(context.Context, int, string, string) error { return nil }
 
 func (f *entryForge) PREntry(_ context.Context, n int) (providers.PREntry, error) {
 	return providers.PREntry{Path: fmt.Sprintf("incidents/pr-%d.md", n), State: "open"}, nil
@@ -536,46 +548,70 @@ func TestCurationOnceAFailedListingDraftsNothing(t *testing.T) {
 	}
 }
 
-func TestCurationOnceAFailedPREntryAfterTheDraftAdoptsNextTick(t *testing.T) {
+// I1: one outage fails the swallowed label and PREntry alike, and an unlabelled PR is in no listing.
+// The URL is written at once, the entry is read later, and the PR is labelled again.
+func TestCurationOnceALabelAndPREntryOutageOpensNoSecondPR(t *testing.T) {
 	g := newOnceRig(t)
-	fail := true
+	g.open = nil // unlabelled: no listing finds it
+	g.entryErr = func(int) error { return errors.New("github is down") }
+	g.held(t, g.verified)
+	g.cu.Once(ctx)
+	h := g.record(t).Curation
+	if h.Drafted != draftURL || h.Entry != "" || !h.EntryDue || len(g.verifies) != 0 || len(g.promotes) != 0 {
+		t.Fatalf("%+v, verifies %+v", h, g.verifies)
+	}
+	if r := g.record(t); r.Observed != "" {
+		t.Fatalf("nothing is observed before the entry is known: %+v", r)
+	}
+
+	// GitHub is back, and the guard refuses the PR until it carries the label.
 	g.entryErr = func(int) error {
-		if fail {
-			return errors.New("a blip")
+		if len(g.labelled) == 0 {
+			return fmt.Errorf("PR: %w", providers.ErrNotRunLorePR)
 		}
 		return nil
 	}
-	g.held(t, g.verified)
 	g.cu.Once(ctx)
-	if h := g.record(t).Curation; h.Drafted != "" || len(g.verifies) != 0 {
-		t.Fatalf("%+v", h)
-	}
-	fail = false
-	g.open = []providers.CuratedIssue{{Number: 164, URL: draftURL, Body: providers.FingerprintMarker(holdFP)}}
 	g.cu.Once(ctx)
-	if h := g.record(t).Curation; len(g.inner.invs) != 1 || h.Drafted != draftURL || h.Entry != draftEntry || len(g.verifies) != 1 {
+	r := g.record(t)
+	h = r.Curation
+	if len(g.inner.invs) != 1 || h.Drafted != draftURL || h.Entry != draftEntry || h.EntryDue {
 		t.Fatalf("inner %d, %+v", len(g.inner.invs), h)
+	}
+	if !slices.Equal(g.labelled, []string{"164 - +runlore"}) {
+		t.Fatalf("%v", g.labelled)
+	}
+	if len(g.verifies) != 1 || g.verifies[0].Entry != draftEntry || r.Observed != "held" || !slices.Equal(g.promotes, []int{164}) {
+		t.Fatalf("verifies %+v, promotes %v, %+v", g.verifies, g.promotes, r)
+	}
+	if !slices.Equal(g.links, []string{"k1 " + draftURL}) {
+		t.Fatalf("%v", g.links)
 	}
 }
 
-// A PR whose best-effort label failed is refused by PREntry for good, and no listing finds it: the
-// URL is recorded so no second PR opens, and nothing keeps asking.
-func TestCurationOnceADraftWhoseLabelFailed(t *testing.T) {
+func TestCurationOnceAnEntryThatNeverReadsStopsAtTheWindow(t *testing.T) {
 	g := newOnceRig(t)
 	calls := 0
 	g.entryErr = func(int) error {
 		calls++
-		return fmt.Errorf("PR: %w", providers.ErrNotRunLorePR)
+		return errors.New("two entries in one PR")
 	}
 	g.held(t, g.verified)
 	g.cu.Once(ctx)
 	g.cu.Once(ctx)
-	r := g.record(t)
-	if h := r.Curation; len(g.inner.invs) != 1 || h.Drafted != draftURL || h.Entry != "" || calls != 1 || len(g.verifies) != 0 || len(g.resolves) != 0 {
-		t.Fatalf("inner %d, entry calls %d, %+v", len(g.inner.invs), calls, h)
+	if h := g.record(t).Curation; !h.EntryDue || calls != 2 {
+		t.Fatalf("calls %d, %+v", calls, h)
 	}
-	if !slices.Equal(g.links, []string{"k1 " + draftURL}) {
-		t.Fatalf("%v", g.links)
+	g.now = g.now.Add(168 * time.Hour)
+	g.logs.Reset()
+	g.cu.Once(ctx)
+	h := g.record(t).Curation
+	if h.EntryDue || h.Entry != "" || h.Drafted != draftURL || calls != 3 || len(g.inner.invs) != 1 || len(g.verifies) != 0 {
+		t.Fatalf("calls %d, inner %d, %+v", calls, len(g.inner.invs), h)
+	}
+	g.cu.Once(ctx)
+	if calls != 3 || strings.Count(g.logs.String(), "window_passed") != 1 {
+		t.Fatalf("logged once: calls %d, %s", calls, g.logs.String())
 	}
 }
 
@@ -841,14 +877,369 @@ func TestCurationOnceAPullBlipWaitsOnTheResolvePathToo(t *testing.T) {
 		g.verified(r)
 	})
 	g.cu.Once(ctx)
-	if r := g.record(t); r.Resolved != "" || len(g.resolves) != 0 {
-		t.Fatalf("%+v", r)
+	if r := g.record(t); r.Resolved != "" || len(g.resolves) != 0 || len(g.promotes) != 0 || !r.Curation.PromoteDue {
+		t.Fatalf("no label on a body without the fix: %+v, promotes %v", r, g.promotes)
 	}
 	g.pullErr = nil
 	g.cu.Once(ctx)
-	if len(g.resolves) != 1 || g.resolves[0].res.MergeSHA != "3f5a133c" {
-		t.Fatalf("%+v", g.resolves)
+	g.cu.Once(ctx)
+	if len(g.resolves) != 1 || g.resolves[0].res.MergeSHA != "3f5a133c" || !slices.Equal(g.promotes, []int{164}) {
+		t.Fatalf("%+v, %v", g.resolves, g.promotes)
 	}
+}
+
+// I2: Promote waits for the fix to be in the body, and a label on a body without it is never laid.
+func TestCurationOnceAResolveBlipHoldsThePromote(t *testing.T) {
+	g := newOnceRig(t)
+	g.resolveErr = errors.New("a blip")
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		g.verified(r)
+	})
+	g.cu.Once(ctx)
+	if h := g.record(t).Curation; len(g.promotes) != 0 || !h.PromoteDue {
+		t.Fatalf("promotes %v, %+v", g.promotes, h)
+	}
+	g.resolveErr = nil
+	g.cu.Once(ctx)
+	g.cu.Once(ctx)
+	if h := g.record(t).Curation; !slices.Equal(g.calls, []string{"verify", "resolve", "promote"}) || h.PromoteDue {
+		t.Fatalf("%v, %+v", g.calls, h)
+	}
+}
+
+// A failed generation does not hold the promote back: withdrawing the label should not wait.
+func TestCurationOnceAResolveBlipOnAFailureStillWithdraws(t *testing.T) {
+	g := newOnceRig(t)
+	g.resolveErr = errors.New("a blip")
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		r.FixRoom, r.PR, r.Repo, r.Verdict = "fix1", 2638, fixRepo, "persisting"
+	})
+	g.cu.Once(ctx)
+	if !slices.Equal(g.promotes, []int{164}) {
+		t.Fatalf("%v", g.promotes)
+	}
+}
+
+// KP20: a push strips ready-to-merge, so a push asks for the check again.
+func TestCurationOnceAPushAsksForThePromoteAgain(t *testing.T) {
+	for _, tc := range []struct {
+		route string
+		want  []int
+	}{{"appended", []int{164}}, {"unchanged", nil}, {"edit-pr", nil}} {
+		t.Run(tc.route, func(t *testing.T) {
+			g := newOnceRig(t)
+			g.held(t, func(r *Record) {
+				draftedHold(r)
+				g.verified(r)
+				r.Observed = "held" // observed earlier, and promoted: PromoteDue is clear
+			})
+			g.cu.Resolve = func(context.Context, kbresolve.Target, providers.AppliedResolution) (kbresolve.Result, error) {
+				return kbresolve.Result{Route: tc.route}, nil
+			}
+			g.cu.Once(ctx)
+			if !slices.Equal(g.promotes, tc.want) {
+				t.Fatalf("%v", g.promotes)
+			}
+		})
+	}
+}
+
+// A fix that could not be written is not "every verified generation's Resolve succeeded".
+func TestCurationOnceATerminalResolveOnAHeldFixDoesNotLabel(t *testing.T) {
+	g := newOnceRig(t)
+	g.resolveErr = kbresolve.ErrClosedUnmerged
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		g.verified(r)
+	})
+	g.cu.Once(ctx)
+	g.cu.Once(ctx)
+	if h := g.record(t).Curation; len(g.promotes) != 0 || h.PromoteDue {
+		t.Fatalf("promotes %v, %+v", g.promotes, h)
+	}
+}
+
+func TestCurationOnceADryRunDoesNotLabel(t *testing.T) {
+	g := newOnceRig(t)
+	g.cu.DryRun = true
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		g.verified(r)
+	})
+	g.cu.Once(ctx)
+	if len(g.promotes) != 0 {
+		t.Fatalf("%v", g.promotes)
+	}
+}
+
+// I3: latest means the newest generation, not the last verdict to arrive.
+func TestCurationOnceALateVerdictDoesNotOutrankTheNewestGeneration(t *testing.T) {
+	archived := func(monitor string) Generation {
+		return Generation{FixRoom: "fix0", Repo: fixRepo, PR: 2639, Verdict: "resolved", Monitor: monitor}
+	}
+	for _, tc := range []struct {
+		name, oldVerdict, lateVerdict, verdict, monitor string
+		want                                            bool
+	}{
+		{name: "the newest persisted, the oldest late healthy", lateVerdict: "healthy", verdict: "persisting", want: false},
+		{name: "the newest held, the oldest late regression", lateVerdict: "regression", verdict: "resolved", monitor: "healthy", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newOnceRig(t)
+			path := filepath.Join(t.TempDir(), "outcome.jsonl")
+			outcomes, err := outcome.New(path)
+			must(t, err)
+			g.cu.Outcome = outcomes
+			g.held(t, func(r *Record) {
+				draftedHold(r)
+				r.Curation.Generations = []Generation{archived("")}
+				r.FixRoom, r.PR, r.Repo, r.Verdict, r.Monitor = "fix1", 2638, fixRepo, tc.verdict, tc.monitor
+			})
+			g.cu.Once(ctx)
+			if got := outcomes.Verifications()[holdFP]; got != tc.want {
+				t.Fatalf("before the late verdict: %v", got)
+			}
+			g.now = g.now.Add(time.Hour) // a later tick, on a later clock
+			must(t, g.l.Upsert("k1", func(r *Record) { r.Curation.Generations[0].Monitor = tc.lateVerdict }))
+			g.cu.Once(ctx)
+			if got := outcomes.Verifications()[holdFP]; got != tc.want {
+				t.Fatalf("the late verdict moved it: %v", got)
+			}
+		})
+	}
+}
+
+func TestCurationOnceAVerifysAtIsTheGenerationsOwn(t *testing.T) {
+	g := newOnceRig(t)
+	accepted := g.now
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		r.Curation.Generations = []Generation{g.failedGeneration()}
+		g.verified(r)
+	})
+	g.now = g.now.Add(time.Hour)
+	g.cu.Once(ctx)
+	if len(g.verifies) != 2 || !g.verifies[0].At.Equal(accepted) || !g.verifies[1].At.Equal(accepted.Add(1)) {
+		t.Fatalf("%+v", g.verifies)
+	}
+}
+
+// A replay, in the same ledger or after a reload, counts once; a flip on the same instant still flips.
+func TestCurationOnceAVerifyReplayIsIdempotent(t *testing.T) {
+	g := newOnceRig(t)
+	path := filepath.Join(t.TempDir(), "outcome.jsonl")
+	outcomes, err := outcome.New(path)
+	must(t, err)
+	g.cu.Outcome = outcomes
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		g.verified(r)
+	})
+	count := func(l *outcome.Ledger) outcome.Aggregate {
+		t.Helper()
+		counts, err := l.OpenCounts()
+		must(t, err)
+		return counts[draftEntry]
+	}
+	g.cu.Once(ctx)
+	must(t, g.l.Upsert("k1", func(r *Record) { r.Observed = "" })) // the crash between Verify and Observed
+	g.now = g.now.Add(time.Hour)
+	g.cu.Once(ctx)
+	if got := count(outcomes); got.Verified != 1 || got.Failed != 0 {
+		t.Fatalf("%+v", got)
+	}
+	reopened, err := outcome.New(path)
+	must(t, err)
+	if got := count(reopened); got.Verified != 1 || got.Failed != 0 || !reopened.Verifications()[holdFP] {
+		t.Fatalf("after a reload: %+v", got)
+	}
+	must(t, g.l.Upsert("k1", func(r *Record) { r.Reverted = true }))
+	g.cu.Once(ctx)
+	if got := count(outcomes); got.Verified != 0 || got.Failed != 1 || outcomes.Verifications()[holdFP] {
+		t.Fatalf("a revert on the same instant flips the room: %+v", got)
+	}
+}
+
+// A hold written with no acceptance time, as a recall's is, gets one once and keeps it.
+func TestCurationOnceAHoldWithoutAnInstantGetsOneOnce(t *testing.T) {
+	g := newOnceRig(t)
+	must(t, g.l.Upsert("k1", func(r *Record) {
+		r.Curation = &Hold{ObserveOnly: true, Entry: "incidents/web.md", Drafted: "none", Fingerprint: holdFP}
+		g.verified(r)
+	}))
+	stamped := g.now
+	g.cu.Once(ctx)
+	if h := g.record(t).Curation; !h.AcceptedAt.Equal(stamped) || len(g.verifies) != 1 || !g.verifies[0].At.Equal(stamped) {
+		t.Fatalf("%+v, %+v", h, g.verifies)
+	}
+	g.now = g.now.Add(time.Hour)
+	must(t, g.l.Upsert("k1", func(r *Record) { r.Reverted = true }))
+	g.cu.Once(ctx)
+	if h := g.record(t).Curation; !h.AcceptedAt.Equal(stamped) || len(g.verifies) != 2 || !g.verifies[1].At.Equal(stamped) {
+		t.Fatalf("%+v, %+v", h, g.verifies)
+	}
+}
+
+// I4: any retried error stops at the hold's window, logged once.
+func TestCurationOnceRetriesStopAtTheWindow(t *testing.T) {
+	boom := errors.New("permanent")
+	past := func(g *onceRig) { g.now = g.now.Add(168 * time.Hour) }
+	for _, tc := range []struct {
+		name  string
+		setup func(g *onceRig)
+		seed  func(g *onceRig, r *Record)
+		check func(t *testing.T, g *onceRig)
+	}{
+		{
+			name:  "resolve",
+			setup: func(g *onceRig) { g.resolveErr = boom },
+			seed: func(g *onceRig, r *Record) {
+				draftedHold(r)
+				g.verified(r)
+			},
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if r := g.record(t); r.Resolved != "held" || len(g.promotes) != 0 || r.Curation.PromoteDue {
+					t.Fatalf("%+v, promotes %v", r, g.promotes)
+				}
+			},
+		},
+		{
+			name:  "inner",
+			setup: func(g *onceRig) { g.inner.err, g.inner.ref = boom, providers.Ref{} },
+			seed:  func(g *onceRig, r *Record) { g.verified(r) },
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if h := g.record(t).Curation; h.Drafted != "none" || len(g.inner.invs) != 2 {
+					t.Fatalf("one try in the window, one past it, none after: inner %d, %+v", len(g.inner.invs), h)
+				}
+			},
+		},
+		{
+			name:  "promote",
+			setup: func(g *onceRig) { g.promoteErr = boom },
+			seed: func(g *onceRig, r *Record) {
+				draftedHold(r)
+				g.verified(r)
+				r.Observed, r.Resolved, r.Curation.PromoteDue = "held", "held", true
+			},
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if h := g.record(t).Curation; h.PromoteDue {
+					t.Fatalf("%+v", h)
+				}
+			},
+		},
+		{
+			name:  "link",
+			setup: func(g *onceRig) { g.linkErr = boom },
+			seed: func(_ *onceRig, r *Record) {
+				draftedHold(r)
+				r.Curation.LinkDue = true
+			},
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if h := g.record(t).Curation; h.LinkDue {
+					t.Fatalf("%+v", h)
+				}
+			},
+		},
+		{
+			name:  "verify",
+			setup: func(g *onceRig) { g.verifyErr = boom },
+			seed: func(g *onceRig, r *Record) {
+				draftedHold(r)
+				g.verified(r)
+				r.Resolved = "held"
+			},
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if r := g.record(t); r.Observed != "held" {
+					t.Fatalf("%+v", r)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newOnceRig(t)
+			tc.setup(g)
+			g.held(t, func(r *Record) { tc.seed(g, r) })
+			g.cu.Once(ctx)
+			if strings.Contains(g.logs.String(), "window_passed") {
+				t.Fatalf("within the window it retries: %s", g.logs.String())
+			}
+			past(g)
+			g.logs.Reset()
+			g.cu.Once(ctx)
+			g.cu.Once(ctx)
+			tc.check(t, g)
+			if n := strings.Count(g.logs.String(), "window_passed"); n != 1 {
+				t.Fatalf("logged %d times: %s", n, g.logs.String())
+			}
+		})
+	}
+}
+
+// An adoption that keeps failing never blocks the window's draft.
+func TestCurationOnceAFailedAdoptionDoesNotBlockTheWindowsDraft(t *testing.T) {
+	for name, setup := range map[string]func(g *onceRig){
+		"the listing fails": func(g *onceRig) { g.listErr = errors.New("permanent") },
+		"the candidate's entry cannot be read": func(g *onceRig) {
+			g.open = []providers.CuratedIssue{{Number: 9, URL: "https://github.com/o/kb/pull/9", Body: providers.FingerprintMarker(holdFP)}}
+			g.entryErr = func(n int) error {
+				if n == 9 {
+					return errors.New("two entries in one PR")
+				}
+				return nil
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newOnceRig(t)
+			setup(g)
+			g.held(t, g.verified)
+			g.cu.Once(ctx)
+			if len(g.inner.invs) != 0 {
+				t.Fatal("within the window it waits")
+			}
+			g.now = g.now.Add(168 * time.Hour)
+			g.logs.Reset()
+			g.cu.Once(ctx)
+			g.cu.Once(ctx)
+			if h := g.record(t).Curation; len(g.inner.invs) != 1 || h.Drafted != draftURL || h.Entry != draftEntry {
+				t.Fatalf("inner %d, %+v", len(g.inner.invs), h)
+			}
+			if n := strings.Count(g.logs.String(), "window_passed"); n != 1 {
+				t.Fatalf("logged %d times: %s", n, g.logs.String())
+			}
+		})
+	}
+}
+
+// A cancelled context says nothing about the failure: leadership moved, and the next leader retries.
+func TestCurationOnceACancelledContextIsNotTerminal(t *testing.T) {
+	g := newOnceRig(t)
+	run, cancel := context.WithCancel(ctx)
+	g.inner.ref, g.inner.err = providers.Ref{}, context.Canceled
+	g.held(t, nil)
+	g.cu.Inner = cancelling{g.inner, cancel}
+	g.now = g.now.Add(168 * time.Hour)
+	g.cu.Once(run)
+	if h := g.record(t).Curation; h.Drafted != "" || strings.Contains(g.logs.String(), "window_passed") {
+		t.Fatalf("%+v, %s", h, g.logs.String())
+	}
+}
+
+type cancelling struct {
+	*recordingInner
+	cancel context.CancelFunc
+}
+
+func (c cancelling) Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
+	c.cancel()
+	return c.recordingInner.Curate(ctx, inv)
 }
 
 func TestCurationOnceAnEmptyRepoUsesTheConfiguredOne(t *testing.T) {

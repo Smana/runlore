@@ -47,10 +47,12 @@ type PullReader interface {
 	PullSummary(ctx context.Context, repo string, number int) (providers.PullSummary, error)
 }
 
-// DraftLister finds the open entry PRs, to adopt one instead of drafting it again.
+// DraftLister finds the open entry PRs, to adopt one instead of drafting it again, and labels a PR
+// RunLore opened whose best-effort label failed.
 type DraftLister interface {
 	ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
 	PREntry(ctx context.Context, number int) (providers.PREntry, error)
+	ReplaceLabel(ctx context.Context, number int, remove, add string) error
 }
 
 var (
@@ -245,7 +247,9 @@ func (c *Curation) Run(ctx context.Context, every time.Duration) {
 // Once brings every held incident forward: it drafts or adopts its entry, links the trigger to it,
 // observes each generation's outcome, records it in the entry, and promotes the PR. Each step writes
 // what it did before the next one reads it, and a crash replays safely: the outcome ledger folds per
-// room, and Resolve is idempotent.
+// room, and Resolve is idempotent. Anything that fails retries on the next tick until the hold's
+// window; past it the failure is terminal, since holds are never removed and permanent errors cannot
+// be listed.
 func (c *Curation) Once(ctx context.Context) {
 	c.once.Lock()
 	defer c.once.Unlock()
@@ -257,8 +261,8 @@ func (c *Curation) Once(ctx context.Context) {
 		if !c.settle(ctx, key) {
 			continue
 		}
-		c.link(key)
-		c.observe(key)
+		c.link(ctx, key)
+		c.observe(ctx, key)
 		c.record(ctx, key)
 		c.promote(ctx, key)
 	}
@@ -274,21 +278,20 @@ func (c *Curation) settle(ctx context.Context, key string) bool {
 	}
 	h := r.Curation
 	if h.Drafted != "" {
-		return true
+		return !h.EntryDue || c.readEntry(ctx, key)
 	}
 	gens := generations(r)
 	if !c.windowPassed(h) && !slices.ContainsFunc(gens, func(g Generation) bool { return g.Outcome() == "held" }) {
 		return false
 	}
 	url, entry, found, err := c.adoptable(ctx, h.Fingerprint)
-	if err != nil {
-		c.warn("listing the open entry PRs failed; the draft waits", key, err)
+	if err != nil && c.retries(ctx, h, "looking for an open entry PR failed; the draft waits", key, err) {
 		return false
 	}
 	if found {
 		return c.writeDraft(key, url, entry, nil)
 	}
-	if path, hit := c.FindEntry(h.Fingerprint); hit {
+	if path, hit := c.FindEntry(h.Fingerprint); hit && h.Fingerprint != "" {
 		return c.writeDraft(key, draftedNone, path, nil)
 	}
 	return c.draftHeld(ctx, r, gens)
@@ -351,28 +354,49 @@ func (c *Curation) draftHeld(ctx context.Context, r Record, gens []Generation) b
 	if c.Inner != nil {
 		var err error
 		if ref, err = c.Inner.Curate(ctx, inv); err != nil {
-			c.warn("drafting the held entry failed; retrying on the next tick", key, err)
-			return false
+			if c.retries(ctx, h, "drafting the held entry failed", key, err) {
+				return false
+			}
+			return c.writeDraft(key, draftedNone, "", nil)
 		}
 	}
 	if ref.URL == "" {
 		return c.writeDraft(key, draftedNone, "", nil)
 	}
-	n, _ := prNumber(ref.URL)
-	pe, err := c.Drafts.PREntry(ctx, n)
-	switch {
-	case errors.Is(err, providers.ErrNotRunLorePR):
-		// Its label failed, so no listing would find it: keep the URL, or the next tick opens a second PR.
-		c.warn("the drafted PR is refused as RunLore's; its entry goes unobserved", key, err)
-	case err != nil:
-		c.warn("reading the drafted PR failed; the next tick adopts it", key, err)
+	// The URL is written before anything else can fail: OpenPR's label is best-effort, and an unlabelled
+	// PR is in no listing, so losing the URL here would open a second PR. Only a hard kill between the
+	// PR's creation and this write can still do that.
+	if !c.writeDraft(key, ref.URL, "", carried) {
 		return false
 	}
-	return c.writeDraft(key, ref.URL, pe.Path, carried)
+	return c.readEntry(ctx, key)
 }
 
-// writeDraft records the draft, once: Drafted and Entry never change after this write. carried maps
-// each fix room the draft wrote to its outcome.
+// readEntry reads the entry path of the PR the hold drafted. The guard refuses a PR with no runlore
+// label, and this one RunLore opened itself, so a refusal labels it first. Nothing is observed until
+// the path is known, or past the window, when the hold goes on with no entry to credit.
+func (c *Curation) readEntry(ctx context.Context, key string) bool {
+	r, ok := c.Ledger.Get(key)
+	if !ok || r.Curation == nil {
+		return false
+	}
+	h := r.Curation
+	n, _ := prNumber(h.Drafted)
+	pe, err := c.Drafts.PREntry(ctx, n)
+	if errors.Is(err, providers.ErrNotRunLorePR) {
+		if err = c.Drafts.ReplaceLabel(ctx, n, "", "runlore"); err == nil {
+			pe, err = c.Drafts.PREntry(ctx, n)
+		}
+	}
+	if err != nil && c.retries(ctx, h, "reading the drafted PR failed", key, err) {
+		return false
+	}
+	return c.update(key, func(h *Hold) { h.Entry, h.EntryDue = pe.Path, false })
+}
+
+// writeDraft records the draft, once: Drafted never changes after this write, and Entry only from
+// empty, when a URL comes with no entry and EntryDue asks for it. carried maps each fix room the draft
+// wrote to its outcome.
 func (c *Curation) writeDraft(key, drafted, entry string, carried map[string]string) bool {
 	err := c.Ledger.Upsert(key, func(r *Record) {
 		h := r.Curation
@@ -381,7 +405,7 @@ func (c *Curation) writeDraft(key, drafted, entry string, carried map[string]str
 		}
 		h.Drafted, h.Entry, h.DraftedAt = drafted, entry, c.now()
 		if drafted != draftedNone {
-			h.LinkDue, h.PromoteDue = true, true
+			h.LinkDue, h.PromoteDue, h.EntryDue = true, true, entry == ""
 		}
 		for room, o := range carried {
 			if _, resolved := r.marks(room); resolved != nil {
@@ -397,38 +421,41 @@ func (c *Curation) writeDraft(key, drafted, entry string, carried map[string]str
 }
 
 // link gives the trigger its drafted PR, so a deferred PR is visible to Contested and to recurrence.
-func (c *Curation) link(key string) {
+func (c *Curation) link(ctx context.Context, key string) {
 	r, ok := c.Ledger.Get(key)
 	if !ok || r.Curation == nil || !r.Curation.LinkDue {
 		return
 	}
-	if err := c.Outcome.Link(key, r.Curation.Drafted, c.now()); err != nil {
-		c.warn("linking the trigger to its draft failed; retrying on the next tick", key, err)
+	err := c.Outcome.Link(key, r.Curation.Drafted, c.now())
+	if err != nil && c.retries(ctx, r.Curation, "linking the trigger to its draft failed", key, err) {
 		return
 	}
 	c.update(key, func(h *Hold) { h.LinkDue = false })
 }
 
-// observe credits the entry with each generation's new outcome. Observations of one tick are ordered
-// by generation: Verifications lets a failure win a tie, which would hide the fix that held after it.
-func (c *Curation) observe(key string) {
+// observe credits the entry with each generation's new outcome. A Verify's At is the generation's own
+// instant, the hold's acceptance plus its index, which a generation keeps once archived, never the
+// clock: "latest" must mean the newest generation, and a late verdict on an older one must not outrank
+// it. A replay carries the same instant and a flip of one room is not older, so both still fold.
+func (c *Curation) observe(ctx context.Context, key string) {
 	r, ok := c.Ledger.Get(key)
 	if !ok || r.Curation == nil {
 		return
 	}
 	h := r.Curation
-	at := c.now()
 	for i, g := range generations(r) {
 		o := g.Outcome()
 		if o == "" || o == g.Observed {
 			continue
 		}
 		if h.Entry != "" {
+			if !c.stampInstant(key, h) {
+				return
+			}
 			err := c.Outcome.Verify(outcome.Verification{
-				Entry: h.Entry, DupFingerprint: h.Fingerprint, TriggerKey: key, Room: g.FixRoom, Held: o == "held", At: at.Add(time.Duration(i)),
+				Entry: h.Entry, DupFingerprint: h.Fingerprint, TriggerKey: key, Room: g.FixRoom, Held: o == "held", At: h.AcceptedAt.Add(time.Duration(i)),
 			})
-			if err != nil {
-				c.warn("recording the verification failed; retrying on the next tick", key, err)
+			if err != nil && c.retries(ctx, h, "recording the verification failed", key, err) {
 				continue
 			}
 		}
@@ -446,9 +473,25 @@ func (c *Curation) observe(key string) {
 	}
 }
 
+// stampInstant gives a hold written with no acceptance time, as a recall's is, the time of its first
+// observation, durably and before any Verify uses it, so every later one reads the same instant.
+func (c *Curation) stampInstant(key string, h *Hold) bool {
+	if !h.AcceptedAt.IsZero() {
+		return true
+	}
+	at := c.now()
+	if !c.update(key, func(h *Hold) { h.AcceptedAt = at }) {
+		return false
+	}
+	h.AcceptedAt = at
+	return true
+}
+
 // record writes each generation's new outcome into the entry. A PR closed unmerged, one that is not
-// RunLore's and a fix that cannot be named are terminal; any other failure retries on the next tick.
-// A dry-run neither calls the forge, every minute, nor marks a generation resolved.
+// RunLore's and a fix that cannot be named are terminal at once; any other failure retries until the
+// window. A push strips ready-to-merge (KP20), so it asks for the promote again; a held fix that could
+// not be written cancels the promote, since the label would land on a body without it. A dry-run
+// neither calls the forge, every minute, nor marks a generation resolved.
 func (c *Curation) record(ctx context.Context, key string) {
 	r, ok := c.Ledger.Get(key)
 	if !ok || r.Curation == nil {
@@ -471,18 +514,34 @@ func (c *Curation) record(ctx context.Context, key string) {
 		if !ready {
 			continue
 		}
+		written, retry := false, false
+		route := ""
 		if err := kbresolve.Validate(res); err != nil {
 			c.warn("a fix cannot be written into the entry; not trying again", key, err)
-		} else if _, err := c.Resolve(ctx, target, res); err != nil {
-			if !errors.Is(err, kbresolve.ErrClosedUnmerged) && !errors.Is(err, providers.ErrNotRunLorePR) {
-				c.warn("recording the fix on the entry failed; retrying on the next tick", key, err)
-				continue
+		} else {
+			got, err := c.Resolve(ctx, target, res)
+			switch {
+			case err == nil:
+				written, route = true, got.Route
+			case errors.Is(err, kbresolve.ErrClosedUnmerged), errors.Is(err, providers.ErrNotRunLorePR):
+				c.warn("the entry's PR cannot take the fix; not trying again", key, err)
+			default:
+				retry = c.retries(ctx, h, "recording the fix on the entry failed", key, err)
 			}
-			c.warn("the entry's PR cannot take the fix; not trying again", key, err)
+		}
+		if retry {
+			continue
 		}
 		err := c.Ledger.Upsert(key, func(r *Record) {
 			if _, resolved := r.marks(g.FixRoom); resolved != nil {
 				*resolved = o
+			}
+			switch {
+			case r.Curation == nil:
+			case route == "appended":
+				r.Curation.PromoteDue = true
+			case !written && o == "held":
+				r.Curation.PromoteDue = false
 			}
 		})
 		if err != nil {
@@ -491,15 +550,20 @@ func (c *Curation) record(ctx context.Context, key string) {
 	}
 }
 
-// promote runs the Queue's evidence check on the drafted PR, which labels or withdraws.
+// promote runs the Queue's evidence check on the drafted PR, which labels or withdraws. It waits until
+// every held generation is in the entry: a label laid before the push would be stripped by that push,
+// with nothing to restore it until the next sweep. A failed generation does not wait, since withdrawing
+// the label should not.
 func (c *Curation) promote(ctx context.Context, key string) {
 	r, ok := c.Ledger.Get(key)
 	if !ok || r.Curation == nil || !r.Curation.PromoteDue || c.Promote == nil {
 		return
 	}
+	if slices.ContainsFunc(generations(r), func(g Generation) bool { return g.Outcome() == "held" && g.Resolved != "held" }) {
+		return
+	}
 	if n, ok := prNumber(r.Curation.Drafted); ok {
-		if err := c.Promote(ctx, n); err != nil {
-			c.warn("promoting the entry's PR failed; retrying on the next tick", key, err)
+		if err := c.Promote(ctx, n); err != nil && c.retries(ctx, r.Curation, "promoting the entry's PR failed", key, err) {
 			return
 		}
 	}
@@ -586,8 +650,8 @@ func (r *Record) marks(room string) (observed, resolved *string) {
 	return nil, nil
 }
 
-// update writes to key's hold, when it still has one.
-func (c *Curation) update(key string, fn func(*Hold)) {
+// update writes to key's hold, when it still has one, and reports whether the write landed.
+func (c *Curation) update(key string, fn func(*Hold)) bool {
 	err := c.Ledger.Upsert(key, func(r *Record) {
 		if r.Curation != nil {
 			fn(r.Curation)
@@ -595,7 +659,9 @@ func (c *Curation) update(key string, fn func(*Hold)) {
 	})
 	if err != nil {
 		c.warn("updating the hold failed", key, err)
+		return false
 	}
+	return true
 }
 
 func (c *Curation) windowPassed(h *Hold) bool {
@@ -606,6 +672,21 @@ func (c *Curation) windowPassed(h *Hold) bool {
 func prNumber(url string) (int, bool) {
 	n, err := strconv.Atoi(url[strings.LastIndex(url, "/")+1:])
 	return n, err == nil && n > 0
+}
+
+// retries reports whether a failed step should try again on the next tick. Past the hold's window the
+// failure is terminal and logged here, once, since the caller then settles it. A cancelled context says
+// nothing about the failure: leadership moved or the process is ending, so the next tick decides.
+func (c *Curation) retries(ctx context.Context, h *Hold, msg, key string, err error) bool {
+	switch {
+	case ctx.Err() != nil:
+		return true
+	case !c.windowPassed(h):
+		c.warn(msg+"; retrying on the next tick", key, err)
+		return true
+	}
+	c.log().Warn(msg+"; not trying again", "key", key, "reason", "window_passed", "err", redact.Secrets(err.Error()))
+	return false
 }
 
 func (c *Curation) warn(msg, key string, err error) {

@@ -105,6 +105,8 @@ type Hold struct {
 	PromoteDue    bool            `json:"promote_due,omitempty"`
 	// LinkDue is true from the draft until the outcome ledger links the trigger to the drafted PR.
 	LinkDue bool `json:"link_due,omitempty"`
+	// EntryDue is true from the moment a PR opens until its entry path has been read.
+	EntryDue bool `json:"entry_due,omitempty"`
 }
 
 // Generation is the record's current generation.
