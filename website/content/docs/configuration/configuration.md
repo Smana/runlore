@@ -1093,8 +1093,11 @@ factory:
      from the factory's first acceptance. The 24h floor covers a 30m soak, a 2h class and a
      same-day publish and merge. RunLore cannot read the factory's own follow-up window.
 
-  The writes follow `curate.sweeps.mode`: in `dry-run`, the default, nothing is written to the
-  knowledge base and no generation is marked resolved. Set `apply` to let the entries be written.
+  `curate.sweeps.mode` gates only the writes that go through the audited forge guard: the outcome
+  written into an entry (`kb resolve`) and the `ready-to-merge` label. In `dry-run`, the default,
+  those are logged and audited, not made, and no generation is marked resolved. The draft itself is
+  the curator's own write, as without `defer`, so a verified entry still opens its pull request in
+  `dry-run`. Set `apply` to let the outcome and the label be written too.
   With `defer` on, the factory notifier is not added to the delivery list, since filing happens at
   curation. The Slack line of a new generation can be lost when the factory's first webhook beats
   the delivery.

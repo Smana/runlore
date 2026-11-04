@@ -771,6 +771,24 @@ func TestCurationOnceADryRunMarksNothingResolved(t *testing.T) {
 	}
 }
 
+// A dry run gates the writes that go through Resolve's guarded forge, not the curator: the draft is
+// the curator's own write, as without defer.
+func TestCurationOnceADryRunStillDraftsThroughTheCurator(t *testing.T) {
+	g := newOnceRig(t)
+	g.cu.DryRun = true
+	g.held(t, g.verified)
+	g.cu.Once(ctx)
+	if len(g.inner.invs) != 1 {
+		t.Fatalf("the curator drafts in a dry run: %d calls", len(g.inner.invs))
+	}
+	if h := g.record(t).Curation; h.Drafted != draftURL {
+		t.Fatalf("%+v", h)
+	}
+	if len(g.resolves) != 0 {
+		t.Fatalf("Resolve is not called in a dry run: %+v", g.resolves)
+	}
+}
+
 func TestCurationOnceAFailedPromoteRetriesOnce(t *testing.T) {
 	g := newOnceRig(t)
 	g.promoteErr = errors.New("a blip")
