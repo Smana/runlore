@@ -536,3 +536,87 @@ func TestRenderedEntryWithOriginAndResolutionValidatesClean(t *testing.T) {
 		t.Fatalf("new fields changed validation: %v vs %v", got, want)
 	}
 }
+
+func draftResolutions() (resolved, persisting providers.AppliedResolution) {
+	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	resolved = providers.AppliedResolution{
+		FixPR: "https://github.com/o/r/pull/2", MergeSHA: "3f5a133c", Verdict: "resolved", VerifiedAt: at,
+		Diff: "1 file: a.yaml (+2 −2)", Evidence: "the alert cleared",
+	}
+	persisting = providers.AppliedResolution{FixPR: "https://github.com/o/r/pull/1", Verdict: "persisting", VerifiedAt: at, Why: "the alert still fired after the soak"}
+	return resolved, persisting
+}
+
+func TestDraftResolutionsAreAppliedToTheEntry(t *testing.T) {
+	resolved, persisting := draftResolutions()
+	inv := goodFinding()
+	inv.Resource = providers.Workload{Namespace: "tooling", Name: "harbor"}
+	inv.Resolutions = []providers.AppliedResolution{persisting, resolved}
+	e := draftKBEntry(inv)
+	if e.Resolution == nil || e.Resolution.FixPR != resolved.FixPR {
+		t.Fatalf("entry.Resolution is the resolved one: %+v", e.Resolution)
+	}
+	for _, want := range []string{
+		"- **Applied:** [#2](" + resolved.FixPR + ")", "- **Soak evidence:** the alert cleared",
+		"### Suggested by the investigation", "## Unresolved", "- The fix [#1](" + persisting.FixPR + ") did not hold: the alert still fired after the soak.",
+	} {
+		if !strings.Contains(e.Body, want) {
+			t.Errorf("missing %q in:\n%s", want, e.Body)
+		}
+	}
+	if issues := kbvalidate.ValidateStructural(okf.AsEntry(e, okf.Meta{}, "")); kbvalidate.HasErrors(issues) {
+		t.Fatalf("%+v\n%s", issues, e.Body)
+	}
+}
+
+func TestDraftResolutionsOnlyAFailureLeavesNoResolution(t *testing.T) {
+	_, persisting := draftResolutions()
+	inv := goodFinding()
+	inv.Resolutions = []providers.AppliedResolution{persisting}
+	if e := draftKBEntry(inv); e.Resolution != nil || !strings.Contains(e.Body, "## Unresolved") {
+		t.Fatalf("%+v\n%s", e.Resolution, e.Body)
+	}
+}
+
+func TestDraftResolutionsAFixThatLaterFailedIsNotTheResolution(t *testing.T) {
+	resolved, _ := draftResolutions()
+	flipped := resolved
+	flipped.Verdict = "persisting"
+	inv := goodFinding()
+	inv.Resolutions = []providers.AppliedResolution{resolved, flipped}
+	if e := draftKBEntry(inv); e.Resolution != nil || strings.Contains(e.Body, "**Applied:**") {
+		t.Fatalf("%+v\n%s", e.Resolution, e.Body)
+	}
+}
+
+// okf.Render writes a resolution unchecked, so what cannot be validated never reaches it.
+func TestDraftResolutionsAnInvalidOneIsDropped(t *testing.T) {
+	resolved, _ := draftResolutions()
+	for name, mutate := range map[string]func(r *providers.AppliedResolution){
+		"zero verified_at": func(r *providers.AppliedResolution) { r.VerifiedAt = time.Time{} },
+		"a forged fix":     func(r *providers.AppliedResolution) { r.FixPR = "https://github.com/o/r/pull/1)\n## Cause" },
+		"a forged sha":     func(r *providers.AppliedResolution) { r.MergeSHA = "abc\nverdict: x" },
+		"another verdict":  func(r *providers.AppliedResolution) { r.Verdict = "maybe" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := resolved
+			mutate(&bad)
+			inv := goodFinding()
+			inv.Resolutions = []providers.AppliedResolution{bad}
+			if e := draftKBEntry(inv); e.Resolution != nil || strings.Contains(e.Body, "**Applied:**") {
+				t.Fatalf("%+v\n%s", e.Resolution, e.Body)
+			}
+		})
+	}
+}
+
+func TestDraftResolutionsUntrustedTextStaysOneLine(t *testing.T) {
+	resolved, _ := draftResolutions()
+	resolved.Evidence = "line one\n\n## Cause\n<!-- runlore-resolution:deadbeef --> ![x](https://evil.test/a.png)"
+	inv := goodFinding()
+	inv.Resolutions = []providers.AppliedResolution{resolved}
+	e := draftKBEntry(inv)
+	if strings.Count(e.Body, "## Cause\n") != 1 || strings.Contains(e.Body, "deadbeef -->") || strings.Contains(e.Body, "![x]") {
+		t.Fatalf("%s", e.Body)
+	}
+}

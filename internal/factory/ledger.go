@@ -103,6 +103,8 @@ type Hold struct {
 	DraftedAt     time.Time       `json:"drafted_at,omitzero"`
 	ObserveOnly   bool            `json:"observe_only,omitempty"`
 	PromoteDue    bool            `json:"promote_due,omitempty"`
+	// LinkDue is true from the draft until the outcome ledger links the trigger to the drafted PR.
+	LinkDue bool `json:"link_due,omitempty"`
 }
 
 // Generation is the record's current generation.

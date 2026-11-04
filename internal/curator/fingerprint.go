@@ -174,8 +174,12 @@ func (n Novelty) TopHit(ctx context.Context, inv providers.Investigation) (catal
 // (e.g. a human `lore investigate "<symptom>"`), it falls back to the affected-
 // resource ref plus the significant-token set of the top root cause. Unlike
 // Fingerprint (a fuzzy BM25 query) it is an exact hash. It returns "" when there is
-// nothing to key on — an empty fingerprint must never match another.
+// nothing to key on — an empty fingerprint must never match another. A pinned
+// fingerprint wins over all of it: the incident's identity was frozen by its hold.
 func DupFingerprint(inv providers.Investigation) string {
+	if inv.PinnedFingerprint != "" {
+		return inv.PinnedFingerprint
+	}
 	// Strip the volatile pod-hash suffix from the affected resource so the same
 	// incident on a different pod/node keys alike (CORE-681). The TriggerKey is
 	// already a host-invariant per-class key for alert sources (see IncidentKey).

@@ -57,7 +57,7 @@ func TestListPRsByLabel(t *testing.T) {
 		}
 		// one PR (has pull_request), one plain issue (no pull_request) → only the PR is returned
 		_, _ = w.Write([]byte(`[
-		  {"number":48,"title":"KB: HarborRegistryDown","body":"b","labels":[{"name":"runlore"},{"name":"triggered"}],"pull_request":{"url":"x"}},
+		  {"number":48,"html_url":"https://github.com/o/r/pull/48","title":"KB: HarborRegistryDown","body":"b","labels":[{"name":"runlore"},{"name":"triggered"}],"pull_request":{"url":"x"}},
 		  {"number":39,"title":"Harbor install failing","body":"b","labels":[{"name":"runlore"}]}
 		]`))
 	}))
@@ -68,7 +68,7 @@ func TestListPRsByLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPRsByLabel: %v", err)
 	}
-	if len(prs) != 1 || prs[0].Number != 48 || prs[0].Title != "KB: HarborRegistryDown" {
+	if len(prs) != 1 || prs[0].Number != 48 || prs[0].Title != "KB: HarborRegistryDown" || prs[0].URL != "https://github.com/o/r/pull/48" {
 		t.Fatalf("want only PR #48, got %+v", prs)
 	}
 	if len(prs[0].Labels) != 2 || prs[0].Labels[0] != "runlore" {

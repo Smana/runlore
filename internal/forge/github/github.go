@@ -196,6 +196,7 @@ func (c *Client) addLabels(ctx context.Context, number int, labels []string) err
 // PRs — a non-nil PullRequest marks a PR).
 type rawIssue struct {
 	Number    int       `json:"number"`
+	HTMLURL   string    `json:"html_url"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -215,7 +216,7 @@ func (ri rawIssue) curated() providers.CuratedIssue {
 	for _, l := range ri.Labels {
 		labels = append(labels, l.Name)
 	}
-	return providers.CuratedIssue{Number: ri.Number, Title: ri.Title, Body: ri.Body, Labels: labels, UpdatedAt: ri.UpdatedAt}
+	return providers.CuratedIssue{Number: ri.Number, URL: ri.HTMLURL, Title: ri.Title, Body: ri.Body, Labels: labels, UpdatedAt: ri.UpdatedAt}
 }
 
 // listIssues fetches ALL pages of issues+PRs carrying the label in the given state

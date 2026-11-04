@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Smana/runlore/internal/kbresolve"
 	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -93,6 +94,7 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		}
 	}
 
+	body, resolution := applyResolutions(b.String(), inv.Resolutions)
 	typ := entryType(inv)
 	return providers.KBEntry{
 		Type: typ,
@@ -108,11 +110,12 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		// entry reachable from the alert that produced it.
 		AlertResource: alertResourceIfDistinct(inv),
 		Tags:          entryTags(inv, typ),
-		Body:          b.String(),
+		Body:          body,
 		Fingerprint:   DupFingerprint(inv),
 		Confidence:    inv.Confidence,
 		Provenance:    refs,
 		Origin:        "runlore",
+		Resolution:    resolution,
 		Verdict:       string(inv.Verdict),
 		EvidenceLine:  evidenceLine(inv),
 		// Recurrence facts for the PR body's related-knowledge section — stamped
@@ -120,6 +123,27 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Occurrences:    inv.Occurrences,
 		PrevCuratedURL: inv.PrevCuratedURL,
 	}
+}
+
+// applyResolutions records each verified fix in the body, in order, and returns the fix the
+// frontmatter names: the latest resolved one, unless that same fix later failed, which is what
+// kbresolve.Apply does to a written entry. okf.Render writes the frontmatter unchecked, so a
+// resolution that does not validate, or has no time, is dropped; factory.Curation logs those.
+func applyResolutions(body string, resolutions []providers.AppliedResolution) (string, *providers.AppliedResolution) {
+	var named *providers.AppliedResolution
+	for _, r := range resolutions {
+		if kbresolve.Validate(r) != nil || r.VerifiedAt.IsZero() {
+			continue
+		}
+		body = kbresolve.ApplyBody(body, r)
+		switch {
+		case r.Verdict == "resolved":
+			named = &r
+		case named != nil && named.FixPR == r.FixPR:
+			named = nil
+		}
+	}
+	return body, named
 }
 
 // alertResourceIfDistinct returns the normalized resource the ORIGINATING ALERT fired

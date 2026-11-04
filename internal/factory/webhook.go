@@ -357,12 +357,17 @@ func eventRepo(ev Event, log *slog.Logger) string {
 	if ev.Repo == "" {
 		return ""
 	}
-	owner, name, _ := strings.Cut(ev.Repo, "/")
-	if !repoRe.MatchString(ev.Repo) || owner == "." || owner == ".." || name == "." || name == ".." {
+	if !validRepo(ev.Repo) {
 		log.Warn("factory webhook: the event's repo is not owner/name; not recorded", "type", ev.Type)
 		return ""
 	}
 	return ev.Repo
+}
+
+// validRepo reports whether repo is a safe owner/name.
+func validRepo(repo string) bool {
+	owner, name, _ := strings.Cut(repo, "/")
+	return repoRe.MatchString(repo) && owner != "." && owner != ".." && name != "." && name != ".."
 }
 
 // safeCode admits only the short identifier-like values the broker sends. Room text must never
