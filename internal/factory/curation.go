@@ -26,6 +26,11 @@ import (
 // draftedNone is Hold.Drafted when the hold is settled and yielded no PR.
 const draftedNone = "none"
 
+// maxPastWindowFailures is how many times a step may fail once the window has passed before its failure
+// is terminal: about 30 minutes of RunLore running, at one tick a minute. RunLore often runs only in
+// sessions, so a window can pass while it is off, and one blip on the next start must not lose an entry.
+const maxPastWindowFailures = 30
+
 // maxSnapshotBytes is the largest investigation a hold keeps, well inside the ledger's line limit.
 const maxSnapshotBytes = 1 << 20
 
@@ -247,9 +252,9 @@ func (c *Curation) Run(ctx context.Context, every time.Duration) {
 // Once brings every held incident forward: it drafts or adopts its entry, links the trigger to it,
 // observes each generation's outcome, records it in the entry, and promotes the PR. Each step writes
 // what it did before the next one reads it, and a crash replays safely: the outcome ledger folds per
-// room, and Resolve is idempotent. Anything that fails retries on the next tick until the hold's
-// window; past it the failure is terminal, since holds are never removed and permanent errors cannot
-// be listed.
+// room, and Resolve is idempotent. Anything that fails retries on the next tick; past the hold's window
+// each step has a bounded number of attempts (see retries), since holds are never removed and permanent
+// errors cannot be listed.
 func (c *Curation) Once(ctx context.Context) {
 	c.once.Lock()
 	defer c.once.Unlock()
@@ -285,8 +290,16 @@ func (c *Curation) settle(ctx context.Context, key string) bool {
 		return false
 	}
 	url, entry, found, err := c.adoptable(ctx, h.Fingerprint)
-	if err != nil && c.retries(ctx, h, "looking for an open entry PR failed; the draft waits", key, err) {
-		return false
+	if err != nil {
+		// Past the window it never blocks the draft, however long it keeps failing.
+		if ctx.Err() != nil {
+			return false
+		}
+		if !c.windowPassed(h) {
+			c.warn("looking for an open entry PR failed; the draft waits", key, err)
+			return false
+		}
+		c.warn("looking for an open entry PR failed; the window has passed, so drafting", key, err)
 	}
 	if found {
 		return c.writeDraft(key, url, entry, nil)
@@ -354,7 +367,7 @@ func (c *Curation) draftHeld(ctx context.Context, r Record, gens []Generation) b
 	if c.Inner != nil {
 		var err error
 		if ref, err = c.Inner.Curate(ctx, inv); err != nil {
-			if c.retries(ctx, h, "drafting the held entry failed", key, err) {
+			if c.retries(ctx, h, stepDraft, "drafting the held entry failed", key, err) {
 				return false
 			}
 			return c.writeDraft(key, draftedNone, "", nil)
@@ -374,7 +387,7 @@ func (c *Curation) draftHeld(ctx context.Context, r Record, gens []Generation) b
 
 // readEntry reads the entry path of the PR the hold drafted. The guard refuses a PR with no runlore
 // label, and this one RunLore opened itself, so a refusal labels it first. Nothing is observed until
-// the path is known, or past the window, when the hold goes on with no entry to credit.
+// the path is known, or its attempts past the window run out and the hold goes on with no entry to credit.
 func (c *Curation) readEntry(ctx context.Context, key string) bool {
 	r, ok := c.Ledger.Get(key)
 	if !ok || r.Curation == nil {
@@ -388,10 +401,13 @@ func (c *Curation) readEntry(ctx context.Context, key string) bool {
 			pe, err = c.Drafts.PREntry(ctx, n)
 		}
 	}
-	if err != nil && c.retries(ctx, h, "reading the drafted PR failed", key, err) {
+	if err != nil && c.retries(ctx, h, stepEntry, "reading the drafted PR failed", key, err) {
 		return false
 	}
-	return c.update(key, func(h *Hold) { h.Entry, h.EntryDue = pe.Path, false })
+	return c.update(key, func(h *Hold) {
+		h.Entry, h.EntryDue = pe.Path, false
+		delete(h.PastWindowFailures, stepEntry)
+	})
 }
 
 // writeDraft records the draft, once: Drafted never changes after this write, and Entry only from
@@ -404,6 +420,7 @@ func (c *Curation) writeDraft(key, drafted, entry string, carried map[string]str
 			return
 		}
 		h.Drafted, h.Entry, h.DraftedAt = drafted, entry, c.now()
+		delete(h.PastWindowFailures, stepDraft)
 		if drafted != draftedNone {
 			h.LinkDue, h.PromoteDue, h.EntryDue = true, true, entry == ""
 		}
@@ -427,10 +444,13 @@ func (c *Curation) link(ctx context.Context, key string) {
 		return
 	}
 	err := c.Outcome.Link(key, r.Curation.Drafted, c.now())
-	if err != nil && c.retries(ctx, r.Curation, "linking the trigger to its draft failed", key, err) {
+	if err != nil && c.retries(ctx, r.Curation, stepLink, "linking the trigger to its draft failed", key, err) {
 		return
 	}
-	c.update(key, func(h *Hold) { h.LinkDue = false })
+	c.update(key, func(h *Hold) {
+		h.LinkDue = false
+		delete(h.PastWindowFailures, stepLink)
+	})
 }
 
 // observe credits the entry with each generation's new outcome. A Verify's At is the generation's own
@@ -455,7 +475,7 @@ func (c *Curation) observe(ctx context.Context, key string) {
 			err := c.Outcome.Verify(outcome.Verification{
 				Entry: h.Entry, DupFingerprint: h.Fingerprint, TriggerKey: key, Room: g.FixRoom, Held: o == "held", At: h.AcceptedAt.Add(time.Duration(i)),
 			})
-			if err != nil && c.retries(ctx, h, "recording the verification failed", key, err) {
+			if err != nil && c.retries(ctx, h, stepVerify+g.FixRoom, "recording the verification failed", key, err) {
 				continue
 			}
 		}
@@ -463,8 +483,9 @@ func (c *Curation) observe(ctx context.Context, key string) {
 			if observed, _ := r.marks(g.FixRoom); observed != nil {
 				*observed = o
 			}
-			if r.Curation != nil && r.Curation.Drafted != draftedNone {
-				r.Curation.PromoteDue = true
+			if r.Curation != nil {
+				delete(r.Curation.PastWindowFailures, stepVerify+g.FixRoom)
+				r.Curation.PromoteDue = r.Curation.PromoteDue || r.Curation.Drafted != draftedNone
 			}
 		})
 		if err != nil {
@@ -488,8 +509,8 @@ func (c *Curation) stampInstant(key string, h *Hold) bool {
 }
 
 // record writes each generation's new outcome into the entry. A PR closed unmerged, one that is not
-// RunLore's and a fix that cannot be named are terminal at once; any other failure retries until the
-// window. A push strips ready-to-merge (KP20), so it asks for the promote again; a held fix that could
+// RunLore's and a fix that cannot be named are terminal at once; any other failure goes through retries.
+// A push strips ready-to-merge (KP20), so it asks for the promote again; a held fix that could
 // not be written cancels the promote, since the label would land on a body without it. A dry-run
 // neither calls the forge, every minute, nor marks a generation resolved.
 func (c *Curation) record(ctx context.Context, key string) {
@@ -526,7 +547,7 @@ func (c *Curation) record(ctx context.Context, key string) {
 			case errors.Is(err, kbresolve.ErrClosedUnmerged), errors.Is(err, providers.ErrNotRunLorePR):
 				c.warn("the entry's PR cannot take the fix; not trying again", key, err)
 			default:
-				retry = c.retries(ctx, h, "recording the fix on the entry failed", key, err)
+				retry = c.retries(ctx, h, stepResolve+g.FixRoom, "recording the fix on the entry failed", key, err)
 			}
 		}
 		if retry {
@@ -536,8 +557,11 @@ func (c *Curation) record(ctx context.Context, key string) {
 			if _, resolved := r.marks(g.FixRoom); resolved != nil {
 				*resolved = o
 			}
+			if r.Curation == nil {
+				return
+			}
+			delete(r.Curation.PastWindowFailures, stepResolve+g.FixRoom)
 			switch {
-			case r.Curation == nil:
 			case route == "appended":
 				r.Curation.PromoteDue = true
 			case !written && o == "held":
@@ -563,11 +587,14 @@ func (c *Curation) promote(ctx context.Context, key string) {
 		return
 	}
 	if n, ok := prNumber(r.Curation.Drafted); ok {
-		if err := c.Promote(ctx, n); err != nil && c.retries(ctx, r.Curation, "promoting the entry's PR failed", key, err) {
+		if err := c.Promote(ctx, n); err != nil && c.retries(ctx, r.Curation, stepPromote, "promoting the entry's PR failed", key, err) {
 			return
 		}
 	}
-	c.update(key, func(h *Hold) { h.PromoteDue = false })
+	c.update(key, func(h *Hold) {
+		h.PromoteDue = false
+		delete(h.PastWindowFailures, stepPromote)
+	})
 }
 
 // resolution is g's fix as written into an entry. ready is false while a passing forge failure should
@@ -674,10 +701,23 @@ func prNumber(url string) (int, bool) {
 	return n, err == nil && n > 0
 }
 
-// retries reports whether a failed step should try again on the next tick. Past the hold's window the
-// failure is terminal and logged here, once, since the caller then settles it. A cancelled context says
-// nothing about the failure: leadership moved or the process is ending, so the next tick decides.
-func (c *Curation) retries(ctx context.Context, h *Hold, msg, key string, err error) bool {
+// The steps Hold.PastWindowFailures counts; verify and resolve count per fix room, so two failing
+// generations do not spend one budget.
+const (
+	stepDraft   = "draft"
+	stepEntry   = "entry"
+	stepLink    = "link"
+	stepVerify  = "verify:"
+	stepResolve = "resolve:"
+	stepPromote = "promote"
+)
+
+// retries reports whether a failed step should try again on the next tick. Within the window it always
+// does. Past it, the step's attempts are counted on the hold, and the one that reaches
+// maxPastWindowFailures is terminal: it is logged here, once, and the caller settles the step, which
+// clears the count, as a success does. A cancelled context says nothing about the failure and counts for
+// nothing: leadership moved or the process is ending. A count that cannot be written retries too.
+func (c *Curation) retries(ctx context.Context, h *Hold, step, msg, key string, err error) bool {
 	switch {
 	case ctx.Err() != nil:
 		return true
@@ -685,7 +725,22 @@ func (c *Curation) retries(ctx context.Context, h *Hold, msg, key string, err er
 		c.warn(msg+"; retrying on the next tick", key, err)
 		return true
 	}
-	c.log().Warn(msg+"; not trying again", "key", key, "reason", "window_passed", "err", redact.Secrets(err.Error()))
+	failures := 0
+	written := c.update(key, func(h *Hold) {
+		if h.PastWindowFailures == nil {
+			h.PastWindowFailures = map[string]int{}
+		}
+		h.PastWindowFailures[step]++
+		failures = h.PastWindowFailures[step]
+		if failures >= maxPastWindowFailures {
+			delete(h.PastWindowFailures, step)
+		}
+	})
+	if !written || failures < maxPastWindowFailures {
+		c.warn(msg+"; retrying on the next tick", key, err)
+		return true
+	}
+	c.log().Warn(msg+"; not trying again", "key", key, "reason", "window_passed", "failures", failures, "err", redact.Secrets(err.Error()))
 	return false
 }
 

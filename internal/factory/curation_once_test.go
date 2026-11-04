@@ -589,7 +589,7 @@ func TestCurationOnceALabelAndPREntryOutageOpensNoSecondPR(t *testing.T) {
 	}
 }
 
-func TestCurationOnceAnEntryThatNeverReadsStopsAtTheWindow(t *testing.T) {
+func TestCurationOnceAnEntryThatNeverReadsStopsAfterThirtyFailuresPastTheWindow(t *testing.T) {
 	g := newOnceRig(t)
 	calls := 0
 	g.entryErr = func(int) error {
@@ -599,19 +599,22 @@ func TestCurationOnceAnEntryThatNeverReadsStopsAtTheWindow(t *testing.T) {
 	g.held(t, g.verified)
 	g.cu.Once(ctx)
 	g.cu.Once(ctx)
-	if h := g.record(t).Curation; !h.EntryDue || calls != 2 {
+	if h := g.record(t).Curation; !h.EntryDue || calls != 2 || len(h.PastWindowFailures) != 0 {
 		t.Fatalf("calls %d, %+v", calls, h)
 	}
 	g.now = g.now.Add(168 * time.Hour)
 	g.logs.Reset()
-	g.cu.Once(ctx)
+	tick(g, 29)
+	if h := g.record(t).Curation; !h.EntryDue || strings.Contains(g.logs.String(), "window_passed") {
+		t.Fatalf("%+v, %s", h, g.logs.String())
+	}
+	tick(g, 2)
 	h := g.record(t).Curation
-	if h.EntryDue || h.Entry != "" || h.Drafted != draftURL || calls != 3 || len(g.inner.invs) != 1 || len(g.verifies) != 0 {
+	if h.EntryDue || h.Entry != "" || h.Drafted != draftURL || calls != 2+30 || len(g.inner.invs) != 1 || len(g.verifies) != 0 {
 		t.Fatalf("calls %d, inner %d, %+v", calls, len(g.inner.invs), h)
 	}
-	g.cu.Once(ctx)
-	if calls != 3 || strings.Count(g.logs.String(), "window_passed") != 1 {
-		t.Fatalf("logged once: calls %d, %s", calls, g.logs.String())
+	if n := strings.Count(g.logs.String(), "window_passed"); n != 1 {
+		t.Fatalf("logged %d times: %s", n, g.logs.String())
 	}
 }
 
@@ -1082,8 +1085,16 @@ func TestCurationOnceAHoldWithoutAnInstantGetsOneOnce(t *testing.T) {
 	}
 }
 
-// I4: any retried error stops at the hold's window, logged once.
-func TestCurationOnceRetriesStopAtTheWindow(t *testing.T) {
+// tick runs n ticks.
+func tick(g *onceRig, n int) {
+	for range n {
+		g.cu.Once(ctx)
+	}
+}
+
+// Past the window, a retried failure ends only after 30 attempts: a hold's window often passes while
+// RunLore is off, and one blip must not lose an entry.
+func TestCurationOnceRetriesEndAfterThirtyFailuresPastTheWindow(t *testing.T) {
 	boom := errors.New("permanent")
 	past := func(g *onceRig) { g.now = g.now.Add(168 * time.Hour) }
 	for _, tc := range []struct {
@@ -1112,8 +1123,8 @@ func TestCurationOnceRetriesStopAtTheWindow(t *testing.T) {
 			seed:  func(g *onceRig, r *Record) { g.verified(r) },
 			check: func(t *testing.T, g *onceRig) {
 				t.Helper()
-				if h := g.record(t).Curation; h.Drafted != "none" || len(g.inner.invs) != 2 {
-					t.Fatalf("one try in the window, one past it, none after: inner %d, %+v", len(g.inner.invs), h)
+				if h := g.record(t).Curation; h.Drafted != "none" || len(g.inner.invs) != 1+30 {
+					t.Fatalf("one try in the window, thirty past it, none after: inner %d, %+v", len(g.inner.invs), h)
 				}
 			},
 		},
@@ -1172,13 +1183,178 @@ func TestCurationOnceRetriesStopAtTheWindow(t *testing.T) {
 			}
 			past(g)
 			g.logs.Reset()
-			g.cu.Once(ctx)
-			g.cu.Once(ctx)
+			tick(g, 29)
+			if strings.Contains(g.logs.String(), "window_passed") {
+				t.Fatalf("29 failures are not terminal: %s", g.logs.String())
+			}
+			tick(g, 3)
 			tc.check(t, g)
 			if n := strings.Count(g.logs.String(), "window_passed"); n != 1 {
 				t.Fatalf("logged %d times: %s", n, g.logs.String())
 			}
+			if h := g.record(t).Curation; len(h.PastWindowFailures) != 0 {
+				t.Fatalf("a terminal step leaves no count: %+v", h.PastWindowFailures)
+			}
 		})
+	}
+}
+
+// A blip at the window retries and succeeds, and the success clears its count.
+func TestCurationOnceABlipAtTheWindowRetriesAndSucceeds(t *testing.T) {
+	blip := errors.New("a blip")
+	for _, tc := range []struct {
+		name  string
+		seed  func(g *onceRig, r *Record)
+		fail  func(g *onceRig, err error)
+		check func(t *testing.T, g *onceRig)
+	}{
+		{
+			name: "inner",
+			fail: func(g *onceRig, err error) {
+				g.inner.err = err
+				g.inner.ref = providers.Ref{}
+				if err == nil {
+					g.inner.ref = providers.Ref{URL: draftURL}
+				}
+			},
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if h := g.record(t).Curation; h.Drafted != draftURL || h.Entry != draftEntry || len(g.inner.invs) != 2 {
+					t.Fatalf("inner %d, %+v", len(g.inner.invs), h)
+				}
+			},
+		},
+		{
+			name: "PREntry",
+			fail: func(g *onceRig, err error) { g.entryErr = func(int) error { return err } },
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if h := g.record(t).Curation; h.Drafted != draftURL || h.Entry != draftEntry || h.EntryDue || len(g.inner.invs) != 1 {
+					t.Fatalf("inner %d, %+v", len(g.inner.invs), h)
+				}
+			},
+		},
+		{
+			name: "Resolve",
+			seed: func(g *onceRig, r *Record) {
+				draftedHold(r)
+				g.verified(r)
+			},
+			fail: func(g *onceRig, err error) { g.resolveErr = err },
+			check: func(t *testing.T, g *onceRig) {
+				t.Helper()
+				if r := g.record(t); r.Resolved != "held" || len(g.resolves) != 1 || !slices.Equal(g.promotes, []int{164}) {
+					t.Fatalf("%+v, %+v, %v", r, g.resolves, g.promotes)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newOnceRig(t)
+			g.held(t, func(r *Record) {
+				if tc.seed != nil {
+					tc.seed(g, r)
+				}
+			})
+			tc.fail(g, blip)
+			g.now = g.now.Add(168 * time.Hour)
+			g.cu.Once(ctx)
+			if h := g.record(t).Curation; len(h.PastWindowFailures) != 1 || strings.Contains(g.logs.String(), "window_passed") {
+				t.Fatalf("one failure counted, not terminal: %+v, %s", h, g.logs.String())
+			}
+			tc.fail(g, nil)
+			g.cu.Once(ctx)
+			g.cu.Once(ctx)
+			tc.check(t, g)
+			if h := g.record(t).Curation; len(h.PastWindowFailures) != 0 {
+				t.Fatalf("the success clears the count: %+v", h.PastWindowFailures)
+			}
+		})
+	}
+}
+
+func TestCurationOnceARestartKeepsTheCount(t *testing.T) {
+	g := newOnceRig(t)
+	g.inner.err, g.inner.ref = errors.New("permanent"), providers.Ref{}
+	g.held(t, nil)
+	g.now = g.now.Add(168 * time.Hour)
+	tick(g, 20)
+
+	next, err := OpenLedger(g.l.path, g.cu.Now)
+	must(t, err)
+	g.l, g.cu.Ledger = next, next
+	if h := g.record(t).Curation; h.PastWindowFailures["draft"] != 20 {
+		t.Fatalf("%+v", h.PastWindowFailures)
+	}
+	tick(g, 9)
+	if h := g.record(t).Curation; h.Drafted != "" {
+		t.Fatalf("29 failures: %+v", h)
+	}
+	tick(g, 2)
+	if h := g.record(t).Curation; h.Drafted != "none" || len(g.inner.invs) != 30 {
+		t.Fatalf("the 30th across the restart ends it: inner %d, %+v", len(g.inner.invs), h)
+	}
+	if n := strings.Count(g.logs.String(), "window_passed"); n != 1 {
+		t.Fatalf("logged %d times: %s", n, g.logs.String())
+	}
+}
+
+func TestCurationOnceASuccessResetsTheCount(t *testing.T) {
+	g := newOnceRig(t)
+	g.resolveErr = errors.New("a blip")
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		g.verified(r)
+	})
+	g.now = g.now.Add(168 * time.Hour)
+	tick(g, 29)
+	g.resolveErr = nil
+	g.cu.Once(ctx)
+
+	// The fix flips later, and its write has thirty attempts of its own.
+	g.resolveErr = errors.New("a blip")
+	must(t, g.l.Upsert("k1", func(r *Record) { r.Reverted = true }))
+	tick(g, 29)
+	r := g.record(t)
+	if r.Resolved != "held" || r.Curation.PastWindowFailures["resolve:fix1"] != 29 {
+		t.Fatalf("%+v", r)
+	}
+	tick(g, 1)
+	if r := g.record(t); r.Resolved != "failed" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// Two fixes failing in one tick each keep their own count, so neither ends early.
+func TestCurationOnceEachGenerationCountsItsOwnFailures(t *testing.T) {
+	g := newOnceRig(t)
+	g.resolveErr = errors.New("permanent")
+	g.held(t, func(r *Record) {
+		draftedHold(r)
+		r.Curation.Generations = []Generation{g.failedGeneration()}
+		g.verified(r)
+	})
+	g.now = g.now.Add(168 * time.Hour)
+	tick(g, 29)
+	r := g.record(t)
+	if r.Resolved != "" || r.Curation.Generations[0].Resolved != "" || r.Curation.PastWindowFailures["resolve:fix0"] != 29 || r.Curation.PastWindowFailures["resolve:fix1"] != 29 {
+		t.Fatalf("%+v", r)
+	}
+	tick(g, 1)
+	r = g.record(t)
+	if r.Resolved != "held" || r.Curation.Generations[0].Resolved != "failed" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// The count is the ledger's own: a failed append cannot leave it ahead of the file.
+func TestLedgerClonesTheFailureCounts(t *testing.T) {
+	g := newOnceRig(t)
+	g.held(t, func(r *Record) { r.Curation.PastWindowFailures = map[string]int{"draft": 1} })
+	got := g.record(t)
+	got.Curation.PastWindowFailures["draft"] = 9
+	if g.record(t).Curation.PastWindowFailures["draft"] != 1 {
+		t.Fatal("a clone's write reached the ledger")
 	}
 }
 
@@ -1205,14 +1381,9 @@ func TestCurationOnceAFailedAdoptionDoesNotBlockTheWindowsDraft(t *testing.T) {
 				t.Fatal("within the window it waits")
 			}
 			g.now = g.now.Add(168 * time.Hour)
-			g.logs.Reset()
 			g.cu.Once(ctx)
-			g.cu.Once(ctx)
-			if h := g.record(t).Curation; len(g.inner.invs) != 1 || h.Drafted != draftURL || h.Entry != draftEntry {
-				t.Fatalf("inner %d, %+v", len(g.inner.invs), h)
-			}
-			if n := strings.Count(g.logs.String(), "window_passed"); n != 1 {
-				t.Fatalf("logged %d times: %s", n, g.logs.String())
+			if h := g.record(t).Curation; len(g.inner.invs) != 1 || h.Drafted != draftURL || h.Entry != draftEntry || len(h.PastWindowFailures) != 0 {
+				t.Fatalf("the first tick past the window drafts: inner %d, %+v", len(g.inner.invs), h)
 			}
 		})
 	}
@@ -1227,7 +1398,7 @@ func TestCurationOnceACancelledContextIsNotTerminal(t *testing.T) {
 	g.cu.Inner = cancelling{g.inner, cancel}
 	g.now = g.now.Add(168 * time.Hour)
 	g.cu.Once(run)
-	if h := g.record(t).Curation; h.Drafted != "" || strings.Contains(g.logs.String(), "window_passed") {
+	if h := g.record(t).Curation; h.Drafted != "" || len(h.PastWindowFailures) != 0 || strings.Contains(g.logs.String(), "window_passed") {
 		t.Fatalf("%+v, %s", h, g.logs.String())
 	}
 }

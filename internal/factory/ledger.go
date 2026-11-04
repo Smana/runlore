@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -107,6 +108,9 @@ type Hold struct {
 	LinkDue bool `json:"link_due,omitempty"`
 	// EntryDue is true from the moment a PR opens until its entry path has been read.
 	EntryDue bool `json:"entry_due,omitempty"`
+	// PastWindowFailures counts each step's failed attempts since the window passed; a success clears
+	// its count. It lives here so a restart keeps it.
+	PastWindowFailures map[string]int `json:"past_window_failures,omitempty"`
 }
 
 // Generation is the record's current generation.
@@ -152,6 +156,7 @@ func (r Record) clone() Record {
 		h := *r.Curation
 		h.Generations = slices.Clone(h.Generations)
 		h.Investigation = slices.Clone(h.Investigation)
+		h.PastWindowFailures = maps.Clone(h.PastWindowFailures)
 		r.Curation = &h
 	}
 	return r
