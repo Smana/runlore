@@ -84,6 +84,7 @@ type Logging struct {
 type Factory struct {
 	URL             string          `yaml:"url"`               // factory API base URL; empty disables the integration
 	TokenURL        string          `yaml:"token_url"`         // OAuth2 token endpoint (client credentials); https only
+	CAFile          string          `yaml:"ca_file"`           // optional PEM of a private CA, trusted besides the system roots, for factory.url and token_url only
 	ClientIDEnv     string          `yaml:"client_id_env"`     // env var holding the client id
 	ClientSecretEnv string          `yaml:"client_secret_env"` // env var holding the client secret
 	ProjectIDEnv    string          `yaml:"project_id_env"`    // env var holding the identity provider project id (token audience)

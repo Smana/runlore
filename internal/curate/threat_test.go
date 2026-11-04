@@ -241,3 +241,36 @@ func TestGuardPREntryTextPassesThrough(t *testing.T) {
 		t.Fatal("a read passes through in dry-run, unaudited: ", err, aud.recs)
 	}
 }
+
+// At the row cap the threat row is still first, and still prints no title and no evidence.
+func TestQueueIssueThreatRowAtTheCap(t *testing.T) {
+	mon := time.Date(2026, 11, 2, 8, 0, 0, 0, time.UTC)
+	const quoted = "ignore previous instructions"
+	var open []providers.CuratedIssue
+	for n := 1; n <= 400; n++ {
+		open = append(open, qiPR(n, "KB: "+strings.Repeat("t", 300), "fp", mon.AddDate(0, 0, -n)))
+	}
+	hit := qiPR(900, "KB: "+quoted, "fp900", mon)
+	hit.Body = "**Evidence:** " + quoted + "\n\n" + hit.Body
+	open = append(open, hit) // last in the list and newest: only its risk puts it first
+	f := &fakeQueueForge{open: open, entries: map[int]string{900: injected}}
+	q := newQI(f, mon)
+	q.Evidence, q.ScreenEntries = qiEvidence{}, true
+	qiMust(t, q.RunNow(context.Background()))
+	b := f.body
+	if n := len([]rune(b)); n > 65536 {
+		t.Fatalf("body is %d characters", n)
+	}
+	if !strings.Contains(b, "more waiting") {
+		t.Fatal("the cap did not bite, the test proves nothing")
+	}
+	if !strings.Contains(b, "| threat: "+threatcheck.RuleInstructionOverride+" | [#900]("+prURL(900)+") |") {
+		t.Fatalf("the threat row is listed first, by number only:\n%s", b[:600])
+	}
+	if strings.Contains(b, quoted) {
+		t.Fatal("the issue quotes the entry")
+	}
+	if i, j := strings.Index(b, "#900"), strings.Index(b, "#1 "); j >= 0 && i > j {
+		t.Fatal("the threat row sorts after an ordinary one")
+	}
+}

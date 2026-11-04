@@ -467,6 +467,15 @@ env: []
 #   - name: OPENAI_API_KEY
 #     valueFrom:
 #       secretKeyRef: { name: runlore-secrets, key: openai-api-key }
+# Extra volumes and mounts of the runlore container, appended after the chart's own. Off by default.
+# For a file the config points at, e.g. the private CA of factory.ca_file:
+#   extraVolumes:
+#     - name: factory-ca
+#       configMap: { name: factory-ca }
+#   extraVolumeMounts:
+#     - { name: factory-ca, mountPath: /etc/runlore/factory-ca, readOnly: true }
+extraVolumes: []
+extraVolumeMounts: []
 
 # Mount an OKF knowledge catalog (e.g. a ConfigMap of runbooks) so kb_search works.
 # Set config.catalog.dir to mountPath to enable it.

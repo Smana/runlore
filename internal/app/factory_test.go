@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -359,5 +361,67 @@ func testPromoteLabels(t *testing.T, entry string, wantLabels int) {
 	}
 	if len(labelled) != wantLabels || (wantLabels == 1 && !strings.Contains(labelled[0], "ready-to-merge")) {
 		t.Fatalf("want %d ready-to-merge on PR 7: %v", wantLabels, labelled)
+	}
+}
+
+// factory.ca_file lets the factory client, and only it, trust the private CA of the run-request API.
+func TestBuildFactoryCAFile(t *testing.T) {
+	t.Setenv("FT_ID", "runlore")
+	t.Setenv("FT_SECRET", "s")
+	t.Setenv("FT_PROJ", "p")
+	t.Setenv("FT_HOOK", "k")
+	// One TLS server answers the token endpoint and the task API: its own certificate is the private CA.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			_, _ = io.WriteString(w, `{"access_token":"t","expires_in":3600}`)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"task":"T1"}`)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := func(caFile string) *config.Config {
+		c := factoryCfg(t.TempDir())
+		c.Factory.URL, c.Factory.TokenURL, c.Factory.CAFile = srv.URL, srv.URL+"/token", caFile
+		return c
+	}
+	create := func(c *factory.Client) (factory.Created, error) {
+		return c.CreateTask(context.Background(), "k", factory.TaskRequest{Repository: "Smana/cloud-native-ref"})
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, c, err := BuildFactory(cfg(caPath), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := create(c); err != nil || got.Task != "T1" {
+		t.Fatalf("trusted with ca_file, for the API and the token endpoint: %+v %v", got, err)
+	}
+	_, c, err = BuildFactory(cfg(""), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := create(c); err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("refused without ca_file: %v", err)
+	}
+
+	hc, err := factoryHTTPClient(config.Factory{CAFile: caPath})
+	if err != nil || hc.CheckRedirect == nil || hc.Timeout != factoryHTTPTimeout {
+		t.Fatalf("the redirect guard and the timeout stay: %v %v", hc, err)
+	}
+
+	junk := filepath.Join(dir, "junk.pem")
+	if err := os.WriteFile(junk, []byte("nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"missing": filepath.Join(dir, "absent.pem"), "invalid": junk} {
+		if _, _, err := BuildFactory(cfg(path), log); err == nil || !strings.Contains(err.Error(), "factory.ca_file") {
+			t.Errorf("%s: want a refusal naming factory.ca_file, got %v", name, err)
+		}
 	}
 }

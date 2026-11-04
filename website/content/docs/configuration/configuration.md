@@ -1019,6 +1019,7 @@ it may do, and whether a fix is published. RunLore only files, listens and repor
 factory:
   url: http://agent-factory.agent-system.svc.cluster.local:8082
   token_url: https://auth.example.com/oauth/v2/token
+  ca_file: /etc/runlore/factory-ca/ca.crt         # optional; PEM of a private CA, trusted besides the system roots
   client_id_env: FACTORY_CLIENT_ID
   client_secret_env: FACTORY_CLIENT_SECRET
   project_id_env: FACTORY_PROJECT_ID
@@ -1038,6 +1039,14 @@ factory:
 - **`url` may be plain `http` only inside the cluster** (a `svc.cluster.local` address behind a
   NetworkPolicy). The bearer token travels with every call, so use `https` for anything that
   leaves the cluster; only `token_url` is enforced to be `https`.
+- **`ca_file`** is the PEM file of the private CA that signs the factory's certificate. It is added
+  to the system roots, which stay trusted, and only the factory client reads it: both its calls to
+  `url` and its call to `token_url` verify against it, so an identity provider with a public
+  certificate still works and one with a private certificate from the same CA works too. No other
+  RunLore client sees it, and `factory.verify.alertmanager_url` is not one of the two. A file that
+  cannot be read or holds no certificate stops RunLore at start with an error naming
+  `factory.ca_file`. With the Helm chart, mount the file with `extraVolumes` and
+  `extraVolumeMounts` (both empty by default), and point `ca_file` at the mounted path.
 - **`repository`** is the `owner/name` the factory works on; **`max_cost_usd`** is the per-task
   cost ceiling sent with each task and must be above zero. The finding text is secret-redacted
   before it leaves, and every task is `dataClass: internal`.

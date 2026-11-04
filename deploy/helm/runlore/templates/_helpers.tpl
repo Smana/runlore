@@ -209,6 +209,9 @@ spec:
         - name: commons
           mountPath: {{ $commonsDir }}
         {{- end }}
+        {{- with .Values.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
   volumes:
     - name: config
       configMap:
@@ -238,6 +241,9 @@ spec:
     # never dirty the volume the outcome ledger and audit log live on.
     - name: commons
       emptyDir: {}
+    {{- end }}
+    {{- with .Values.extraVolumes }}
+    {{- toYaml . | nindent 4 }}
     {{- end }}
   {{- with .Values.nodeSelector }}
   nodeSelector:

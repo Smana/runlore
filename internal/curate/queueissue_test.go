@@ -432,3 +432,50 @@ func TestQueueIssueDefusesMentionsAndLinks(t *testing.T) {
 		t.Fatalf("the PR's own link stays clickable: %q", row)
 	}
 }
+
+// manyDecideRows is n open PRs with the longest row the table allows, ordered by risk then age.
+func manyDecideRows(n int) []decideRow {
+	body := providers.CardMarker("fix", 0.9) + "\n\n**Evidence:** " + strings.Repeat("e", 300)
+	rows := make([]decideRow, n)
+	for i := range rows {
+		rows[i] = decideRow{
+			pr:   providers.CuratedIssue{Number: 1000 + i, Title: strings.Repeat("t", 300), URL: "https://github.com/o/r/pull/1", Body: body},
+			risk: "verified", rank: i,
+		}
+	}
+	return rows
+}
+
+// GitHub refuses an issue body over 65,536 characters, and a row can reach about 400.
+func TestQueueIssueBodyStaysUnderGitHubsLimit(t *testing.T) {
+	now := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	q := newQI(&fakeQueueForge{}, now)
+	rows := manyDecideRows(400)
+	body := q.render(now, time.Time{}, rows, 3)
+	if n := len([]rune(body)); n > 65536 {
+		t.Fatalf("body is %d characters, over GitHub's 65536", n)
+	}
+	if !strings.Contains(body, "#1000 ") || strings.Contains(body, "#1399 ") {
+		t.Fatalf("the riskiest rows stay and the last one goes")
+	}
+	if !strings.Contains(body, "more waiting, riskiest first above") || !strings.Contains(body, "## Measures") {
+		t.Fatalf("a line names how many are not listed, and the rest of the body is kept")
+	}
+}
+
+// At the boundary: a table that fits exactly is whole and has no note; one character less drops a
+// row, says so, and still fits.
+func TestQueueIssueRowCapBoundary(t *testing.T) {
+	now := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	q := newQI(&fakeQueueForge{}, now)
+	rows := manyDecideRows(5)
+	whole := q.renderLimit(now, time.Time{}, rows, 0, 1<<30)
+	size := len([]rune(whole))
+	if got := q.renderLimit(now, time.Time{}, rows, 0, size); got != whole || strings.Contains(got, "more waiting") {
+		t.Fatalf("a body of exactly the limit is kept whole")
+	}
+	got := q.renderLimit(now, time.Time{}, rows, 0, size-1)
+	if len([]rune(got)) > size-1 || !strings.Contains(got, "1 more waiting") || strings.Contains(got, "#1004 ") || !strings.Contains(got, "#1003 ") {
+		t.Fatalf("one character short drops exactly the last row:\n%s", got)
+	}
+}
