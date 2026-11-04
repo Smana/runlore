@@ -56,6 +56,9 @@ type QueueIssue struct {
 	Stats    interface {
 		Measures(time.Time) (outcome.Measures, error)
 	} // nil: Measures says the ledger is not configured
+	// Reconcile, when set, is the Queue pass, run before the refresh, so a 👎 since the last sweep
+	// withdraws the label and the PR reaches Decide. The agent leaves it nil: its Queue just ran.
+	Reconcile Pass
 	// Refresh, when set, rebuilds conflicting entry PRs before each rewrite: a rebuilt, verified PR is
 	// ready-to-merge and absent from Decide, and a refused one is a row with risk conflict.
 	Refresh *RefreshEntries
@@ -145,6 +148,13 @@ func (q QueueIssue) rewrite(ctx context.Context, now time.Time, issue *providers
 	var last time.Time
 	if issue != nil {
 		last, _ = parseQueueMarker(issue.Body)
+	}
+	// In this order: the Queue may label a PR the refresh must then refuse, and it is the refresh's
+	// refusal that takes the label off and puts the PR in Decide.
+	if q.Reconcile != nil {
+		if err := q.Reconcile.Run(ctx); err != nil {
+			return err
+		}
 	}
 	refused, err := refreshFirst(ctx, q.Refresh)
 	if err != nil {

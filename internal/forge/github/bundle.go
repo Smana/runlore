@@ -76,7 +76,7 @@ func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sh
 		return nil, "", false, nil
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, "", false, fmt.Errorf("github GET %s: status %d", path, resp.StatusCode)
+		return nil, "", false, &statusError{code: resp.StatusCode, msg: fmt.Sprintf("github GET %s: status %d", path, resp.StatusCode)}
 	}
 	var out struct {
 		SHA      string `json:"sha"`

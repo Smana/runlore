@@ -23,6 +23,7 @@ import (
 
 	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/forge/github"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -541,6 +542,19 @@ func kbEntry(title, fingerprint string) providers.KBEntry {
 
 const webFlow = "web-flow"
 
+// heldFor is outcome evidence that the fix behind these fingerprints held.
+type heldFor []string
+
+func (h heldFor) Verifications() map[string]bool {
+	out := map[string]bool{}
+	for _, fp := range h {
+		out[fp] = true
+	}
+	return out
+}
+
+func (heldFor) ContestedTriggers() []outcome.ContestedTrigger { return nil }
+
 const secondPath = "incidents/second-incident-bbbbbbbb.md"
 
 // conflicting opens two entry PRs and merges the first: the second now conflicts, as KP19 says.
@@ -575,7 +589,7 @@ func TestRefreshAfterAMerge(t *testing.T) {
 		t.Fatalf("merging one makes the other conflict: %+v %v", st, err)
 	}
 	before := repo.file(st.Branch, path)
-	r := curate.RefreshEntries{Forge: c, Log: slog.Default()}
+	r := curate.RefreshEntries{Forge: c, Evidence: heldFor{"bbbbbbbb"}, Log: slog.Default()}
 	if res, err := r.Once(ctx); err != nil || !slices.Equal(res.Rebuilt, []int{nb}) || len(res.Refused) != 0 {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -590,8 +604,26 @@ func TestRefreshAfterAMerge(t *testing.T) {
 	if repo.file(st.Branch, path) != before {
 		t.Fatal("the entry file is re-put unchanged")
 	}
-	if last := repo.activity(st.Branch)[0]; last.Type != "force_push" || last.Actor != curate.BotLogin || last.Before != st.HeadSHA || last.After != repo.head(nb) {
+	rows := repo.activity(st.Branch)
+	if last := rows[0]; last.Type != "force_push" || last.Actor != curate.BotLogin || last.Before != st.HeadSHA || last.After != repo.head(nb) {
 		t.Fatalf("the chain Maku's pushedBy reads holds: %+v", last)
+	}
+	// Walked as pushedBy walks it: newest first, each row's After being the head so far, down to the creation.
+	want := repo.head(nb)
+	for i, row := range rows {
+		if row.After != want || row.Actor != curate.BotLogin {
+			t.Fatalf("row %d breaks the chain at %s: %+v", i, want, rows)
+		}
+		if row.Type == "branch_creation" {
+			if i != len(rows)-1 {
+				t.Fatalf("the creation is the oldest row: %+v", rows)
+			}
+			break
+		}
+		want = row.Before
+	}
+	if rows[len(rows)-1].Type != "branch_creation" {
+		t.Fatalf("the chain ends at the creation: %+v", rows)
 	}
 	if got := repo.commitAuthors(nb); len(got) == 0 || slices.ContainsFunc(got, func(a string) bool { return a != curate.BotLogin }) {
 		t.Fatalf("every commit is the bot's: %v", got)
@@ -631,7 +663,7 @@ func TestRefreshDryRunWritesNothingOverHTTP(t *testing.T) {
 	repo, c, n := conflicting(t)
 	head, writes := repo.head(n), repo.writes()
 	g := curate.Guard{Inner: c, DryRun: true, Log: slog.Default()}
-	res, err := curate.RefreshEntries{Forge: g, Log: slog.Default()}.Once(ctx)
+	res, err := curate.RefreshEntries{Forge: g, Evidence: heldFor{"bbbbbbbb"}, Log: slog.Default()}.Once(ctx)
 	if err != nil || !slices.Equal(res.Rebuilt, []int{n}) {
 		t.Fatalf("%+v %v", res, err)
 	}
@@ -970,7 +1002,7 @@ func TestRefreshRebuildsAPRTwice(t *testing.T) {
 	b, _ := c.OpenPR(ctx, kbEntry("Second incident", "bbbbbbbb"))
 	d, _ := c.OpenPR(ctx, kbEntry("Third incident", "dddddddd"))
 	nb, nd := repo.number(b), repo.number(d)
-	r := curate.RefreshEntries{Forge: c, Log: slog.Default()}
+	r := curate.RefreshEntries{Forge: c, Evidence: heldFor{"bbbbbbbb", "dddddddd"}, Log: slog.Default()}
 
 	repo.merge(repo.number(a))
 	if res, err := r.Once(ctx); err != nil || !slices.Equal(res.Rebuilt, []int{nb, nd}) || len(res.Refused) != 0 {
@@ -1013,10 +1045,120 @@ func TestRebuildEntryPRRefusesABranchAURLWouldCut(t *testing.T) {
 			if repo.writes() != writes || repo.ref("runlore/kb-a") != human || repo.ref(name) != head {
 				t.Fatalf("a ref was written: %q", repo.writeEvents())
 			}
-			res, err := curate.RefreshEntries{Forge: c, Log: slog.Default()}.Once(ctx)
+			res, err := curate.RefreshEntries{Forge: c, Evidence: heldFor{"bbbbbbbb"}, Log: slog.Default()}.Once(ctx)
 			if err != nil || res.Refused[n] != "conflict" {
 				t.Fatalf("listed in Decide: %+v %v", res, err)
 			}
 		})
+	}
+}
+
+// Final 2c, I1 and I2: the first merge conflicts the whole backlog. With no label and no held
+// evidence nothing is written to it, so GitHub's limit is not reached and updated_at, which the
+// stale sweep reads, does not move.
+func TestRefreshLeavesTheBacklogAlone(t *testing.T) {
+	ctx := context.Background()
+	repo := newFakeRepo(t, map[string]string{"index.md": "# Index\n\n## Incidents\n", "log.md": "# Change log\n"})
+	c := repo.client()
+	a, _ := c.OpenPR(ctx, kbEntry("First incident", "aaaaaaaa"))
+	var backlog []int
+	for i := range 5 {
+		ref, err := c.OpenPR(ctx, kbEntry(fmt.Sprintf("Backlog %d", i), fmt.Sprintf("%08d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		backlog = append(backlog, repo.number(ref))
+	}
+	repo.merge(repo.number(a))
+	writes := repo.writes()
+	res, err := curate.RefreshEntries{Forge: c, Log: slog.Default()}.Once(ctx)
+	if err != nil || len(res.Rebuilt) != 0 || repo.writes() != writes {
+		t.Fatalf("%+v %v: %q", res, err, repo.writeEvents()[writes:])
+	}
+	for _, n := range backlog {
+		if res.Refused[n] != "conflict" {
+			t.Fatalf("PR %d is listed in Decide: %v", n, res.Refused)
+		}
+	}
+}
+
+// --pr rebuilds one a human is about to review, and the same checks hold.
+func TestRefreshOnePROverHTTP(t *testing.T) {
+	ctx := context.Background()
+	repo, c, n := conflicting(t)
+	st, err := c.EntryPRState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := curate.RefreshEntries{Forge: c, Only: n, Log: slog.Default()}
+	if err := r.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if repo.head(n) == st.HeadSHA || repo.hasRefWithPrefix("runlore/rebuild-") {
+		t.Fatalf("rebuilt, nothing left: %q", repo.writeEvents())
+	}
+	if d := repo.diffAgainstBase(n); d.Deletions("log.md") != 0 || !d.Added(secondPath) {
+		t.Fatalf("the shape: %v", d.Paths())
+	}
+
+	repo2, c2, n2 := conflicting(t)
+	st2, _ := c2.EntryPRState(ctx, n2)
+	repo2.pushShaped(st2.Branch, curate.BotLogin, "Smana", false, "index.md", "by hand\n")
+	head := repo2.head(n2)
+	if err := (curate.RefreshEntries{Forge: c2, Only: n2, Log: slog.Default()}).Run(ctx); err == nil || repo2.head(n2) != head {
+		t.Fatalf("a human's commit is refused, whoever asks: %v", err)
+	}
+}
+
+func TestRefreshStopsOnALimitOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			repo := newFakeRepo(t, map[string]string{"index.md": "# Index\n\n## Incidents\n", "log.md": "# Change log\n"})
+			c := repo.client()
+			a, _ := c.OpenPR(ctx, kbEntry("First incident", "aaaaaaaa"))
+			b, _ := c.OpenPR(ctx, kbEntry("Second incident", "bbbbbbbb"))
+			d, _ := c.OpenPR(ctx, kbEntry("Third incident", "dddddddd"))
+			nb, nd := repo.number(b), repo.number(d)
+			repo.merge(repo.number(a))
+			headB, headD := repo.head(nb), repo.head(nd)
+			// The limit hits a read inside the rebuild, the path that does not go through do.
+			repo.before = func(r *http.Request) int {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/contents/log.md") {
+					return status
+				}
+				return 0
+			}
+			mark := repo.writes()
+			res, err := curate.RefreshEntries{Forge: c, Evidence: heldFor{"bbbbbbbb", "dddddddd"}, Log: slog.Default()}.Once(ctx)
+			if err != nil || !res.Stopped || len(res.Rebuilt) != 0 {
+				t.Fatalf("%+v %v", res, err)
+			}
+			if repo.head(nb) != headB || repo.head(nd) != headD || repo.hasRefWithPrefix("runlore/rebuild-") {
+				t.Fatalf("nothing moved, nothing left: %q", repo.writeEvents()[mark:])
+			}
+		})
+	}
+}
+
+// M-3: a temporary branch nothing could delete leaves a trace, since nothing sweeps them.
+func TestRebuildEntryPRNamesATemporaryBranchItCouldNotDelete(t *testing.T) {
+	var logged strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	repo, c, n := conflicting(t)
+	repo.before = func(r *http.Request) int {
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/git/refs/heads/runlore/rebuild-") {
+			return http.StatusInternalServerError
+		}
+		return 0
+	}
+	if err := c.RebuildEntryPR(context.Background(), n, repo.head(n)); err != nil {
+		t.Fatalf("the rebuild itself landed: %v", err)
+	}
+	if !strings.Contains(logged.String(), "runlore/rebuild-") {
+		t.Fatalf("no trace: %q", logged.String())
 	}
 }

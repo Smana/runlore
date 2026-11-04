@@ -15,6 +15,7 @@ package github
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -242,10 +243,13 @@ func (c *Client) branchHead(ctx context.Context, branch string) (string, error) 
 	return ref.Object.SHA, nil
 }
 
-// deleteBranch removes a temporary branch, best-effort. It outlives a cancelled ctx, which
-// is one of the ways a rebuild ends early.
+// deleteBranch removes a temporary branch, best-effort: the rebuild's outcome does not depend on
+// it. Nothing sweeps these branches, so a failure names the branch for someone to delete. It
+// outlives a cancelled ctx, which is one of the ways a rebuild ends early.
 func (c *Client) deleteBranch(ctx context.Context, branch string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	_ = c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", c.owner, c.repo, branch), nil, nil)
+	if err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", c.owner, c.repo, branch), nil, nil); err != nil {
+		slog.Warn("github: a temporary rebuild branch was left behind; delete it by hand", "branch", branch, "err", err)
+	}
 }

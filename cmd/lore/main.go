@@ -38,8 +38,8 @@ Usage:
   lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite
   lore eval scorecard -report <replay.json> -dir <out>  render the public scorecard (markdown + badge + history) from a replay report
   lore curate [--config <path>] [--dry-run]           groom the KB backlog (dedup/stale/suppress…)
-  lore curate queue-issue [--config <path>] [--dry-run]   rewrite the Knowledge queue issue now
-  lore curate refresh-entries [--config <path>] [--dry-run]   rebuild conflicting entry PRs on the current base
+  lore curate queue-issue [--config <path>] [--dry-run]   reconcile ready-to-merge, rebuild conflicting entry PRs, rewrite the Knowledge queue issue (force-pushes RunLore's own branches, adds and strips labels)
+  lore curate refresh-entries [--pr <n>] [--config <path>] [--dry-run]   rebuild conflicting entry PRs on the current base: labelled or held ones, at most 10 a run, or the one named (force-pushes RunLore's own branches, strips labels)
   lore mcp [--config <path>] [<catalog-dir>]          serve what-changed + KB search over MCP (stdio; Claude Code, HolmesGPT, …)
   lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
   lore version                                        print version

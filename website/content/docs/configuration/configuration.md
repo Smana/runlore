@@ -1202,8 +1202,12 @@ mcp:
 - `queue_issue` — the **Knowledge queue** issue (see
   [Reviewing knowledge]({{< relref "reviewing-knowledge.md#8-the-knowledge-queue" >}})). Keys:
   - `schedule` — `"<Day> HH:MM"` in UTC, a three-letter capitalised day and a zero-padded 24-hour
-    time (`"Mon 08:00"`); **default empty, off**. Anything else fails validation. `lore curate
-    queue-issue` rewrites the issue at once whatever the schedule says.
+    time (`"Mon 08:00"`); **default empty, off**. Anything else fails validation. The rewrite comes
+    from the first sweep past that time, so `sweeps.mode` applies to it. Under
+    `factory.curation.defer` it also rebuilds conflicting entry PRs: it can force-push RunLore's own
+    `runlore/kb-` branches and strip `ready-to-merge`. `lore curate queue-issue` rewrites the issue
+    at once whatever the schedule, the `defer` setting or `sweeps.mode` says, and first reconciles
+    labels and rebuilds in the same way, unless given `--dry-run`.
   - `slack` — **default `false`**; post one line linking the issue after each rewrite, through the
     configured notifiers (none in a dry-run).
 

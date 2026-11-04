@@ -64,6 +64,11 @@ type statusError struct {
 
 func (e *statusError) Error() string { return e.msg }
 
+// Is makes a 403 or 429 read as providers.ErrRateLimited, for a loop over many pull requests.
+func (e *statusError) Is(target error) bool {
+	return target == providers.ErrRateLimited && (e.code == http.StatusForbidden || e.code == http.StatusTooManyRequests)
+}
+
 // isNotFound reports whether err is a 404 from do.
 func isNotFound(err error) bool {
 	var se *statusError

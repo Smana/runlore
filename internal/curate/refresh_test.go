@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/audit"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -85,9 +88,12 @@ func rfState(spoil ...func(*providers.EntryPRState)) providers.EntryPRState {
 	return st
 }
 
+// rfPR is an open entry PR whose fingerprint is "fp"; rfHeld is the evidence that says it held.
 func rfPR(n int, labels ...string) providers.CuratedIssue {
-	return providers.CuratedIssue{Number: n, Title: "KB: a", Labels: append([]string{"runlore"}, labels...)}
+	return providers.CuratedIssue{Number: n, Title: "KB: a", Body: providers.FingerprintMarker("fp"), Labels: append([]string{"runlore"}, labels...)}
 }
+
+var rfHeld = qiEvidence{verified: map[string]bool{"fp": true}}
 
 func TestRefreshEntries(t *testing.T) {
 	const (
@@ -115,8 +121,9 @@ func TestRefreshEntries(t *testing.T) {
 		{name: "a failed removal means no rebuild", labels: []string{"ready-to-merge"}, state: rfState(), labelErr: errors.New("down")},
 		{name: "a mergeable PR is left alone", labels: []string{"ready-to-merge"}, state: rfState(func(st *providers.EntryPRState) { st.Mergeable = rfBool(true) })},
 		{name: "while GitHub computes, it is left alone", labels: []string{"ready-to-merge"}, state: rfState(func(st *providers.EntryPRState) { st.Mergeable = nil })},
-		{name: "another RunLore branch is left alone", state: rfState(func(st *providers.EntryPRState) { st.Branch = "runlore/revalidate-a" })},
-		{name: "a human's branch is left alone", state: rfState(func(st *providers.EntryPRState) { st.Branch = "fix/a" })},
+		{name: "another RunLore branch is not touched and is listed", state: rfState(func(st *providers.EntryPRState) { st.Branch = "runlore/revalidate-a" }), wantRefused: conflict},
+		{name: "a human's branch is not touched and is listed", labels: []string{"ready-to-merge"}, state: rfState(func(st *providers.EntryPRState) { st.Branch = "fix/a" }), wantRefused: conflict},
+		{name: "another branch that does not conflict is not listed", state: rfState(func(st *providers.EntryPRState) { st.Branch = "fix/a"; st.Mergeable = rfBool(true) })},
 		{name: "an entry edit is never looked at", labels: []string{retireLabel}, state: rfState()},
 		{name: "a failed read moves on", state: rfState(), stateErr: errors.New("down")},
 		{name: "a human's commit is refused", state: rfState(humanCommit), wantRefused: conflict},
@@ -145,7 +152,7 @@ func TestRefreshEntries(t *testing.T) {
 				stateErr: tc.stateErr, labelErr: tc.labelErr, rebuildErr: tc.rebuildErr,
 			}
 			var promoted []int
-			r := RefreshEntries{Forge: f, Log: discardLog(), Promote: func(_ context.Context, n int) error {
+			r := RefreshEntries{Forge: f, Evidence: rfHeld, Log: discardLog(), Promote: func(_ context.Context, n int) error {
 				promoted = append(promoted, n)
 				return nil
 			}}
@@ -177,10 +184,175 @@ func TestRefreshEntriesOnePRDoesNotStarveTheRest(t *testing.T) {
 			8: rfState(),
 		},
 	}
-	r := RefreshEntries{Forge: f, Log: discardLog(), Promote: func(context.Context, int) error { return errors.New("promote down") }}
+	r := RefreshEntries{Forge: f, Evidence: rfHeld, Log: discardLog(), Promote: func(context.Context, int) error { return errors.New("promote down") }}
 	res, err := r.Once(context.Background())
 	if err != nil || !slices.Equal(res.Rebuilt, []int{8}) || res.Refused[7] != "conflict" {
 		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// Final 2c: the first merge conflicts the whole backlog, so a pass rebuilds only what can use it.
+func TestRefreshRebuildsOnlyWhatCanUseIt(t *testing.T) {
+	labelled, held, neither := rfPR(1, "ready-to-merge"), rfPR(2), rfPR(3)
+	labelled.Body, neither.Body = providers.FingerprintMarker("other"), providers.FingerprintMarker("other")
+	failed := rfPR(4)
+	failed.Body = providers.FingerprintMarker("failed")
+	f := &fakeRefresh{open: []providers.CuratedIssue{neither, failed, held, labelled}, states: map[int]providers.EntryPRState{1: rfState(), 2: rfState(), 3: rfState(), 4: rfState()}}
+	ev := qiEvidence{verified: map[string]bool{"fp": true, "failed": false}}
+	res, err := RefreshEntries{Forge: f, Evidence: ev, Log: discardLog()}.Once(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"label 1 ready-to-merge>", "rebuild 1 abc", "rebuild 2 abc"}
+	if !slices.Equal(f.calls, want) || !slices.Equal(res.Rebuilt, []int{1, 2}) {
+		t.Fatalf("calls %q rebuilt %v", f.calls, res.Rebuilt)
+	}
+	if res.Refused[3] != "conflict" || res.Refused[4] != "conflict" || len(res.Refused) != 2 {
+		t.Fatalf("any other conflicting PR is listed, and nothing is written to it: %v", res.Refused)
+	}
+
+	t.Run("with no evidence, only the label counts", func(t *testing.T) {
+		f := &fakeRefresh{open: []providers.CuratedIssue{rfPR(2), rfPR(1, "ready-to-merge")}, states: map[int]providers.EntryPRState{1: rfState(), 2: rfState()}}
+		res, err := RefreshEntries{Forge: f, Log: discardLog()}.Once(context.Background())
+		if err != nil || !slices.Equal(res.Rebuilt, []int{1}) || res.Refused[2] != "conflict" {
+			t.Fatalf("%+v %v", res, err)
+		}
+	})
+}
+
+func TestRefreshStopsAtTheCap(t *testing.T) {
+	f := &fakeRefresh{states: map[int]providers.EntryPRState{}}
+	for n := 1; n <= maxRebuildsPerRun+2; n++ {
+		f.open = append(f.open, rfPR(n))
+		f.states[n] = rfState()
+	}
+	// The two with the label go first, wherever the forge lists them.
+	last := len(f.open) - 1
+	f.open[last].Labels = append(f.open[last].Labels, "ready-to-merge")
+	f.open[last-1].Labels = append(f.open[last-1].Labels, "ready-to-merge")
+	human := maxRebuildsPerRun + 3
+	f.open = append(f.open, rfPR(human))
+	f.states[human] = rfState(func(st *providers.EntryPRState) { st.CommitAuthors = []string{"Smana"} })
+
+	res, err := RefreshEntries{Forge: f, Evidence: rfHeld, Log: discardLog()}.Once(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rebuilt) != maxRebuildsPerRun || !slices.Contains(res.Rebuilt, last+1) || !slices.Contains(res.Rebuilt, last) {
+		t.Fatalf("Rebuilt = %v", res.Rebuilt)
+	}
+	if len(res.Refused) != 3 || res.Refused[human] != "conflict" {
+		t.Fatalf("what waits is listed for now, as is the refusal: %v", res.Refused)
+	}
+	rebuilds := slices.DeleteFunc(slices.Clone(f.calls), func(c string) bool { return !strings.HasPrefix(c, "rebuild") })
+	if len(rebuilds) != maxRebuildsPerRun {
+		t.Fatalf("calls: %q", f.calls)
+	}
+}
+
+// A labelled PR past the cap keeps its label: it comes back next pass, and an accepted one has no
+// evidence that would put the label back.
+func TestRefreshPastTheCapWritesNothing(t *testing.T) {
+	f := &fakeRefresh{states: map[int]providers.EntryPRState{}}
+	for n := 1; n <= maxRebuildsPerRun+1; n++ {
+		f.open = append(f.open, rfPR(n, "ready-to-merge"))
+		f.states[n] = rfState()
+	}
+	res, err := RefreshEntries{Forge: f, Log: discardLog()}.Once(context.Background())
+	if err != nil || len(res.Rebuilt) != maxRebuildsPerRun || len(res.Refused) != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if len(f.calls) != 2*maxRebuildsPerRun {
+		t.Fatalf("calls: %q", f.calls)
+	}
+}
+
+func TestRefreshStopsOnALimit(t *testing.T) {
+	limited := fmt.Errorf("github: %w", providers.ErrRateLimited)
+	two := func() *fakeRefresh {
+		return &fakeRefresh{open: []providers.CuratedIssue{rfPR(1, "ready-to-merge"), rfPR(2, "ready-to-merge")}, states: map[int]providers.EntryPRState{1: rfState(), 2: rfState()}}
+	}
+	cases := []struct {
+		name    string
+		arrange func(*fakeRefresh, *RefreshEntries)
+		want    []string
+	}{
+		{"on the rebuild", func(f *fakeRefresh, _ *RefreshEntries) { f.rebuildErr = limited }, []string{"label 1 ready-to-merge>", "rebuild 1 abc"}},
+		{"on the label", func(f *fakeRefresh, _ *RefreshEntries) { f.labelErr = limited }, nil},
+		{"on the read", func(f *fakeRefresh, _ *RefreshEntries) { f.stateErr = limited }, nil},
+		{"on the promotion", func(_ *fakeRefresh, r *RefreshEntries) {
+			r.Promote = func(context.Context, int) error { return limited }
+		}, []string{"label 1 ready-to-merge>", "rebuild 1 abc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := two()
+			r := RefreshEntries{Forge: f, Log: discardLog()}
+			tc.arrange(f, &r)
+			res, err := r.Once(context.Background())
+			if err != nil || !res.Stopped {
+				t.Fatalf("%+v %v", res, err)
+			}
+			if !slices.Equal(f.calls, tc.want) {
+				t.Fatalf("calls %q, want %q", f.calls, tc.want)
+			}
+			if err := r.Run(context.Background()); !errors.Is(err, providers.ErrRateLimited) {
+				t.Fatalf("the command says so: %v", err)
+			}
+		})
+	}
+	t.Run("any other failure does not stop the pass", func(t *testing.T) {
+		f := two()
+		f.rebuildErr = errors.New("down")
+		res, err := RefreshEntries{Forge: f, Log: discardLog()}.Once(context.Background())
+		if err != nil || res.Stopped || len(f.calls) != 4 {
+			t.Fatalf("%+v %v %q", res, err, f.calls)
+		}
+	})
+}
+
+func TestRefreshOnePR(t *testing.T) {
+	ctx := context.Background()
+	human := func(st *providers.EntryPRState) { st.CommitAuthors = []string{"Smana"} }
+	cases := []struct {
+		name      string
+		pr        providers.CuratedIssue
+		state     providers.EntryPRState
+		only      int
+		rebuild   error
+		wantCalls []string
+		wantErr   string
+		wantProm  bool
+	}{
+		{name: "neither label nor evidence: a human asked", pr: rfPR(7), state: rfState(), only: 7, wantCalls: []string{"rebuild 7 abc"}, wantProm: true},
+		{name: "a labelled one loses the label first", pr: rfPR(7, "ready-to-merge"), state: rfState(), only: 7, wantCalls: []string{"label 7 ready-to-merge>", "rebuild 7 abc"}, wantProm: true},
+		{name: "a human's commit is still refused", pr: rfPR(7), state: rfState(human), only: 7, wantErr: "refused"},
+		{name: "a fork is still refused", pr: rfPR(7), state: rfState(func(st *providers.EntryPRState) { st.Fork = true }), only: 7, wantErr: "refused"},
+		{name: "another branch is still refused", pr: rfPR(7), state: rfState(func(st *providers.EntryPRState) { st.Branch = "fix/a" }), only: 7, wantErr: "refused"},
+		{name: "a moved head is an error", pr: rfPR(7), state: rfState(), only: 7, rebuild: providers.ErrHeadMoved, wantCalls: []string{"rebuild 7 abc"}, wantErr: "moved"},
+		{name: "the entry on the base is refused", pr: rfPR(7), state: rfState(), only: 7, rebuild: providers.ErrEntryOnBase, wantCalls: []string{"rebuild 7 abc"}, wantErr: "refused"},
+		{name: "not conflicting: nothing to do", pr: rfPR(7), state: rfState(func(st *providers.EntryPRState) { st.Mergeable = rfBool(true) }), only: 7},
+		{name: "still computing says so", pr: rfPR(7), state: rfState(func(st *providers.EntryPRState) { st.Mergeable = nil }), only: 7, wantErr: "computing"},
+		{name: "no such open PR", pr: rfPR(7), state: rfState(), only: 8, wantErr: "not an open"},
+		{name: "an entry edit", pr: rfPR(7, retireLabel), state: rfState(), only: 7, wantErr: "entry edit"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			other := rfPR(9, "ready-to-merge")
+			f := &fakeRefresh{open: []providers.CuratedIssue{other, tc.pr}, states: map[int]providers.EntryPRState{7: tc.state, 9: rfState()}, rebuildErr: tc.rebuild}
+			promoted := 0
+			r := RefreshEntries{Forge: f, Only: tc.only, Log: discardLog(), Promote: func(context.Context, int) error { promoted++; return nil }}
+			err := r.Run(ctx)
+			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if !slices.Equal(f.calls, tc.wantCalls) {
+				t.Fatalf("calls %q, want %q", f.calls, tc.wantCalls)
+			}
+			if (promoted == 1) != tc.wantProm {
+				t.Fatalf("promoted %d", promoted)
+			}
+		})
 	}
 }
 
@@ -292,6 +464,74 @@ func TestQueueOnResolutionNeverLabelsARefusedPR(t *testing.T) {
 	if len(f.calls) != 0 {
 		t.Fatalf("calls: %q", f.calls)
 	}
+}
+
+// Final 2c, I3 and Task 12's M6: a 👎 since the last sweep, through the real ledger. queue-issue runs
+// the Queue pass first, so the label comes off and the PR reaches Decide, ranked contested.
+func TestQueueIssueReconcilesARealContest(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 4, 8, 0, 0, 0, time.UTC)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, fp := range []string{"fp7", "fp8"} {
+		must(ledger.Verify(outcome.Verification{Entry: "incidents/" + fp + ".md", DupFingerprint: fp, TriggerKey: fp, Room: "room-" + fp, Held: true, At: at}))
+	}
+	must(ledger.Open(outcome.Event{TriggerKey: "k7", Verdict: "action_required", At: at}))
+	must(ledger.Link("k7", prURL(7), at))
+	must(ledger.Feedback("k7", "down", "U1", at.Add(time.Minute)))
+
+	pr := func(n int, fp string) providers.CuratedIssue {
+		p := rfPR(n, "ready-to-merge")
+		p.Title, p.Body = fmt.Sprintf("KB: pr%d", n), providers.FingerprintMarker(fp)
+		return p
+	}
+	mergeable := func(st *providers.EntryPRState) { st.Mergeable = rfBool(true) }
+	build := func(f *fakeRefresh) QueueIssue {
+		return QueueIssue{Forge: f, Evidence: ledger, KBRepo: qiRepo, Log: discardLog(),
+			Reconcile: Queue{Forge: f, Evidence: ledger, KBRepo: qiRepo, Log: discardLog()},
+			Refresh:   &RefreshEntries{Forge: f, Evidence: ledger, Log: discardLog()}}
+	}
+
+	f := &fakeRefresh{open: []providers.CuratedIssue{pr(7, "fp7"), pr(8, "fp8")}, states: map[int]providers.EntryPRState{7: rfState(mergeable), 8: rfState(mergeable)}}
+	if err := build(f).RunNow(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.calls, []string{"label 7 ready-to-merge>"}) {
+		t.Fatalf("the contested label comes off, the other stays: %q", f.calls)
+	}
+	if !strings.Contains(f.issueBody, "| contested | #7") {
+		t.Fatalf("Decide lists it:\n%s", f.issueBody)
+	}
+	if strings.Contains(f.issueBody, "pr8") {
+		t.Fatalf("the uncontested one stays out:\n%s", f.issueBody)
+	}
+
+	t.Run("the Queue runs before the refresh", func(t *testing.T) {
+		// Held, unlabelled, and a conflict RunLore must refuse. The Queue labels it on the evidence, and
+		// only a refresh that runs after it can take the label off and leave it in Decide. In the other
+		// order it would end up ready-to-merge and absent from Decide.
+		human := func(st *providers.EntryPRState) { st.CommitAuthors = []string{"Smana"} }
+		p := pr(8, "fp8")
+		p.Labels = []string{"runlore"}
+		f := &fakeRefresh{open: []providers.CuratedIssue{p}, states: map[int]providers.EntryPRState{8: rfState(human)}}
+		if err := build(f).RunNow(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(f.calls, []string{"label 8 >ready-to-merge", "label 8 ready-to-merge>"}) {
+			t.Fatalf("calls: %q", f.calls)
+		}
+		if !strings.Contains(f.issueBody, "| conflict | #8") {
+			t.Fatalf("Decide lists it:\n%s", f.issueBody)
+		}
+	})
 }
 
 func TestQueueIssueRefreshesFirst(t *testing.T) {

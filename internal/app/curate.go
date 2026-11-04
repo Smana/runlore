@@ -30,13 +30,16 @@ import (
 // Contested pass (warns the open KB PR when humans 👎'd the investigation
 // behind it).
 //
-// `lore curate queue-issue` runs one pass instead: it rewrites the Knowledge queue issue at once,
-// whatever curate.queue_issue.schedule says, and no other pass. `lore curate refresh-entries` runs
-// one pass too: it rebuilds the conflicting entry PRs on the current base.
+// `lore curate queue-issue` does not groom. It reconciles labels through the Queue pass, rebuilds the
+// conflicting entry PRs that can use it, then rewrites the Knowledge queue issue at once, whatever
+// curate.queue_issue.schedule says. So it can force-push RunLore's own runlore/kb- branches and add or
+// strip ready-to-merge, unless --dry-run. `lore curate refresh-entries` only rebuilds: a PR labelled
+// ready-to-merge or with held evidence, at most 10 a run, or with --pr the one named.
 func RunCurate(args []string) error {
 	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
 	dry := fs.Bool("dry-run", false, "log and audit what the passes would do without writing to the forge")
+	onlyPR := fs.Int("pr", 0, "refresh-entries: rebuild this one PR, whatever its label or evidence")
 	sub := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		sub, args = args[0], args[1:]
@@ -51,6 +54,9 @@ func RunCurate(args []string) error {
 	// apply: refuse it rather than guess what was meant.
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q: a subcommand comes first (lore curate queue-issue --config <path>)", fs.Arg(0))
+	}
+	if *onlyPR < 0 || *onlyPR != 0 && sub != "refresh-entries" {
+		return fmt.Errorf("--pr takes a pull request number, with refresh-entries only")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -104,12 +110,14 @@ func RunCurate(args []string) error {
 
 	line := queueLine(cfg, *dry, log)
 	if sub == "queue-issue" {
-		log.Info("curate: rewriting the Knowledge queue issue", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
+		log.Info("curate: reconciling labels, rebuilding conflicting entry PRs, rewriting the Knowledge queue issue", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
 		return runQueueIssue(context.Background(), buildQueueIssue(cfg, guarded, ledger, line, log))
 	}
 	if sub == "refresh-entries" {
-		log.Info("curate: rebuilding conflicting entry PRs", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
-		return runRefresh(context.Background(), buildRefresh(cfg, guarded, ledger, log))
+		log.Info("curate: rebuilding conflicting entry PRs", "repo", cfg.Forge.KBRepo, "pr", *onlyPR, "dry_run", *dry)
+		refresh := buildRefresh(cfg, guarded, ledger, log)
+		refresh.Only = *onlyPR
+		return runRefresh(context.Background(), refresh)
 	}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
 	runGroom(context.Background(), cfg, guarded, ledger, line, log)
@@ -153,6 +161,7 @@ func buildQueueIssue(cfg *config.Config, forge curate.GuardedForge, ledger *outc
 	q := curate.QueueIssue{Forge: forge, Line: line, KBRepo: cfg.Forge.KBRepo, Refresh: &refresh, Log: log}
 	if ledger != nil {
 		q.Evidence, q.Stats = ledger, ledger
+		q.Reconcile = buildQueue(cfg, forge, ledger, log)
 	}
 	if cfg.Curate.QueueIssue.Enabled() {
 		wd, h, m, err := config.ParseSchedule(cfg.Curate.QueueIssue.Schedule)
@@ -177,12 +186,13 @@ func buildQueue(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.L
 	return queue
 }
 
-// buildRefresh assembles the refresh a caller that does not run the Queue itself uses: with a ledger,
-// a rebuilt PR goes straight back through the Queue's evidence check.
+// buildRefresh assembles the refresh a caller that does not run the Queue right after uses: with a
+// ledger, a rebuilt PR goes straight back through the Queue's evidence check.
 func buildRefresh(cfg *config.Config, forge curate.GuardedForge, ledger *outcome.Ledger, log *slog.Logger) curate.RefreshEntries {
 	r := curate.RefreshEntries{Forge: forge, Log: log}
 	if ledger != nil {
-		r.Promote = buildQueue(cfg, forge, ledger, log).PromoteOne
+		queue := buildQueue(cfg, forge, ledger, log)
+		r.Evidence, r.Promote = queue.Evidence, queue.PromoteOne
 	}
 	return r
 }
@@ -226,7 +236,14 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 	}}
 	addQueueIssue := func() {
 		if cfg.Curate.QueueIssue.Enabled() {
-			agent.Passes = append(agent.Passes, buildQueueIssue(cfg, forge, ledger, line, log))
+			qi := buildQueueIssue(cfg, forge, ledger, line, log)
+			// The Queue pass just ran in this agent. And the refresh force-pushes, so a schedule alone
+			// does not switch it on: it takes the same gate as Queue.Refresh.
+			qi.Reconcile = nil
+			if !cfg.Factory.Curation.Defer {
+				qi.Refresh = nil
+			}
+			agent.Passes = append(agent.Passes, qi)
 		}
 	}
 	if ledger == nil {
@@ -237,7 +254,7 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 	// The rebuild force-pushes, so an adopter who has not opted in keeps today's Queue. No Promote:
 	// Queue.Run lists right after.
 	if cfg.Factory.Curation.Defer {
-		queue.Refresh = &curate.RefreshEntries{Forge: forge, Log: log}
+		queue.Refresh = &curate.RefreshEntries{Forge: forge, Evidence: queue.Evidence, Log: log}
 	}
 	agent.Passes = append(agent.Passes,
 		queue,

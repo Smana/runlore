@@ -346,9 +346,9 @@ separate approval UI — your Git review *is* the gate.
 ## 8. The knowledge queue
 
 With a `curate.queue_issue.schedule` (`"<Day> HH:MM"`, UTC; empty is off), RunLore keeps one
-issue titled **Knowledge queue** in the KB repository, rewritten at that time and by
-`lore curate queue-issue` at once (`curate.queue_issue.slack: true` also posts one line linking
-it). It has three parts:
+issue titled **Knowledge queue** in the KB repository, rewritten by the first sweep past that time
+(so `curate.sweeps.mode: "off"` stops it) and by `lore curate queue-issue` at once
+(`curate.queue_issue.slack: true` also posts one line linking it). It has three parts:
 
 - **Decide** — the open entry PRs a human must look at, riskiest first and oldest first within a
   risk: `contested` (a standing 👎 links to the PR), `contradicts` (the PR carries the
@@ -363,21 +363,41 @@ it). It has three parts:
 
 RunLore rewrites an issue only where it finds its own marker: a human's issue that wears the
 `runlore-queue` label is left alone and a new one is filed. With `curate.sweeps.mode: dry-run`
-the rewrite is logged and audited, not made.
+the rewrite is logged and audited, not made. `lore curate queue-issue` ignores `sweeps.mode` and
+writes unless given `--dry-run`.
+
+**A rewrite is not only a rewrite.** `lore curate queue-issue` first reconciles labels with the
+Queue pass, so a 👎 since the last sweep withdraws `ready-to-merge` and the PR reaches Decide, then
+refreshes as described under Conflicts. So it can add and strip `ready-to-merge` and force-push
+RunLore's own `runlore/kb-` branches. The scheduled rewrite refreshes the same way, under
+`factory.curation.defer` only; without it, a schedule rewrites the issue and rebuilds nothing.
 
 **Ready to merge.** With `factory.curation.defer` on, `ready-to-merge` lands when a PR's fix
 held its latest verification and no risk other than `unverified` applies, as well as when the
 incident resolves. It is withdrawn when the evidence flips, and `accepted` from a human overrides
-it. `security` is applied by a human in phase 1: no machine signal sets it.
+it. `security` is applied by a human in phase 1: no machine signal sets it. Removing the label by
+hand does not stick: the next sweep or verification puts it back while the evidence still holds, so
+to hold a PR back, label it `security` or 👎 it.
 
-**Conflicts.** Each merged entry appends to `index.md` and `log.md`, so the next open entry PR
-can conflict. `lore curate refresh-entries` rebuilds such a PR on the current base, only when
-its branch starts with `runlore/kb-` and every commit is authored by `runlore[bot]`, committed
-by GitHub's `web-flow` and verified, and the change is one entry plus those two files. A push
-to a labelled PR removes `ready-to-merge` first, so the label never stands on a head nobody
-verified. Any other conflicting PR, a fork, or one with someone else's commit is not touched and
-is listed in Decide with the risk `conflict`. Clear a session's queue while RunLore is on: a
-merge needs the refresh before the next one can follow.
+**Conflicts.** Each merged entry appends to `index.md` and `log.md`, so one merge can make every
+other open entry PR conflict. Rebuilding one costs six writes and a CI run and restarts its stale
+clock. So `lore curate refresh-entries`, like the Queue pass and the queue issue under
+`factory.curation.defer`, rebuilds only a PR labelled `ready-to-merge` or, under `defer`, whose fix
+held its latest verification, at most 10 a run, and stops if GitHub answers 403 or 429. For any other
+PR a human is about to review, `lore curate refresh-entries --pr <n>` rebuilds that one.
+
+Either way, a rebuild happens only when the branch was made by RunLore (`runlore/kb-` and a slug),
+every commit is authored by `runlore[bot]`, committed by GitHub's `web-flow` and verified, and the
+change is one entry plus those two files. A push to a labelled PR removes `ready-to-merge` first,
+so the label never stands on a head nobody verified.
+
+A conflicting PR that is not rebuilt is listed in Decide with the risk `conflict`, unless a higher
+risk applies: one with no label and no held evidence, a fork, one with someone else's commit, one
+on another branch, or one past the cap, which the next run comes back to (a labelled PR past the cap
+keeps its label until then, so it stays out of Decide). Two exceptions keep their other risk: a
+rebuild that failed and is retried next run, and a PR not reached because the run stopped on 403 or
+429. Clear a session's queue while RunLore is on: a merge needs the refresh before the next one can
+follow.
 
 Every `lore curate` subcommand takes `--config <path>` wherever the config is not `runlore.yaml`.
 
