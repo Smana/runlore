@@ -1057,6 +1057,13 @@ factory:
   last ten minutes. `webhook.secret_env` names a variable holding one base64 signing key of at
   least 32 bytes, or two on separate lines during a rotation; it is read at each request. A
   follower replica relays the request to the leader unchanged.
+- **A key rotation needs a RunLore restart.** RunLore re-reads the variable at each request, but a
+  variable set from a Kubernetes Secret is fixed when the container starts, so a changed Secret
+  reaches RunLore only on a rollout. Rotate in this order: put both keys in the Secret and roll
+  RunLore, move the factory to the new key, then drop the old one and roll again. The other order
+  answers the factory with `401`s, and **the factory disables a subscriber after three failed
+  deliveries** and keeps it disabled; fixing the key does not bring it back. See
+  [Troubleshooting]({{< relref "troubleshooting.md#factory-state-lines-stop-reaching-the-incident-thread" >}}).
 - **What is posted to Slack** is a fixed English line built from ids only, never room text: that
   the factory took the incident (and its public stub issue), that its task ended, that a fix was
   started, its pull request number, that it waits for a human, that it was merged or reverted.
@@ -1096,9 +1103,15 @@ factory:
   1. RunLore files the incident with the factory first. On a `201` (or a `200` with no hold yet) it
      holds the entry in `factory.jsonl` and opens no pull request; any other answer drafts today's
      entry at once.
-  2. Each minute the leader looks at every held incident. Once the fix is verified, it drafts the
-     entry through the curator's own gates, or adopts an open pull request with the same
-     fingerprint, and writes the outcome into the entry.
+  2. Each minute the leader looks at every held incident. A fix counts as verified, an outcome of
+     `held`, only when two verdicts agree: RunLore's own soak verdict is `resolved` **and** the
+     factory's monitor (its `room.monitor_verdict` webhook) said `healthy`. A `resolved` soak line
+     in Slack alone drafts nothing yet. A revert, a `persisting` verdict or a `regression` from the
+     monitor makes the outcome `failed`. Once a generation has `held`, the leader adopts an open
+     pull request with the same fingerprint if there is one; otherwise, if the catalog already
+     holds an entry with that fingerprint, the hold settles on that entry and opens no pull
+     request; otherwise it drafts the entry through the curator's own gates. Either way, it writes
+     the outcome into the entry.
   3. If no outcome arrives, the entry is drafted as it stands when `window` has passed, counted
      from the factory's first acceptance. The 24h floor covers a 30m soak, a 2h class and a
      same-day publish and merge. RunLore cannot read the factory's own follow-up window.
@@ -1195,6 +1208,9 @@ mcp:
   validation time; custom `headers` values are not. Do not carry secrets in `headers` when `url`
   is plain `http://` to a public host — use `headers` for non-secret metadata only (e.g. `X-Tenant`).
   Use `https://` whenever the server is on a public network.
+- **Per-server tool allowlist.** `tools:` on a server is an exact-name list of the remote tools
+  to register; omitted, every advertised tool is. `mcp.require_allowlist: true` refuses startup
+  unless every server lists its tools. See [MCP]({{< relref "mcp.md#extending-the-agents-tools-mcp-client" >}}).
 
 ### `curate` — Phase-2 backlog groomer
 - `stale_after` — close unprotected KB PRs idle longer than this; **code default `0` (disabled)** —

@@ -5,6 +5,15 @@ weight: 30
 
 How to upgrade RunLore in place, what survives a restart, and how to remove it cleanly.
 
+## Breaking changes in 0.16.0
+
+**Nothing to do on upgrade.** `notify.silence.windows` may now list more than five presets while
+`notify.slack.silence_button` is off; the bound is only relaxed, so every config that validated
+still does. If you later turn `silence_button` on with a longer list, startup fails with an error
+naming both keys: trim the list to between two and five entries, or leave the button off.
+
+No release from 0.17.0 to 0.20.0 carries a breaking change.
+
 ## Breaking changes in 0.15.0
 
 RunLore is **pre-1.0**, and a breaking change bumps the **minor** version — so a `0.x` upgrade can
