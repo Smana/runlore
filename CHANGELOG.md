@@ -1234,7 +1234,7 @@ are spelled out under
 * **supply-chain:** run govulncheck against the Go vuln DB ([a29f343](https://github.com/Smana/runlore/commit/a29f3431ae395bb9b74c550c10559a3b5129fdb2))
 * **supply-chain:** SHA-pin all GitHub Actions to commit digests ([c0dcde4](https://github.com/Smana/runlore/commit/c0dcde42eeb57984ff9c0b9c66f9dd0e7f8aa7b6))
 
-## [Unreleased]
+## Pre-0.2 history
 
 ### Added
 
@@ -1261,5 +1261,3 @@ are spelled out under
   webhook-driven) and `lore investigate` (one-shot CLI). Leader election for HA.
 - **Eval harness.** `lore eval` replays recorded incident cases and reports the
   root-cause-identification rate; a nightly CI eval guards against RCA regressions.
-
-[Unreleased]: https://github.com/Smana/runlore/commits/main

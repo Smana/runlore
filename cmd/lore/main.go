@@ -42,6 +42,7 @@ Usage:
   lore curate refresh-entries [--pr <n>] [--config <path>] [--dry-run]   rebuild conflicting entry PRs on the current base: labelled or held ones, at most 10 a run, or the one named (force-pushes RunLore's own branches, strips labels)
   lore mcp [--config <path>] [<catalog-dir>]          serve what-changed + KB search over MCP (stdio; Claude Code, HolmesGPT, …)
   lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
+  lore validate-kb [--semantic] [--format text|github] [--config <path>] <catalog-dir>   validate every OKF entry (the KB merge gate); --semantic adds the advisory model review
   lore version                                        print version
 `
 
