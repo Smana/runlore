@@ -218,6 +218,28 @@ with `count=` confirms how many sinks were wired — `count=0` means none are co
 
 ---
 
+## Factory state lines stop reaching the incident thread
+
+With `factory.url` set, the factory took the incident but its later lines (task ended, fix started,
+pull request, merged) never appear in the Slack thread, and no soak or verification follows.
+
+| You see | Meaning | Fix |
+|---|---|---|
+| `msg="factory webhook refused"` with a `reason=` | a delivery arrived and its signature or timestamp failed: the key in `factory.webhook.secret_env` is not the factory's, or the clocks are more than five minutes apart | align the key (see below) |
+| at start, `msg="the factory webhook signing key is missing or malformed: every webhook will be refused until it is set"` | the variable is empty, not base64, shorter than 32 bytes, or holds more than two keys | fix the Secret, then roll RunLore |
+| no log line at all | nothing is delivered: the factory's egress policy does not reach RunLore's serve port, or the factory disabled the subscriber | check the factory's side |
+
+**Three failed deliveries disable the subscriber, and it stays disabled.** Every `401` above counts,
+and so does a RunLore that was down. Fixing the key on RunLore's side does not re-enable it: bump the
+`generation` of RunLore's subscriber entry in the factory broker's config and restart the broker.
+
+**A changed Secret needs a RunLore rollout.** The key is read from the environment at each request,
+but the environment of a running container never changes. Rotating the key on the factory first,
+before RunLore restarts with both keys, is the common way to reach three failures. The rotation order
+is under [`factory`]({{< relref "/docs/configuration/configuration.md#factory--the-agent-factory-opt-in" >}}).
+
+---
+
 ## A Slack mention in a thread does nothing
 
 `@runlore note: …` fails silently in both directions, so first establish that Slack can reach the
