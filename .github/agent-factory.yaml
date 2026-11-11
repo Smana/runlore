@@ -1,0 +1,4 @@
+# Names the agent factory that may act on this repository (Agent Factory ownership fence): only the
+# named factory takes its issues, runs and merges. gcp-0 for the 2026-11-11 live session; flip it
+# to the cloud that runs the next session.
+factory: gcp-0
