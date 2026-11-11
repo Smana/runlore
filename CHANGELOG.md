@@ -14,6 +14,18 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.20.1](https://github.com/Smana/runlore/compare/v0.20.0...v0.20.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **cli:** list validate-kb in lore's usage, index the CLI, correct the factory docs ([#615](https://github.com/Smana/runlore/issues/615)) ([d8a6787](https://github.com/Smana/runlore/commit/d8a6787649e0d252f96b21e1b8b3c2c4231349ac))
+
+
+### Documentation
+
+* **chart:** mount the factory CA beside the config, not under it ([#613](https://github.com/Smana/runlore/issues/613)) ([293b7c7](https://github.com/Smana/runlore/commit/293b7c72c2fa0a24c571c2a3d490e83aac3efddf))
+
 ## [0.20.0](https://github.com/Smana/runlore/compare/v0.19.1...v0.20.0) (2026-11-04)
 
 
