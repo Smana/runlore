@@ -1174,9 +1174,18 @@ factory:
   investigation concluded, so keep it at 0, or below Alertmanager's repeat interval.
 
 ### `server` — the HTTP listener
-Only `webhook_token_env` (the bearer token for the incident webhook). The listen address is the
-`--addr` CLI flag (`:8080` in the chart), **not** a config key. TLS is terminated externally
-(ClusterIP + NetworkPolicy).
+Configures HTTP ingress on the `lore serve` port (`--addr`, `:8080` in the chart — **not** a config key). TLS is terminated externally (ClusterIP + NetworkPolicy).
+
+```yaml
+server:
+  webhook_token_env: ""  # bearer token for POST /webhook/alertmanager
+  mcp:
+    enabled: false       # opt-in read-only KB MCP endpoint at POST /mcp
+    token_env: ""        # optional bearer token for /mcp
+  kb_ui:
+    enabled: false       # opt-in read-only embedded HTML KB explorer at /kb
+    token_env: ""        # optional bearer token for /kb
+```
 
 **`webhook_token_env` is mandatory once any model is configured** — the `serve` path fails closed:
 it refuses to start with an anonymous alert webhook when an LLM is wired (the webhook's
@@ -1186,6 +1195,13 @@ is warning-only *only* for the model-less log-only investigator (no model config
 `sources.alertmanager` is enabled and this is left unset with a model configured, startup fails; if
 left unset without a model, startup logs a warning — the webhook stays open on purpose for
 cluster-internal traffic, but the risk should never be silent.
+
+**`server.kb_ui`** mounts the zero-dependency, read-only HTML explorer for the OKF catalog and
+outcome ledger at `/kb` and `/kb/entry/{path...}` directly on each replica (never leader-forwarded,
+mirroring `server.mcp`). It is off by default; when enabled without `token_env`, startup logs a
+warning that any caller admitted on the serve port can read `/kb`. When `token_env` is set, every
+request must send `Authorization: Bearer <token>` (verified in constant time; an empty variable
+fails closed with `401`).
 
 ### `rbac` — chart-only (not in the agent config)
 Set under `values.rbac.*`, not `values.config`: `controllerLogNamespaces` (default `[flux-system]` —

@@ -71,12 +71,23 @@ type ServerConfig struct {
 	WebhookTokenEnv string `yaml:"webhook_token_env"`
 	// MCP serves kb_search and kb_get over StreamableHTTP at POST /mcp on the serve port.
 	MCP ServerMCP `yaml:"mcp"`
+	// KBUI serves a read-only embedded HTML explorer for the OKF catalog and outcome
+	// ledger at /kb on the serve port.
+	KBUI ServerKBUI `yaml:"kb_ui"`
 }
 
 // ServerMCP configures the read-only /mcp endpoint. Off by default.
 type ServerMCP struct {
 	Enabled bool `yaml:"enabled"`
 	// TokenEnv names an env var holding a bearer token required on /mcp. Empty leaves it
+	// open to any caller the serve port admits; set but empty, every request gets 401.
+	TokenEnv string `yaml:"token_env"`
+}
+
+// ServerKBUI configures the read-only /kb HTML explorer endpoint. Off by default.
+type ServerKBUI struct {
+	Enabled bool `yaml:"enabled"`
+	// TokenEnv names an env var holding a bearer token required on /kb. Empty leaves it
 	// open to any caller the serve port admits; set but empty, every request gets 401.
 	TokenEnv string `yaml:"token_env"`
 }

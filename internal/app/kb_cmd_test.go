@@ -4,6 +4,8 @@ package app
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -391,5 +393,48 @@ func writeEntryFile(t *testing.T, dir, rel, content string) {
 	}
 	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestKBServeDefaultAddrIsLoopback(t *testing.T) {
+	if defaultKBServeAddr != "127.0.0.1:8081" {
+		t.Fatalf("defaultKBServeAddr = %q, want 127.0.0.1:8081", defaultKBServeAddr)
+	}
+}
+
+func TestKBServeServesCatalogAndLedger(t *testing.T) {
+	dir := writeKBFixture(t)
+	ledgerPath := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	l, err := outcome.New(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Open(outcome.Event{
+		Fingerprint: "fp-serve-1",
+		Kind:        "recall",
+		Entry:       "incidents/crashloop-web.md",
+		TriggerKey:  "tk-serve-1",
+		At:          time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := l.Resolve("fp-serve-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := buildLocalKBServeHandler("runlore.yaml", dir, ledgerPath, &strings.Builder{})
+	if err != nil {
+		t.Fatalf("buildLocalKBServeHandler: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/kb", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /kb = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"CrashLoop web ConfigMap truncated", "1/1"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("GET /kb missing %q:\n%s", want, body)
+		}
 	}
 }

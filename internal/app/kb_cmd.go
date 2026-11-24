@@ -5,25 +5,32 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/kbui"
 	"github.com/Smana/runlore/internal/outcome"
 )
+
+const defaultKBServeAddr = "127.0.0.1:8081"
 
 // RunKB dispatches the human-facing knowledge-base read commands. `lore catalog
 // sync` remains the machine/ops write surface; `lore kb` is how a person asks
 // "what do we already know about this?" without an MCP client or a cluster.
 func RunKB(args []string) error {
-	const usage = "usage: lore kb search <query> [flags] | lore kb show <entry> [flags] | lore kb import <src-dir> [flags] | lore kb resolve --pr <n> --fix <url> --verdict resolved|persisting [flags]"
+	const usage = "usage: lore kb search <query> [flags] | lore kb show <entry> [flags] | lore kb serve [flags] | lore kb import <src-dir> [flags] | lore kb resolve --pr <n> --fix <url> --verdict resolved|persisting [flags]"
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -32,6 +39,8 @@ func RunKB(args []string) error {
 		return runKBSearch(args[1:], os.Stdout)
 	case "show":
 		return runKBShow(args[1:], os.Stdout)
+	case "serve":
+		return runKBServe(args[1:], os.Stderr)
 	case "import":
 		return runKBImport(args[1:], os.Stdout)
 	case "resolve":
@@ -370,4 +379,59 @@ func writeHitsJSON(w io.Writer, hits []catalog.ScoredEntry, counts map[string]ou
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+func runKBServe(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("kb serve", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	dir := fs.String("dir", "", "catalog directory (overrides config catalog.dir)")
+	ledgerPath := fs.String("ledger", "", "optional outcome ledger JSONL (read-only)")
+	addr := fs.String("addr", defaultKBServeAddr, "listen address (loopback by default)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	h, err := buildLocalKBServeHandler(*cfgPath, *dir, *ledgerPath, out)
+	if err != nil {
+		return err
+	}
+
+	srv := NewHTTPServer(*addr, h)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sctx)
+	}()
+
+	_, _ = fmt.Fprintf(out, "RunLore KB explorer listening on http://%s/kb (read-only)\n", *addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func buildLocalKBServeHandler(cfgPath, dir, ledgerPath string, warn io.Writer) (http.Handler, error) {
+	cat, err := loadKBCatalog(cfgPath, dir)
+	if err != nil {
+		return nil, err
+	}
+	var ledger *outcome.Ledger
+	if ledgerPath != "" {
+		if _, err := os.Stat(ledgerPath); err != nil {
+			_, _ = fmt.Fprintf(warn, "warning: ledger %s unreadable (%v); outcome stats omitted\n", ledgerPath, err)
+		} else if l, err := outcome.New(ledgerPath); err != nil {
+			_, _ = fmt.Fprintf(warn, "warning: ledger %s unreadable (%v); outcome stats omitted\n", ledgerPath, err)
+		} else {
+			ledger = l
+		}
+	}
+	return kbui.New(kbui.Options{
+		Catalog:  cat,
+		Ledger:   ledger,
+		BasePath: "/kb",
+	}), nil
 }

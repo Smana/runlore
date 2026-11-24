@@ -583,3 +583,38 @@ func TestMCPIsAnsweredByAFollowerItself(t *testing.T) {
 		t.Fatalf("%d", w.Code)
 	}
 }
+
+func TestKBUIMountingAndFollowerLocalServing(t *testing.T) {
+	// Default (KBUI nil): /kb is absent (404).
+	sOff := New(nil, Actions{}, nil, nil, nil, nil, discardLog)
+	wOff := httptest.NewRecorder()
+	sOff.Handler().ServeHTTP(wOff, httptest.NewRequest(http.MethodGet, "/kb", nil))
+	if wOff.Code != http.StatusNotFound {
+		t.Fatalf("GET /kb when disabled: status = %d, want 404", wOff.Code)
+	}
+
+	// Enabled on a follower: /kb and /kb/entry/... are answered locally, NEVER forwarded to the leader.
+	leader := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Error("the leader was reached for /kb")
+	}))
+	defer leader.Close()
+	fwd := &Forward{
+		IsLeader:   func() bool { return false },
+		LeaderAddr: func() string { return strings.TrimPrefix(leader.URL, "http://") },
+		SelfName:   "me",
+		LeaderName: func() string { return "other" },
+		Log:        discardLog,
+	}
+	kbHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("kb:" + r.URL.Path))
+	})
+	sOn := New(nil, Actions{KBUI: kbHandler}, nil, nil, nil, fwd, discardLog)
+	for _, p := range []string{"/kb", "/kb/", "/kb/entry/incidents/oom.md"} {
+		w := httptest.NewRecorder()
+		sOn.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, p, nil))
+		if w.Code != http.StatusOK || w.Body.String() != "kb:"+p {
+			t.Errorf("GET %s: status=%d body=%q", p, w.Code, w.Body.String())
+		}
+	}
+}

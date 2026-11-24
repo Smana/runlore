@@ -570,6 +570,11 @@ func RunServe(version string, args []string) error {
 		acts.MCP = h
 		log.Info("kb mcp enabled", "endpoint", "/mcp")
 	}
+	// The read-only KB HTML explorer at /kb, behind the same nil check (typed-nil) as above.
+	if h := BuildKBUIHandler(cfg, cat, ledger, log); h != nil {
+		acts.KBUI = h
+		log.Info("kb ui enabled", "endpoint", "/kb")
+	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds
 	// with replicaCount>1) and the Service may route a webhook to any of them —
