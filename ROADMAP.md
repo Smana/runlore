@@ -14,28 +14,18 @@ eval-tested versus what is merely functional — is in
 
 ## Now
 
-Model-provider robustness, plus one security hardening. These are the things that make
-RunLore fail badly today, and they are what a new adopter hits first.
+Model-provider robustness and eval reporting. These are the things that make RunLore fail badly
+today, and they are what a new adopter hits first.
 
 | Item | Why it matters |
 |---|---|
-| [Gemini 3.x is unusable](https://github.com/Smana/runlore/issues/392) — the client omits `thought_signature` on function-call parts, so investigations fail on turn 2 | One of three advertised model providers is broken end-to-end |
 | [glm-4.6 stalls on forced `tool_choice`](https://github.com/Smana/runlore/issues/391), silently degrading verify, recall reranking and the eval judge | Silent degradation of the safety passes is worse than a loud failure |
 | [Model-comparison report publishes vacuous columns](https://github.com/Smana/runlore/issues/394) when cases lack `ground_truth` | The published eval is a trust artifact; it must not overstate what it measured |
-| [Wrap untrusted tool outputs in an explicit delimiter](https://github.com/Smana/runlore/issues/362) (project-wide) | Prompt-injection hardening on the boundary where cluster data enters the model |
 
 ## Next
 
-Widening what RunLore can plug into **without requiring Go**, and making recall scale with
-the knowledge base.
+Making recall scale with the knowledge base.
 
-- **Templated webhook source** — wire Grafana, Datadog and similar alert sources by config
-  alone, no new Go provider per vendor.
-- **Templated notifier** — the same idea on the delivery side (Teams, Discord…), via Go
-  templates rather than a new notifier type each time.
-- **Persisted vector cache + incremental indexing** — path-keyed document IDs and a cache
-  invalidated by model and dimension, so a growing catalog does not mean re-embedding
-  everything on reload.
 - **Graduating hybrid recall out of `EXPERIMENTAL`** — the criteria are already written down
   and public in
   [Configuration](https://runlore.io/docs/configuration/configuration/); it graduates when a
@@ -49,8 +39,6 @@ Direction, not commitment — these may change shape entirely or never be built.
 - **Multi-KB federation** — *design only*, deliberately. A merged index with per-source
   weights and a single writable KB. It carries open questions and an explicit "when NOT to
   build this" gate, and it stays a design until someone has the problem for real.
-- **Hot-path benchmarks** — catalog reload, recall query, ledger replay, ingest storm.
-  Hermetic, and deliberately not in the PR gate.
 - **The `auto` autonomy rung** — experimental, frozen, and not recommended on real clusters.
   It stays off by default. The supported posture remains read-only → `suggest` → `approve`,
   with a human in the loop. This will not be unfrozen quietly.

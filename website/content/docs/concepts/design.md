@@ -299,20 +299,13 @@ none of this was a retrofit.
 
 ## 7. Provider abstraction
 
-Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
+Interfaces live in `internal/providers/providers.go` (`GitOpsProvider`, `MetricsProvider`,
+`LogsProvider`, `NetworkProvider`, `CloudProvider`, `ModelProvider`, `Notifier`, `IssueProvider`).
+The single maintained list of shipped backends — triggers, LLMs, data sources, notifications, and
+forges — lives in **[Integrations]({{< relref "/docs/integrations/_index.md" >}})** and is guarded
+against the runtime registries in CI.
 
-| Provider | Interface | Impls now | Later |
-|---|---|---|---|
-| GitOps | `GitOpsProvider` | **Flux**, **ArgoCD** | — |
-| Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
-| Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
-| Network | `NetworkProvider` | **Cilium Hubble**, **AWS VPC Flow Logs**, **GCP Firewall Logs** (pluggable, CNI-agnostic; none default-on) | Azure NSG Flow Logs; CNI-agnostic eBPF (Retina) |
-| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health), **GCP¹** (Cloud Audit Logs what-changed + GKE/MIG/Compute health, Workload Identity direct principal binding) | Azure via native SDKs; Steampipe/cloud-MCP optional |
-| Model | `ModelProvider` | **Anthropic**, **Gemini**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
-| Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
-| Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
-
-> ¹ **GCP starts and authenticates on live GKE; its lenses' responses are still unobserved.**
+> **GCP starts and authenticates on live GKE; its lenses' responses are still unobserved.**
 > A first run on GKE Standard 1.35.6 with self-managed Cilium
 > ([#562](https://github.com/Smana/runlore/issues/562)) confirmed three-tier identity resolution
 > (the metadata server answered, so tier 3 contributed nothing) and that a Workload Identity
@@ -482,30 +475,9 @@ metrics/logs → posts a confidence-scored RCA + suggested rollback to chat (Sla
 
 ## 13. Repo layout
 
-```
-cmd/lore/                      CLI / agent entrypoint
-internal/
-  config/                      config + auto-discovery of providers
-  investigate/                 the ReAct investigation loop + output contract
-  whatchanged/                 revision history + go-git diffs → []Change (the spine)
-  catalog/                     syncer + local mirror + bleve BM25 (+ opt-in vector) index + kb_search
-  curator/                     confidence-routed Issue/PR crystallization → OKF entries
-  curate/                      Phase-2 backlog groomer (dedup, lifecycle, retirement sweeps)
-  outcome/                     outcome ledger — Beta-posterior decay over resolve/vote counts
-  audit/                       append-only decision/tool-call log
-  model/                       ModelProvider impls (anthropic, gemini, openai-compatible)
-  notify/                      Notifier impls (slack, matrix; pagerduty/incident.io later)
-  providers/
-    providers.go               the interfaces + the Change model (the contract)
-    gitops/{flux,argocd}/      GitOpsProvider impls
-    metrics/                   MetricsProvider (PromQL: vm | prometheus)
-    logs/victorialogs/         LogsProvider
-    network/hubble/            NetworkProvider
-    cloud/{aws,gcp,azure}/     CloudProvider — native SDKs, Phase 2+ (Steampipe/MCP optional)
-deploy/helm/runlore/           in-cluster chart (Phase 2)
-examples/runbooks/             seed OKF catalog (ships as default knowledge)
-docs/                          design.md, learning-loop.md, getting-started.md, … (see the Docs index)
-```
+The live, grouped package layout — entry/wiring, ingress, investigation, providers, knowledge,
+delivery, safety/ops, guards, and non-Go assets — is maintained in
+[`AGENTS.md#layout`](https://github.com/Smana/runlore/blob/main/AGENTS.md#layout).
 
 ## 14. Open questions & risks
 
