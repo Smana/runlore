@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -27,14 +28,16 @@ For EACH proposed root cause, judge it ONLY on the evidence given:
 - keep — backed by concrete, causal evidence (e.g. the change was read AND matches the observed
   failure, or a logged error directly explains it).
 
-Groundedness: each cited piece of evidence must trace to a tool result in the transcript excerpt
-below. If a root cause's evidence cannot be found in the transcript, treat it as unverified — reject
-or downgrade it. Absence of a tool result is not itself proof against a cause (the excerpt is
-bounded and may omit some results), so weigh it alongside the other evidence rather than rejecting
-solely on a missing line.
+Groundedness: each cited piece of evidence is numbered [0], [1], ... and must trace to a tool result
+in the transcript excerpt below. If a root cause's evidence cannot be found in the transcript, treat
+it as unverified — reject or downgrade it. Absence of a tool result is not itself proof against a
+cause (the excerpt is bounded and may omit some results), so weigh it alongside the other evidence
+rather than rejecting solely on a missing line. For each kept or downgraded root cause, list in
+ungrounded_evidence the 0-based indices of any cited evidence items that do not trace to the tool
+transcript excerpt (empty array when all cited items trace).
 
-Call submit_verdicts once: one verdict per root cause by index, with a calibrated confidence and a
-short reason.` + "\n\n" + untrusted.SystemNotice
+Call submit_verdicts once: one verdict per root cause by index, with a calibrated confidence,
+ungrounded_evidence indices, and a short reason.` + "\n\n" + untrusted.SystemNotice
 
 const submitVerdictsName = "submit_verdicts"
 
@@ -45,15 +48,17 @@ func submitVerdictsSpec() providers.ToolSpec {
 		Description: "Record your adversarial verdict on each proposed root cause.",
 		Schema: `{"type":"object","properties":{"verdicts":{"type":"array","items":{"type":"object","properties":` +
 			`{"index":{"type":"integer"},"verdict":{"type":"string","enum":["keep","downgrade","reject"]},` +
-			`"confidence":{"type":"number"},"reason":{"type":"string"}},"required":["index","verdict"]}}},"required":["verdicts"]}`,
+			`"confidence":{"type":"number"},"reason":{"type":"string"},` +
+			`"ungrounded_evidence":{"type":"array","items":{"type":"integer"}}},"required":["index","verdict"]}}},"required":["verdicts"]}`,
 	}
 }
 
 type verdict struct {
-	Index      int     `json:"index"`
-	Verdict    string  `json:"verdict"`
-	Confidence float64 `json:"confidence"`
-	Reason     string  `json:"reason"`
+	Index              int     `json:"index"`
+	Verdict            string  `json:"verdict"`
+	Confidence         float64 `json:"confidence"`
+	Reason             string  `json:"reason"`
+	UngroundedEvidence []int   `json:"ungrounded_evidence"`
 }
 
 func parseVerdicts(args string) ([]verdict, error) {
@@ -166,7 +171,7 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 			"title", req.Title, "verdicts", len(verds), "root_causes", len(inv.RootCauses))
 		return inv, false
 	}
-	return applyVerdicts(li, req, inv, verds), true
+	return applyVerdicts(li, req, inv, verds, transcriptExcerpt(transcript) != ""), true
 }
 
 // applyVerdicts rewrites the investigation per the review: rejected root causes
@@ -175,7 +180,7 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 // equal or LOWER it, never raise. So a verdict's confidence is applied as a
 // monotonic floor (min with the score the hypothesis entered with), both
 // per-hypothesis and for the recomputed overall confidence.
-func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigation, verds []verdict) providers.Investigation {
+func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigation, verds []verdict, hasTranscript bool) providers.Investigation {
 	byIndex := map[int]verdict{}
 	for _, v := range verds {
 		byIndex[v.Index] = v
@@ -198,12 +203,18 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 			if ok && v.Confidence > 0 {
 				rc.Confidence = min(rc.Confidence, clamp01(v.Confidence))
 			}
+			if ok && hasTranscript && len(rc.Evidence) > 0 {
+				rc.Grounding = buildGrounding(v.UngroundedEvidence, len(rc.Evidence))
+			}
 			kept = append(kept, rc)
 		case verd == "downgrade":
 			if v.Confidence > 0 {
 				rc.Confidence = min(rc.Confidence, clamp01(v.Confidence))
 			} else {
 				rc.Confidence /= 2
+			}
+			if hasTranscript && len(rc.Evidence) > 0 {
+				rc.Grounding = buildGrounding(v.UngroundedEvidence, len(rc.Evidence))
 			}
 			kept = append(kept, rc)
 		case verd == "reject":
@@ -230,10 +241,20 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 		inv.Verdict = providers.VerdictInconclusive
 	}
 	var maxc float64
+	var tracedSum, totalSum int
 	for _, rc := range kept {
 		if rc.Confidence > maxc {
 			maxc = rc.Confidence
 		}
+		if rc.Grounding != nil {
+			tracedSum += rc.Grounding.Traced
+			totalSum += rc.Grounding.Total
+		}
+	}
+	if totalSum > 0 {
+		inv.Grounding = &providers.EvidenceGrounding{Traced: tracedSum, Total: totalSum}
+	} else {
+		inv.Grounding = nil
 	}
 	// Never raise the overall above what it was before the review.
 	inv.Confidence = min(preVerifyOverall, maxc)
@@ -244,6 +265,37 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 		inv.Actions = nil
 	}
 	return inv
+}
+
+// buildGrounding constructs a server-validated EvidenceGrounding from the
+// reviewer's reported ungrounded indices, clamping to [0, total) and
+// deduplicating/sorting so hallucinated indices can never push Traced negative.
+func buildGrounding(raw []int, total int) *providers.EvidenceGrounding {
+	ungrounded := clampUngrounded(raw, total)
+	return &providers.EvidenceGrounding{
+		Traced:            total - len(ungrounded),
+		Total:             total,
+		UngroundedIndices: ungrounded,
+	}
+}
+
+// clampUngrounded filters raw to valid indices in [0, total), sorts, and
+// deduplicates them. Returns nil when no valid ungrounded indices remain.
+func clampUngrounded(raw []int, total int) []int {
+	if len(raw) == 0 || total <= 0 {
+		return nil
+	}
+	valid := make([]int, 0, len(raw))
+	for _, idx := range raw {
+		if idx >= 0 && idx < total {
+			valid = append(valid, idx)
+		}
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	slices.Sort(valid)
+	return slices.Compact(valid)
 }
 
 // renderForReview presents the incident + ranked root causes (with their evidence)
@@ -260,8 +312,8 @@ func renderForReview(req Request, inv providers.Investigation, transcript []prov
 		if rc.ChangeRef != "" {
 			fmt.Fprintf(&causes, "    change_ref: %s\n", rc.ChangeRef)
 		}
-		for _, e := range rc.Evidence {
-			fmt.Fprintf(&causes, "    - %s\n", e)
+		for j, e := range rc.Evidence {
+			fmt.Fprintf(&causes, "    [%d] %s\n", j, e)
 		}
 	}
 	b.WriteString(untrusted.Wrap("proposed_findings", strings.TrimSuffix(causes.String(), "\n")))

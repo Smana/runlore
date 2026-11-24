@@ -695,6 +695,9 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	if !stated {
 		confText = fmt.Sprintf("%s *%s*", emoji, confidenceText(level, pct, stated))
 	}
+	if badge := groundingBadge(inv); badge != "" {
+		confText += " · " + badge
+	}
 	if note := recallConfidenceNote(inv, pct); note != "" {
 		confText += "\n_" + note + "_"
 	}
@@ -758,7 +761,7 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		rc := inv.RootCauses[0]
 		var s strings.Builder
 		fmt.Fprintf(&s, "*Why:* %s", escapeMrkdwn(rc.Summary))
-		appendCappedBullets(&s, rc.Evidence)
+		appendCappedEvidenceBullets(&s, rc)
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 		if n := len(inv.RootCauses) - 1; n > 0 {
 			word := "hypotheses"
@@ -998,8 +1001,12 @@ func detailBlocks(inv providers.Investigation) []map[string]any {
 		if rc.ChangeRef != "" {
 			fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", escapeMrkdwn(rc.ChangeRef))
 		}
-		for _, e := range rc.Evidence {
-			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(e))
+		for j, e := range rc.Evidence {
+			line := escapeMrkdwn(e)
+			if rc.Grounding.IsUngrounded(j) {
+				line += " *(unverified)*"
+			}
+			fmt.Fprintf(&s, "\n• %s", line)
 		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
@@ -1035,6 +1042,23 @@ func appendCappedBullets(s *strings.Builder, items []string) {
 			return
 		}
 		fmt.Fprintf(s, "\n• %s", escapeMrkdwn(it))
+	}
+}
+
+// appendCappedEvidenceBullets is appendCappedBullets for a hypothesis's evidence
+// list, appending " *(unverified)*" to any bullet flagged ungrounded by verify.
+// Byte-identical to appendCappedBullets when rc.Grounding == nil.
+func appendCappedEvidenceBullets(s *strings.Builder, rc providers.Hypothesis) {
+	for i, it := range rc.Evidence {
+		if i >= summaryBullets {
+			fmt.Fprintf(s, "\n• _…%d more_", len(rc.Evidence)-i)
+			return
+		}
+		line := escapeMrkdwn(it)
+		if rc.Grounding.IsUngrounded(i) {
+			line += " *(unverified)*"
+		}
+		fmt.Fprintf(s, "\n• %s", line)
 	}
 }
 

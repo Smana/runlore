@@ -638,3 +638,34 @@ func TestMeetsBarIsCuratesFirstTwoGates(t *testing.T) {
 		}
 	}
 }
+
+func TestDraftKBEntryGrounding(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "Harbor OOM",
+		Confidence: 0.85,
+		Verified:   true,
+		RootCauses: []providers.Hypothesis{{
+			Summary:         "memory limit too low",
+			Confidence:      0.85,
+			Evidence:        []string{"OOMKilled exit 137", "unverified heap estimate"},
+			SuggestedAction: "raise memory limit",
+		}},
+	}
+
+	// Nil grounding: no (unverified) markers.
+	plain := draftKBEntry(inv)
+	if strings.Contains(plain.Body, "*(unverified)*") {
+		t.Fatalf("nil grounding must not annotate bullets:\n%s", plain.Body)
+	}
+
+	// Partial grounding: ungrounded bullet gets *(unverified)*.
+	inv.Grounding = &providers.EvidenceGrounding{Traced: 1, Total: 2}
+	inv.RootCauses[0].Grounding = &providers.EvidenceGrounding{Traced: 1, Total: 2, UngroundedIndices: []int{1}}
+	marked := draftKBEntry(inv)
+	if !strings.Contains(marked.Body, "- unverified heap estimate *(unverified)*\n") {
+		t.Fatalf("ungrounded bullet missing *(unverified)* in KB draft:\n%s", marked.Body)
+	}
+	if strings.Contains(marked.Body, "- OOMKilled exit 137 *(unverified)*") {
+		t.Fatalf("grounded bullet must not be tagged in KB draft:\n%s", marked.Body)
+	}
+}

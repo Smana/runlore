@@ -422,6 +422,10 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// lets a dashboard read a recall's cost and a full loop's off the same instrument
 		// instead of differencing one out of a total that already contains it.
 		li.recordUsageMetrics(ctx, inv.Usage, result)
+		if li.Metrics != nil && inv.Grounding != nil && inv.Grounding.Total > 0 {
+			li.Metrics.InvestigationGroundingRatio.Record(ctx, inv.Grounding.Ratio(),
+				metric.WithAttributes(attribute.Bool("recalled", inv.Recalled)))
+		}
 		li.deliver(req, inv)
 	}
 	defer func() {

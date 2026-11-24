@@ -79,16 +79,17 @@ type Metrics struct {
 	RecallOutcome                  metric.Int64Counter     // resolved incidents whose open was a recall (label: result)
 	IncidentResolutionSeconds      metric.Float64Histogram // open→resolve duration, seconds
 
-	InvestigationDuration   metric.Float64Histogram // wall-clock per investigation (label: result)
-	InvestigationsCompleted metric.Int64Counter     // investigations finished (label: result)
-	ToolCalls               metric.Int64Counter     // investigation tool calls (label: tool, result)
-	ToolCallDuration        metric.Float64Histogram // tool call latency, seconds (label: tool)
-	ModelRequests           metric.Int64Counter     // LLM completion requests (label: provider, result)
-	ModelRequestDuration    metric.Float64Histogram // LLM completion latency, seconds (label: provider)
-	ModelResponsesTruncated metric.Int64Counter     // LLM completions cut off at the output-token ceiling (label: provider)
-	ModelInputTokens        metric.Int64Counter     // total input tokens across LLM requests (label: provider)
-	ModelCachedInputTokens  metric.Int64Counter     // input tokens served from cache (label: provider)
-	Curations               metric.Int64Counter     // curation outcomes (label: kind, result)
+	InvestigationDuration       metric.Float64Histogram // wall-clock per investigation (label: result)
+	InvestigationGroundingRatio metric.Float64Histogram // fraction of cited evidence traced to tool output during verify (0-1; label: recalled)
+	InvestigationsCompleted     metric.Int64Counter     // investigations finished (label: result)
+	ToolCalls                   metric.Int64Counter     // investigation tool calls (label: tool, result)
+	ToolCallDuration            metric.Float64Histogram // tool call latency, seconds (label: tool)
+	ModelRequests               metric.Int64Counter     // LLM completion requests (label: provider, result)
+	ModelRequestDuration        metric.Float64Histogram // LLM completion latency, seconds (label: provider)
+	ModelResponsesTruncated     metric.Int64Counter     // LLM completions cut off at the output-token ceiling (label: provider)
+	ModelInputTokens            metric.Int64Counter     // total input tokens across LLM requests (label: provider)
+	ModelCachedInputTokens      metric.Int64Counter     // input tokens served from cache (label: provider)
+	Curations                   metric.Int64Counter     // curation outcomes (label: kind, result)
 	// KBDraftDefects counts KB entries RunLore's own draft-time report found a
 	// defect in and FILED ANYWAY (label: defect). It is the only number that tells
 	// a healthy catalog apart from one silently filling with entries recall can
@@ -197,16 +198,17 @@ func NewMetrics() *Metrics {
 		RecallOutcome:                  ctr("recall_outcome_total", "resolved incidents whose answer was a recall (label: result)"),
 		IncidentResolutionSeconds:      histF("incident_resolution_seconds", "open→resolve duration in seconds"),
 
-		InvestigationDuration:   histF("investigation_duration_seconds", "wall-clock duration of an investigation (label: result)"),
-		InvestigationsCompleted: ctr("investigations_completed_total", "investigations that finished (label: result)"),
-		ToolCalls:               ctr("tool_calls_total", "investigation tool calls (label: tool, result)"),
-		ToolCallDuration:        histF("tool_call_duration_seconds", "investigation tool call latency in seconds (label: tool)"),
-		ModelRequests:           ctr("model_requests_total", "LLM completion requests (label: provider, result)"),
-		ModelRequestDuration:    histF("model_request_duration_seconds", "LLM completion latency in seconds (label: provider)"),
-		ModelResponsesTruncated: ctr("model_responses_truncated_total", "LLM completions cut off at the output-token ceiling — the provider stop/finish reason indicated truncation (label: provider)"),
-		ModelInputTokens:        ctr("model_input_tokens_total", "total LLM input tokens, including cached (label: provider)"),
-		ModelCachedInputTokens:  ctr("model_cached_input_tokens_total", "LLM input tokens served from cache (label: provider)"),
-		Curations:               ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
+		InvestigationDuration:       histF("investigation_duration_seconds", "wall-clock duration of an investigation (label: result)"),
+		InvestigationGroundingRatio: histF("investigation_grounding_ratio", "fraction of cited evidence bullets traced to tool output during verify (0-1; label: recalled)"),
+		InvestigationsCompleted:     ctr("investigations_completed_total", "investigations that finished (label: result)"),
+		ToolCalls:                   ctr("tool_calls_total", "investigation tool calls (label: tool, result)"),
+		ToolCallDuration:            histF("tool_call_duration_seconds", "investigation tool call latency in seconds (label: tool)"),
+		ModelRequests:               ctr("model_requests_total", "LLM completion requests (label: provider, result)"),
+		ModelRequestDuration:        histF("model_request_duration_seconds", "LLM completion latency in seconds (label: provider)"),
+		ModelResponsesTruncated:     ctr("model_responses_truncated_total", "LLM completions cut off at the output-token ceiling — the provider stop/finish reason indicated truncation (label: provider)"),
+		ModelInputTokens:            ctr("model_input_tokens_total", "total LLM input tokens, including cached (label: provider)"),
+		ModelCachedInputTokens:      ctr("model_cached_input_tokens_total", "LLM input tokens served from cache (label: provider)"),
+		Curations:                   ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
 		KBDraftDefects: ctr("kb_draft_defects_total", "KB entries filed with a defect found at draft time, from either entry writer — "+
 			"counted once per entry per defect (label: defect — \"unrecallable_resource\": the recall index is not shaped namespace/name, "+
 			"so recall can never match the entry; \"merge_gate\": the draft fails `lore validate-kb`, so its PR cannot merge)"),

@@ -1259,3 +1259,61 @@ func TestHeldOutCaseDiscriminates(t *testing.T) {
 		})
 	}
 }
+
+func TestScoreGrounding(t *testing.T) {
+	baseInv := providers.Investigation{
+		Title:      "Harbor OOMKilled",
+		Confidence: 0.85,
+		RootCauses: []providers.Hypothesis{{Summary: "harbor-db OOMKilled"}},
+	}
+
+	t.Run("records grounding and default min_grounding=0 never gates", func(t *testing.T) {
+		inv := baseInv
+		inv.Grounding = &providers.EvidenceGrounding{Traced: 0, Total: 2}
+		res := Score("c1", inv, Expected{MustContain: []string{"oomkilled"}})
+		if !res.Pass {
+			t.Fatalf("default MinGrounding=0 must not fail on 0/2 grounding: %+v", res)
+		}
+		if res.GroundingTraced != 0 || res.GroundingTotal != 2 {
+			t.Fatalf("grounding counts = %d/%d, want 0/2", res.GroundingTraced, res.GroundingTotal)
+		}
+		r, ok := res.GroundingRatio()
+		if !ok || r != 0 {
+			t.Fatalf("GroundingRatio() = (%v, %v), want (0, true)", r, ok)
+		}
+	})
+
+	t.Run("min_grounding passes at threshold", func(t *testing.T) {
+		inv := baseInv
+		inv.Grounding = &providers.EvidenceGrounding{Traced: 3, Total: 4}
+		res := Score("c2", inv, Expected{MustContain: []string{"oomkilled"}, MinGrounding: 0.75})
+		if !res.Pass {
+			t.Fatalf("3/4 (0.75) should pass MinGrounding=0.75, got missing=%v", res.Missing)
+		}
+	})
+
+	t.Run("min_grounding fails below threshold", func(t *testing.T) {
+		inv := baseInv
+		inv.Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 4}
+		res := Score("c3", inv, Expected{MustContain: []string{"oomkilled"}, MinGrounding: 0.75})
+		if res.Pass {
+			t.Fatalf("2/4 (0.50) must fail MinGrounding=0.75")
+		}
+		if !slices.Contains(res.Missing, "grounding 0.50 < 0.75") {
+			t.Fatalf("Missing = %v, want \"grounding 0.50 < 0.75\"", res.Missing)
+		}
+	})
+
+	t.Run("min_grounding fails when unmeasured", func(t *testing.T) {
+		res := Score("c4", baseInv, Expected{MustContain: []string{"oomkilled"}, MinGrounding: 0.5})
+		if res.Pass {
+			t.Fatalf("unmeasured grounding must fail MinGrounding=0.5")
+		}
+		if _, ok := res.GroundingRatio(); ok {
+			t.Fatalf("expected GroundingRatio ok=false when unmeasured")
+		}
+		if len(res.Missing) == 0 || !strings.Contains(res.Missing[0], "grounding") {
+			t.Fatalf("Missing = %v, want grounding failure note", res.Missing)
+		}
+	})
+}
