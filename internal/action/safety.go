@@ -34,3 +34,10 @@ func knownOp(op string) bool {
 	_, ok := providers.Ops[op]
 	return ok
 }
+
+// approveOnlyOp reports whether op is permanently restricted to human approval
+// and hard-denied under actions.mode=auto.
+func approveOnlyOp(op string) bool {
+	meta, ok := providers.Ops[op]
+	return ok && meta.ApproveOnly
+}

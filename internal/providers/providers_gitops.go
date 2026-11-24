@@ -49,39 +49,66 @@ type FailureEvent struct {
 	When     time.Time
 }
 
+// RevertTarget identifies a single server-observed GitOps commit to revert via
+// a Draft PR/MR. Strictly server-populated from observedChanges (what_changed
+// only) — never model-authored.
+type RevertTarget struct {
+	Repo      string `json:"repo"`             // normalized owner/repo or group/subgroup/project
+	RepoURL   string `json:"repo_url"`         // normalized https:// repo URL
+	CommitSHA string `json:"commit_sha"`       // full 40-char observed GitOps commit SHA
+	Branch    string `json:"branch,omitempty"` // default branch resolved at execution time
+
+	// Server-populated incident context rendered into the Draft PR/MR body
+	// (redacted before writing to the forge).
+	IncidentTitle   string   `json:"incident_title,omitempty"`
+	IncidentSummary string   `json:"incident_summary,omitempty"`
+	Evidence        []string `json:"evidence,omitempty"`
+	ProvenanceURL   string   `json:"provenance_url,omitempty"`
+	AuditID         string   `json:"audit_id,omitempty"`
+
+	// ResultURL is stamped by the revert_pr executor with the opened (or reused)
+	// Draft PR/MR URL.
+	ResultURL string `json:"result_url,omitempty"`
+}
+
 // Action describes a remediation the agent can propose and (at the upper autonomy
 // rungs, after approval) execute. Op names a concrete, reversible operation an
 // Executor can run; an empty Op is a suggestion only.
 type Action struct {
 	Name        string
 	Description string
-	Op          string // executable operation: suspend | resume | reconcile (empty = suggestion only)
+	Op          string // executable operation: suspend | resume | reconcile | revert_pr (empty = suggestion only)
 	Target      Workload
-	Mutating    bool   // true for any cluster write
-	Reversible  bool   // a rollback/suspend is reversible; a delete may not be
-	BlastRadius int    // number of workloads affected
-	ApprovalID  string // runtime: set when registered for approval; drives Slack approve/reject buttons
+	Revert      *RevertTarget `json:"revert,omitempty"` // server-populated target for op=="revert_pr"
+	ChangeRef   string        `json:"change_ref,omitempty"`
+	Mutating    bool          // true for any cluster write
+	Reversible  bool          // a rollback/suspend is reversible; a delete may not be
+	BlastRadius int           // number of workloads affected
+	ApprovalID  string        // runtime: set when registered for approval; drives Slack approve/reject buttons
 }
 
 // OpSafety is the server-derived safety metadata for an executable action op.
 type OpSafety struct {
-	Reversible bool
-	Blast      int
+	Reversible  bool
+	Blast       int
+	ApproveOnly bool // hard-denied under actions.mode=auto regardless of config
 }
 
 // Ops is the canonical registry of executable remediation operations and their
 // server-authoritative safety metadata. The action gate (internal/action) derives
 // reversibility/blast from this — never from model output — and the per-engine
-// executors (internal/executor/flux, internal/executor/argocd) run only ops
-// listed here. Op names are engine-neutral; the executor for the configured
-// gitops.engine translates them (Flux: spec.suspend / requestedAt annotation;
-// Argo CD: pause/restore spec.syncPolicy.automated / refresh annotation). One
-// entry per op is the single source of truth that keeps the gate and the
-// executors from drifting.
+// executors (internal/executor/flux, internal/executor/argocd,
+// internal/executor/revertpr) run only ops listed here. Op names are
+// engine-neutral; the executor for the configured gitops.engine translates them
+// (Flux: spec.suspend / requestedAt annotation; Argo CD: pause/restore
+// spec.syncPolicy.automated / refresh annotation; revert_pr: deterministic
+// Draft revert PR/MR). One entry per op is the single source of truth that keeps
+// the gate and the executors from drifting.
 var Ops = map[string]OpSafety{
 	"suspend":   {Reversible: true, Blast: 1},
 	"resume":    {Reversible: true, Blast: 1},
 	"reconcile": {Reversible: true, Blast: 1},
+	"revert_pr": {Reversible: true, Blast: 2, ApproveOnly: true},
 }
 
 // TimeWindow is a [Start, End] interval.

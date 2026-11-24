@@ -13,6 +13,7 @@ package action
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
@@ -62,11 +63,17 @@ func (p *Policy) violation(a providers.Action) string {
 	if executable && !knownOp(a.Op) {
 		return "unknown op " + a.Op
 	}
+	if executable && approveOnlyOp(a.Op) && p.cfg.Mode == config.ActionAuto {
+		return "op " + a.Op + " is approve-only (hard-blocked from auto)"
+	}
 	if allow.ReversibleOnly && !a.Reversible {
 		return "irreversible; reversible_only is set"
 	}
 	if allow.MaxBlastRadius > 0 && a.BlastRadius > allow.MaxBlastRadius {
 		return fmt.Sprintf("blast radius %d exceeds max %d", a.BlastRadius, allow.MaxBlastRadius)
+	}
+	if a.Op == "revert_pr" {
+		return p.revertPRViolation(a)
 	}
 	if len(allow.Kinds) > 0 && a.Target.Kind != "" && !slices.Contains(allow.Kinds, a.Target.Kind) {
 		return "kind " + a.Target.Kind + " not in allowed kinds"
@@ -79,6 +86,32 @@ func (p *Policy) violation(a providers.Action) string {
 		return "executable action needs a target kind"
 	}
 	return p.namespaceViolation(a.Target.Namespace)
+}
+
+func (p *Policy) revertPRViolation(a providers.Action) string {
+	if !p.cfg.RevertPR.Enabled {
+		return "actions.revert_pr is not enabled"
+	}
+	if a.Revert == nil || strings.TrimSpace(a.Revert.CommitSHA) == "" || strings.TrimSpace(a.Revert.Repo) == "" {
+		return "revert_pr requires a server-resolved revert target"
+	}
+	if !repoAllowed(a.Revert.Repo, p.cfg.RevertPR.AllowedRepos) {
+		return "repo " + a.Revert.Repo + " not in actions.revert_pr.allowed_repos"
+	}
+	return ""
+}
+
+func repoAllowed(repo string, allowed []string) bool {
+	target := strings.ToLower(strings.TrimSpace(repo))
+	if target == "" {
+		return false
+	}
+	for _, entry := range allowed {
+		if strings.ToLower(strings.TrimSpace(entry)) == target {
+			return true
+		}
+	}
+	return false
 }
 
 // namespaceViolation enforces the target-namespace allow/deny lists. A protected

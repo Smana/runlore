@@ -292,10 +292,21 @@ none of this was a retrofit.
 >   advises, a human merges the revert" is the correct division of labor — and the upside is
 >   modest against the outage risk of a wrong rollback on a sub-50%-RCA baseline.
 >
-> If the loop is ever closed, the GitOps-correct form is a **Git-revert PR** (reuse the
-> curator/forge path) — in sync with Git, inherently reversible, reviewed — **not** a cluster
-> patch. Until then, remediation stays read-only / propose-and-approve, and the autonomy ladder's
-> executable vocabulary remains the three reversible Flux ops above.
+> If the loop is ever closed, the GitOps-correct form is a **Git-revert PR** — in sync with Git,
+> inherently reversible, reviewed — **not** a cluster patch.
+>
+> **Update (2026-11-24) — `revert_pr` shipped (approve-only, Draft PR/MR).** RunLore now ships
+> `revert_pr` as a fourth canonical op with `ApproveOnly: true` (permanently hard-blocked from
+> `actions.mode: auto`). When `actions.revert_pr.enabled: true`, an operator clicking Approve in
+> Slack or via `POST /actions/:id/approve` runs a pure-Go deterministic revert executor
+> (`internal/executor/revertpr`, zero `git` CLI dependency) over GitHub or GitLab APIs to open a
+> **Draft** revert PR/MR for a single server-observed GitOps commit (`what_changed` only, never
+> `source_repos`). The executor fails closed on merge commits, root commits, >50 changed files,
+> any file matching built-in (`flux-system`, `kube-system`, `.github/**`, `.gitlab-ci.yml`,
+> `.gitlab/**`) or operator `protected_paths`, overlapping later edits between the commit and
+> `HEAD`, empty `allowed_repos`, or missing credentials (dedicated `actions.revert_pr.forge`
+> credentials required unless `reuse_forge_credentials: true` is opted in explicitly). Human
+> review and merge on the forge is always required.
 
 ## 7. Provider abstraction
 

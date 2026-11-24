@@ -363,6 +363,52 @@ type RelatedEntry struct {
 // Ref is a URL handle to a created issue or PR.
 type Ref struct{ URL string }
 
+// CommitFile describes one file modified by a single Git commit.
+type CommitFile struct {
+	Path         string
+	Status       string // "added" | "modified" | "removed" | "renamed"
+	PreviousPath string // populated when Status == "renamed"
+}
+
+// CommitDetail describes a single Git commit fetched from a forge API.
+type CommitDetail struct {
+	SHA     string
+	Parents []string
+	Message string
+	Files   []CommitFile
+}
+
+// RevertFileAction describes one atomic file mutation in a deterministic revert commit.
+type RevertFileAction struct {
+	Path    string
+	Delete  bool   // true => delete Path; false => restore Content at Path
+	Content []byte // exact parent blob bytes when Delete is false
+}
+
+// RevertPRRequest carries the parameters to atomically create a revert branch,
+// single inverse commit, and Draft PR/MR on a forge.
+type RevertPRRequest struct {
+	Repo          string
+	BaseBranch    string
+	BaseSHA       string
+	HeadBranch    string
+	CommitMessage string
+	Title         string
+	Body          string
+	Files         []RevertFileAction
+}
+
+// RevertForge is the minimal forge API surface required by the pure-Go
+// deterministic revert_pr executor. Implemented by both GitHub and GitLab.
+type RevertForge interface {
+	DefaultBranch(ctx context.Context, repo string) (branch, headSHA string, err error)
+	CommitDetail(ctx context.Context, repo, sha string) (CommitDetail, error)
+	CompareChangedFiles(ctx context.Context, repo, baseSHA, headSHA string) ([]string, error)
+	FileBlob(ctx context.Context, repo, ref, path string) ([]byte, bool, error)
+	FindOpenPRByHead(ctx context.Context, repo, headBranch string) (url string, number int, found bool, err error)
+	CreateRevertDraftPR(ctx context.Context, req RevertPRRequest) (url string, number int, err error)
+}
+
 // PossibleDuplicateHeading opens the section a forge writes into a KB PR's body when a
 // dedup decider flags the finding (KBEntry.SuspectedDuplicate). The curate Queue reads it
 // as a refusal, so a PR carrying it never gets ready-to-merge on evidence alone.

@@ -3,12 +3,18 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/executor/revertpr"
+	github "github.com/Smana/runlore/internal/forge/github"
+	gitlab "github.com/Smana/runlore/internal/forge/gitlab"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // BuildAuditor opens the append-only action audit log when configured, else a
@@ -88,4 +94,106 @@ func BuildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 	// surface that to the operator, who resumes via the authenticated /actions/resume.
 	log.Warn("rung-3 auto starts PAUSED (kill-switch engaged) — POST /actions/resume to begin auto-execution")
 	return au
+}
+
+// CompositeExecutor dispatches revert_pr actions to the pure-Go revert executor
+// and cluster GitOps ops (suspend/resume/reconcile) to the Flux/Argo executor.
+type CompositeExecutor struct {
+	Cluster action.Executor
+	Revert  action.Executor
+}
+
+// Execute routes a to the appropriate backend executor, failing closed when the
+// required backend is unavailable.
+func (c CompositeExecutor) Execute(ctx context.Context, a providers.Action) error {
+	if a.Op == "revert_pr" {
+		if c.Revert == nil {
+			return fmt.Errorf("revert_pr executor is not configured")
+		}
+		return c.Revert.Execute(ctx, a)
+	}
+	if c.Cluster == nil {
+		return fmt.Errorf("cluster action executor is not configured for op %q", a.Op)
+	}
+	return c.Cluster.Execute(ctx, a)
+}
+
+// CombineExecutors composes the optional cluster executor and optional revert_pr
+// executor into a single action.Executor (or nil when neither is available).
+func CombineExecutors(clusterExec, revertExec action.Executor) action.Executor {
+	if clusterExec == nil && revertExec == nil {
+		return nil
+	}
+	if revertExec == nil {
+		return clusterExec
+	}
+	return CompositeExecutor{Cluster: clusterExec, Revert: revertExec}
+}
+
+// BuildRevertForge builds the forge client for actions.revert_pr from either
+// its dedicated credential block or, when explicitly opted in via
+// reuse_forge_credentials: true, the top-level forge credentials. Returns nil
+// when revert_pr is disabled or credentials are unavailable.
+func BuildRevertForge(cfg *config.Config, log *slog.Logger) providers.RevertForge {
+	rp := cfg.Actions.RevertPR
+	if !rp.Enabled {
+		return nil
+	}
+	if rp.Forge != nil {
+		return buildRevertForgeFrom(rp.Forge.Provider, rp.Forge.GitHubAPIURL, rp.Forge.GitHubApp, rp.Forge.GitLab, log)
+	}
+	if !rp.ReuseForgeCredentials {
+		log.Warn("revert_pr disabled: no dedicated forge credentials and reuse_forge_credentials is false")
+		return nil
+	}
+	return buildRevertForgeFrom(cfg.Forge.Provider, cfg.Forge.GitHubAPIURL, cfg.Forge.GitHubApp, cfg.Forge.GitLab, log)
+}
+
+func buildRevertForgeFrom(provider, ghAPIURL string, ga config.GitHubApp, gl config.GitLab, log *slog.Logger) providers.RevertForge {
+	switch provider {
+	case "gitlab":
+		if gl.TokenEnv == "" {
+			return nil
+		}
+		tok := os.Getenv(gl.TokenEnv)
+		if tok == "" {
+			log.Warn("revert_pr gitlab auth disabled: empty token env", "env", gl.TokenEnv)
+			return nil
+		}
+		return gitlab.New(gl.BaseURL, "", "", func(context.Context) (string, error) { return tok, nil }).WithLogger(log)
+	case "", "github":
+		if ga.AppID == 0 || ga.InstallationID == 0 || ga.PrivateKeyEnv == "" {
+			return nil
+		}
+		pemData := os.Getenv(ga.PrivateKeyEnv)
+		if pemData == "" {
+			log.Warn("revert_pr github auth disabled: empty private key env", "env", ga.PrivateKeyEnv)
+			return nil
+		}
+		key, err := github.ParsePrivateKey(pemData)
+		if err != nil {
+			log.Warn("revert_pr github auth disabled: bad private key", "err", err)
+			return nil
+		}
+		tok := github.NewAppTokenSource(ghAPIURL, ga.AppID, ga.InstallationID, key).Token
+		return github.New(ghAPIURL, "", "", "", tok)
+	default:
+		log.Warn("revert_pr disabled: unknown forge provider", "provider", provider)
+		return nil
+	}
+}
+
+// BuildRevertExecutor wires the pure-Go revert_pr executor when enabled and
+// authenticated, else returns nil.
+func BuildRevertExecutor(cfg *config.Config, aud audit.Auditor, onOpened revertpr.OnOpenedFunc, log *slog.Logger) action.Executor {
+	rf := BuildRevertForge(cfg, log)
+	if rf == nil {
+		return nil
+	}
+	log.Info("revert_pr approve-only executor enabled", "allowed_repos", cfg.Actions.RevertPR.AllowedRepos)
+	return revertpr.New(rf, cfg.Actions.RevertPR.AllowedRepos, cfg.Actions.RevertPR.ProtectedPaths,
+		revertpr.WithAuditor(aud),
+		revertpr.WithLogger(log),
+		revertpr.WithOnOpened(onOpened),
+	)
 }

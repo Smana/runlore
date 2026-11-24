@@ -35,12 +35,28 @@ var Ops = map[string]OpSafety{
     "suspend":   {Reversible: true, Blast: 1},
     "resume":    {Reversible: true, Blast: 1},
     "reconcile": {Reversible: true, Blast: 1},
+    "revert_pr": {Reversible: true, Blast: 2, ApproveOnly: true},
 }
 ```
 
-Three Flux operations, all reversible, all blast-radius 1. There is no `delete`, no `apply`, no
-`exec`, and no cluster-mutating MCP tool. A model that "invents" an op proposes something the
-registry doesn't contain — the gate refuses it as `unknown op`.
+Three reversible cluster GitOps operations (`suspend`, `resume`, `reconcile`, blast-radius 1) plus
+one approve-only deterministic Git-revert operation (`revert_pr`, blast-radius 2, `ApproveOnly: true`).
+There is no `delete`, no `apply`, no `exec`, and no cluster-mutating MCP tool. A model that
+"invents" an op proposes something the registry doesn't contain — the gate refuses it as
+`unknown op`.
+
+`revert_pr` carries additional structural safety invariants:
+- **Hard-blocked from `auto`:** `ApproveOnly: true` is enforced in both `Policy.Review` and
+  `Auto.runOne` and cannot be overridden by config.
+- **Server-derived commit target:** `Action.Revert` is populated exclusively from server-observed
+  GitOps changes (`what_changed`, never `source_diff` or model-authored SHAs). Unobserved SHAs,
+  `source_repos`, and multi-commit ranges have `Op` stripped to an advisory suggestion.
+- **Pure-Go deterministic Draft PR/MR only:** `internal/executor/revertpr` never shells out to `git`
+  and never auto-merges. It fails closed on merge/root commits, >50 files, protected paths
+  (`flux-system`, `kube-system`, `.github/**`, `.gitlab-ci.yml`, `.gitlab/**`, plus operator
+  `protected_paths`), overlapping later edits on `HEAD`, or empty `allowed_repos`.
+- **Credential separation:** requires dedicated `actions.revert_pr.forge` credentials unless the
+  operator explicitly opts in with `reuse_forge_credentials: true`.
 
 ### Server-derived safety metadata
 

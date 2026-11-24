@@ -119,7 +119,7 @@ func TestOpEnumNoEmptyValue(t *testing.T) {
 	if slices.Contains(ops, "") {
 		t.Fatalf("op enum contains an empty value (Gemini rejects it): %q", ops)
 	}
-	want := []string{"reconcile", "resume", "suspend"}
+	want := []string{"reconcile", "resume", "revert_pr", "suspend"}
 	if len(ops) != len(providers.Ops) || !slices.Equal(ops, want) {
 		t.Fatalf("op enum = %q, want %q (canonical providers.Ops, sorted)", ops, want)
 	}

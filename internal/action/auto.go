@@ -97,6 +97,10 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 	case act.Op == "":
 		a.record(act, audit.DecisionSkipped, "no executable op")
 		return annotate("[auto: skipped — no executable op]")
+	case approveOnlyOp(act.Op):
+		a.log.Warn("auto hard-denies approve-only op", "op", act.Op, "target", target(act))
+		a.record(act, audit.DecisionDenied, "op "+act.Op+" is approve-only (hard-blocked from auto)")
+		return annotate("[auto: denied — approve-only op]")
 	case a.dryRun:
 		a.log.Info("auto dry-run (would execute)", "op", act.Op, "target", target(act))
 		a.record(act, audit.DecisionDryRun, "")
@@ -180,5 +184,12 @@ func (a *Auto) reserve() bool {
 }
 
 func target(a providers.Action) string {
+	if a.Op == "revert_pr" && a.Revert != nil {
+		sha := a.Revert.CommitSHA
+		if len(sha) > 12 {
+			sha = sha[:12]
+		}
+		return a.Revert.Repo + "@" + sha
+	}
 	return a.Target.Kind + "/" + a.Target.Namespace + "/" + a.Target.Name
 }
