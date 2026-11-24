@@ -31,6 +31,7 @@ Usage:
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
   lore kb show <entry> [--config <path>] [--dir <catalog>]   print one KB entry (frontmatter card + body)
+  lore kb serve [--config <path>] [--dir <catalog>] [--ledger <jsonl>] [--addr 127.0.0.1:8081]   serve the read-only KB HTML explorer locally
   lore kb import <src-dir> [--into <kb-dir>] [--dry-run] [--model]   convert existing runbooks/postmortems into OKF entries (cold-start seeding)
   lore kb resolve --pr <n> --fix <url> --verdict resolved|persisting [--merge-sha <sha>] [--evidence <file>]   record an applied fix on an entry
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification

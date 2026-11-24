@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RunLore Knowledge Base</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --surface: #f6f8fa;
+  --accent: #0969da;
+  --warn-bg: #fff8c5;
+  --warn-fg: #7d4e00;
+  --badge-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --surface: #161b22;
+    --accent: #58a6ff;
+    --warn-bg: #3b2e00;
+    --warn-fg: #f2cc60;
+    --badge-bg: #21262d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 1.5rem;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+main { max-width: 1120px; margin: 0 auto; }
+header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.75rem; }
+header h1 { margin: 0; font-size: 1.4rem; }
+header a { color: var(--fg); text-decoration: none; }
+.meta { color: var(--muted); font-size: 0.9rem; }
+form.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+form.filters input[type="search"], form.filters select, form.filters button {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 0.9rem;
+}
+form.filters input[type="search"] { flex: 1 1 240px; }
+form.filters button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+th, td { text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--surface); font-weight: 600; white-space: nowrap; }
+td a { color: var(--accent); text-decoration: none; font-weight: 500; }
+td a:hover { text-decoration: underline; }
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--badge-bg);
+  font-size: 0.78rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.badge-stale { background: var(--warn-bg); color: var(--warn-fg); margin-left: 0.25rem; }
+.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.empty { padding: 2rem; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 6px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><a href="{{.BasePath}}">RunLore Knowledge Base</a></h1>
+    <span class="meta">{{.TotalCount}} entries (read-only)</span>
+  </header>
+
+  <form class="filters" method="GET" action="{{.BasePath}}">
+    <input type="search" name="q" value="{{.Query}}" placeholder="Search runbooks, incidents, resources…" aria-label="Search">
+    <select name="type" aria-label="Type">
+      <option value="">All types</option>
+      <option value="Incident"{{if eq .TypeFilter "Incident"}} selected{{end}}>Incident</option>
+      <option value="Playbook"{{if eq .TypeFilter "Playbook"}} selected{{end}}>Playbook</option>
+      <option value="Concept"{{if eq .TypeFilter "Concept"}} selected{{end}}>Concept</option>
+    </select>
+    <select name="status" aria-label="Status">
+      <option value="">All statuses</option>
+      <option value="active"{{if eq .StatusFilter "active"}} selected{{end}}>active</option>
+      <option value="draft"{{if eq .StatusFilter "draft"}} selected{{end}}>draft</option>
+      <option value="retired"{{if eq .StatusFilter "retired"}} selected{{end}}>retired</option>
+    </select>
+    <select name="origin" aria-label="Origin">
+      <option value="">All origins</option>
+      <option value="local"{{if eq .OriginFilter "local"}} selected{{end}}>local</option>
+      <option value="commons"{{if eq .OriginFilter "commons"}} selected{{end}}>commons</option>
+    </select>
+    <button type="submit">Filter</button>
+  </form>
+
+  {{if .Rows}}
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Type</th>
+        <th>Status</th>
+        <th>Origin</th>
+        <th>Resource</th>
+        <th>Validated</th>
+        {{if .HasLedger}}
+        <th>Resolve</th>
+        <th>Feedback</th>
+        <th>Trust</th>
+        {{end}}
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>
+          <a href="{{$.BasePath}}/entry/{{.Path}}">{{.Title}}</a>
+          <div class="meta"><code>{{.Path}}</code></div>
+        </td>
+        <td><span class="badge">{{.Type}}</span></td>
+        <td><span class="badge">{{.Status}}</span></td>
+        <td><span class="badge">{{.Origin}}</span></td>
+        <td>{{if .Resource}}<code>{{.Resource}}</code>{{else}}-{{end}}</td>
+        <td class="num">{{.LastValidated}}{{if .Stale}}<span class="badge badge-stale">stale</span>{{end}}</td>
+        {{if $.HasLedger}}
+        <td class="num">{{.Outcome.ResolveRate}}</td>
+        <td class="num">👍 {{.Outcome.FeedbackUp}} / 👎 {{.Outcome.FeedbackDown}}</td>
+        <td class="num">{{.Outcome.TrustFactor}}</td>
+        {{end}}
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">No matching knowledge-base entries found.</div>
+  {{end}}
+</main>
+</body>
+</html>

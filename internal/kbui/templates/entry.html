@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Entry.Title}} — RunLore Knowledge Base</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d1d9e0;
+  --surface: #f6f8fa;
+  --accent: #0969da;
+  --warn-bg: #fff8c5;
+  --warn-fg: #7d4e00;
+  --badge-bg: #eaeef2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --surface: #161b22;
+    --accent: #58a6ff;
+    --warn-bg: #3b2e00;
+    --warn-fg: #f2cc60;
+    --badge-bg: #21262d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 1.5rem;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.6;
+}
+main { max-width: 920px; margin: 0 auto; }
+nav { margin-bottom: 1rem; font-size: 0.9rem; }
+nav a { color: var(--accent); text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+h1 { margin: 0 0 0.5rem 0; font-size: 1.6rem; }
+.desc { color: var(--muted); margin: 0 0 1rem 0; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  margin-bottom: 1rem;
+}
+.card h2 { margin: 0 0 0.5rem 0; font-size: 1rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0; font-size: 0.9rem; }
+dt { color: var(--muted); font-weight: 600; }
+dd { margin: 0; }
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--badge-bg);
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+.badge-stale { background: var(--warn-bg); color: var(--warn-fg); margin-left: 0.35rem; }
+article { margin-top: 1.25rem; }
+article h2, article h3, article h4 { margin-top: 1.4rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+article a { color: var(--accent); }
+pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.85rem;
+  overflow-x: auto;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+</style>
+</head>
+<body>
+<main>
+  <nav><a href="{{.BasePath}}">&larr; Back to Knowledge Base</a></nav>
+  <h1>{{.Entry.Title}}</h1>
+  {{if .Entry.Description}}<p class="desc">{{.Entry.Description}}</p>{{end}}
+
+  <section class="card">
+    <h2>Frontmatter &amp; Provenance</h2>
+    <dl>
+      <dt>Path</dt><dd><code>{{.Entry.Path}}</code></dd>
+      <dt>Type</dt><dd><span class="badge">{{.Entry.Type}}</span></dd>
+      <dt>Status</dt><dd><span class="badge">{{.EffectiveStat}}</span></dd>
+      <dt>Origin</dt><dd><span class="badge">{{.Origin}}</span></dd>
+      {{if .Entry.Resource}}<dt>Resource</dt><dd><code>{{.Entry.Resource}}</code></dd>{{end}}
+      {{if .Entry.AlertResource}}<dt>Alert Resource</dt><dd><code>{{.Entry.AlertResource}}</code></dd>{{end}}
+      {{if .Entry.Tags}}<dt>Tags</dt><dd>{{range .Entry.Tags}}<span class="badge">{{.}}</span> {{end}}</dd>{{end}}
+      <dt>Last Validated</dt><dd>{{.LastValidated}}{{if .Stale}}<span class="badge badge-stale">stale</span>{{end}}</dd>
+      {{if .ShortFP}}<dt>Fingerprint</dt><dd><code>{{.ShortFP}}</code></dd>{{end}}
+    </dl>
+  </section>
+
+  {{if .HasLedger}}
+  <section class="card">
+    <h2>Outcome Ledger</h2>
+    <dl>
+      <dt>Resolve Rate</dt><dd>{{.Outcome.ResolveRate}}</dd>
+      <dt>Feedback</dt><dd>👍 {{.Outcome.FeedbackUp}} / 👎 {{.Outcome.FeedbackDown}}</dd>
+      <dt>Beta Trust Factor</dt><dd>{{.Outcome.TrustFactor}}</dd>
+      {{if .Outcome.Confirms}}<dt>Machine Confirmations</dt><dd>{{.Outcome.Confirms}}</dd>{{end}}
+      {{if or .Outcome.Verified .Outcome.Failed}}<dt>Factory Verifications</dt><dd>{{.Outcome.Verified}} held / {{.Outcome.Failed}} failed</dd>{{end}}
+      {{if .Outcome.LastConfirmed}}<dt>Last Confirmed</dt><dd>{{.Outcome.LastConfirmed}}</dd>{{end}}
+    </dl>
+  </section>
+  {{end}}
+
+  <article>
+    {{.BodyHTML}}
+  </article>
+</main>
+</body>
+</html>

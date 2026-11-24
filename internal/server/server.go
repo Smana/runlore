@@ -101,6 +101,7 @@ type Server struct {
 	threads          ThreadHandler      // nil unless notify.slack.thread_capture is on
 	factory          http.Handler       // nil unless factory.url is set; serves POST /factory/webhook
 	mcp              http.Handler       // nil unless server.mcp.enabled; serves /mcp from this replica's own catalog
+	kbui             http.Handler       // nil unless server.kb_ui.enabled; serves /kb from this replica's own catalog
 	seenEvents       *seenSet           // Slack event_id dedup for delivery retries
 	telemetryMetrics *telemetry.Metrics // nil unless telemetry is configured; nil-safe throughout
 	// eventDispatcher and busyDispatcher run detached mention handlers and the
@@ -226,6 +227,7 @@ type Actions struct {
 	Threads      ThreadHandler      // opt-in thread capture (notify.slack.thread_capture)
 	Factory      http.Handler       // opt-in agent factory webhook receiver (factory.url); mounted at POST /factory/webhook
 	MCP          http.Handler       // opt-in read-only KB tools (server.mcp); mounted at /mcp, never forwarded
+	KBUI         http.Handler       // opt-in read-only KB HTML explorer (server.kb_ui); mounted at /kb, never forwarded
 	Metrics      *telemetry.Metrics // optional; nil-safe — powers the mentions-dropped-on-saturation counter
 	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
 	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions) — a
@@ -265,6 +267,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		threads:          liveIface(acts.Threads),
 		factory:          liveIface(acts.Factory),
 		mcp:              liveIface(acts.MCP),
+		kbui:             liveIface(acts.KBUI),
 		seenEvents:       newSeenSet(1024),
 		telemetryMetrics: acts.Metrics,
 		eventDispatcher:  thread.NewDispatcher(maxConcurrentMentions, mentionHandlerTimeout, log),
@@ -310,6 +313,12 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	// replica answers it, follower or leader. It handles its own methods and bearer token.
 	if s.mcp != nil {
 		mux.Handle("/mcp", s.mcp)
+	}
+	// /kb is not work-bearing: it only reads this replica's own warm catalog and read-only
+	// outcome ledger stats, so every replica answers it, follower or leader.
+	if s.kbui != nil {
+		mux.Handle("/kb", s.kbui)
+		mux.Handle("/kb/", s.kbui)
 	}
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)

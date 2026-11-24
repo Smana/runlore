@@ -324,6 +324,25 @@ room**. With thread capture on, every room member's messages reach the process (
 addressed, correctly-rooted one is ever acted on), so an open room widens who can even attempt to be
 heard by it.
 
+## Read-only KB HTML explorer (`server.kb_ui`)
+
+Opt-in (`server.kb_ui.enabled: false` by default) and strictly read-only (`GET`/`HEAD` only; all
+other methods return `405 Method Not Allowed`). When enabled on `lore serve`, `/kb` and
+`/kb/entry/{path...}` are served directly by each replica from its warm catalog and optional
+read-only outcome ledger (never leader-forwarded, mirroring `/mcp`). Local `lore kb serve` binds
+loopback `127.0.0.1:8081` by default.
+
+- **Zero JavaScript & strict CSP.** Every response carries
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and `Referrer-Policy: no-referrer`.
+- **Escape-first markdown rendering.** OKF entry bodies are HTML-escaped before any safe subset
+  formatting (headings, lists, code blocks, `https://`-only links) is emitted, neutralizing stored
+  XSS payloads from untrusted markdown. Entry paths are matched strictly against the in-memory
+  catalog index, rejecting path traversal (`..`) with `404`.
+- **Optional Bearer authentication.** Set `server.kb_ui.token_env` to require a constant-time
+  `Authorization: Bearer <token>` header (an empty variable fails closed with `401`). Without it,
+  startup logs a warning and any caller admitted on the serve port can browse `/kb`.
+
 ## Honest limitations
 
 - **The model sees cluster data.** Even with redaction, tool output reaches your model provider. The

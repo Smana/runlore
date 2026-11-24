@@ -19,7 +19,7 @@ Every subcommand `lore` wires; `lore help` prints each one's flags.
 | `lore demo investigate` | a full investigation on fake providers, recorded (`--offline`) or live |
 | `lore serve` | the in-cluster agent, reacting to incidents |
 | `lore catalog sync` | clone or pull the knowledge catalog and index it |
-| `lore kb` | `search`, `show`, `import` and `resolve` knowledge-base entries |
+| `lore kb` | `search`, `show`, `serve`, `import` and `resolve` knowledge-base entries |
 | `lore eval` | replay recorded cases and score root-cause identification; `--live`, `--compare`, `scorecard` |
 | `lore curate` | groom the knowledge-base backlog; `queue-issue`, `refresh-entries` |
 | `lore mcp` | serve what-changed and knowledge-base search over MCP (stdio) |

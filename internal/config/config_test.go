@@ -92,6 +92,27 @@ func yamlScalar(s string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Value: s}
 }
 
+func TestServerKBUIConfig(t *testing.T) {
+	var def Config
+	if def.Server.KBUI.Enabled {
+		t.Fatal("server.kb_ui.enabled must default to false")
+	}
+
+	const y = `
+server:
+  kb_ui:
+    enabled: true
+    token_env: KB_UI_TOKEN
+`
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(y), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !cfg.Server.KBUI.Enabled || cfg.Server.KBUI.TokenEnv != "KB_UI_TOKEN" {
+		t.Fatalf("got %+v, want enabled=true token_env=KB_UI_TOKEN", cfg.Server.KBUI)
+	}
+}
+
 func TestInstantRecallTrustConfig(t *testing.T) {
 	const y = `
 catalog:
