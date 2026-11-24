@@ -225,13 +225,19 @@ func (t KBSearchTool) observeTopHit(scored []catalog.ScoredEntry) {
 	if top.Score < t.hits.clearMatchScore {
 		return // not confidently a known-runbook match — surfacing it would be noise
 	}
-	// Carry Path + Title (+ Score). URL is deliberately left empty: the entry's web
-	// link needs the forge repo, which isn't reachable from the tool without new
-	// plumbing — the notifier shows Path instead (see MatchedEntry).
+	// Carry Path + Title (+ Score) and a #resolution anchor when the entry
+	// contains a non-empty ## Resolution section. URL is deliberately left empty:
+	// the entry's web link needs the forge repo, which isn't reachable from the
+	// tool without new plumbing — the notifier shows Path instead (see MatchedEntry).
+	anchor := ""
+	if top.Entry.Section("Resolution") != "" {
+		anchor = "#resolution"
+	}
 	t.hits.observe(providers.MatchedEntry{
-		Path:  top.Entry.Path,
-		Title: top.Entry.Title,
-		Score: top.Score,
+		Path:          top.Entry.Path,
+		Title:         top.Entry.Title,
+		SectionAnchor: anchor,
+		Score:         top.Score,
 	})
 }
 

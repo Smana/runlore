@@ -90,9 +90,15 @@ var egressVerbatim = map[string]bool{
 	"Investigation.Fingerprints":   true, // coalesced batch dedup ids
 	"Investigation.TriggerKey":     true, // deterministic incident-identity dedup key
 	// Catalog paths and links of matched/prior entries.
-	"Investigation.Prior.EntryPath":       true,
-	"Investigation.MatchedKnowledge.Path": true,
-	"Investigation.MatchedKnowledge.URL":  true,
+	"Investigation.Prior.EntryPath":                true,
+	"Investigation.MatchedKnowledge.Path":          true,
+	"Investigation.MatchedKnowledge.URL":           true,
+	"Investigation.MatchedKnowledge.SectionAnchor": true,
+	// Server-derived Git provenance links attached from observed diffs.
+	"Investigation.RootCauses.ChangeURL":        true,
+	"Investigation.RootCauses.Provenance.Label": true,
+	"Investigation.RootCauses.Provenance.URL":   true,
+	"Investigation.RootCauses.Provenance.Kind":  true,
 	// Server-controlled action vocabulary and approval token.
 	"Investigation.Actions.Op":         true,
 	"Investigation.Actions.ApprovalID": true,

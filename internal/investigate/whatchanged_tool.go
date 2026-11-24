@@ -104,9 +104,11 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 		b.WriteString("\n")
 		d, derr := t.GitOps.Diff(ctx, c)
 		if derr != nil {
+			recordObservedChange(ctx, c.Source.RepoURL, c.FromRev, c.ToRev, providers.Diff{})
 			fmt.Fprintf(&b, "  (diff error: %v)\n", derr)
 			continue
 		}
+		recordObservedChange(ctx, c.Source.RepoURL, c.FromRev, c.ToRev, d)
 		renderDiff(&b, d)
 	}
 	return b.String(), nil

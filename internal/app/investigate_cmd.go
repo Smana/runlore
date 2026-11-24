@@ -214,6 +214,7 @@ func RunInvestigate(args []string) error {
 		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
 		KBMatchScore:              kbMatchScore(recall),       // visibility bar tracks the configured recall floor
+		HostStyles:                provenanceHostStyles(cfg),  // server-derived Git provenance permalinks
 		KindScope:                 kindScoperFromTools(tools), // discovery decides namespaced-ness, not a kind list
 		OnComplete:                func(inv providers.Investigation) { result = &inv },
 	}

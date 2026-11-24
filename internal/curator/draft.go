@@ -9,6 +9,7 @@ import (
 
 	"github.com/Smana/runlore/internal/kbresolve"
 	"github.com/Smana/runlore/internal/kbvalidate"
+	"github.com/Smana/runlore/internal/provenance"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -58,9 +59,15 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 	for i, rc := range inv.RootCauses {
 		fmt.Fprintf(&b, "%d. **%s** (%.0f%%)", i+1, rc.Summary, rc.Confidence*100)
 		if rc.ChangeRef != "" {
-			fmt.Fprintf(&b, " — change: %s", rc.ChangeRef)
+			fmt.Fprintf(&b, " — change: %s", formatChangeRefMarkdown(rc.ChangeRef, rc.ChangeURL))
 		}
 		b.WriteString("\n")
+	}
+	if provLinks := collectProvenanceLinks(inv); len(provLinks) > 0 {
+		b.WriteString("\n### Provenance\n\n")
+		for _, p := range provLinks {
+			fmt.Fprintf(&b, "- [%s](%s)\n", escapeMarkdownLabel(p.Label), p.URL)
+		}
 	}
 
 	// --- Resolution (suggested, reversible-first) ---
@@ -310,6 +317,39 @@ func changeRefs(inv providers.Investigation) []string {
 		}
 	}
 	return refs
+}
+
+const maxDraftProvenanceLinks = 5
+
+func formatChangeRefMarkdown(ref, rawURL string) string {
+	if !provenance.SafeHTTPS(rawURL) {
+		return ref
+	}
+	return fmt.Sprintf("[%s](%s)", escapeMarkdownLabel(ref), rawURL)
+}
+
+func escapeMarkdownLabel(s string) string {
+	s = strings.ReplaceAll(s, "[", `\[`)
+	s = strings.ReplaceAll(s, "]", `\]`)
+	return s
+}
+
+func collectProvenanceLinks(inv providers.Investigation) []providers.ProvenanceLink {
+	var out []providers.ProvenanceLink
+	seen := map[string]bool{}
+	for _, rc := range inv.RootCauses {
+		for _, p := range rc.Provenance {
+			if len(out) >= maxDraftProvenanceLinks {
+				return out
+			}
+			if p.Label == "" || !provenance.SafeHTTPS(p.URL) || seen[p.URL] {
+				continue
+			}
+			seen[p.URL] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // evidenceLineMax bounds the one evidence line shown in the PR review card.

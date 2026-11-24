@@ -808,6 +808,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		Timeout:                   cfg.Investigation.Timeout.Std(),
 		ToolTimeout:               toolTimeout,
 		KBMatchScore:              kbMatchScore(recall), // visibility bar tracks the configured recall floor
+		HostStyles:                provenanceHostStyles(cfg),
 		OnProgress:                onProgress,
 		ProgressEverySteps:        progressEverySteps,
 		OnComplete: func(found providers.Investigation) {
