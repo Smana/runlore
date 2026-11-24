@@ -1,0 +1,46 @@
+# Hermetic replay case: CoreDNS upstream timeout / SERVFAIL (no-change DNS failure).
+# A coincident HelmRelease bump to an unrelated service in the same namespace is the distractor.
+name: dns-coredns-servfail
+alert_title: CoreDNSUpstreamServfail
+workload:
+  namespace: kube-system
+  name: coredns
+prompt: |
+  CoreDNSUpstreamServfail (critical, prod, namespace kube-system): external DNS lookups
+  from application pods are returning SERVFAIL and timing out for the past 10 minutes.
+tools:
+  what_changed: |
+    flux Kustomization/kube-system  11aa22..33bb44  (18 minutes before the alert)
+    --- kube-system/metrics-server/values.yaml
+    -  replicas: 2
+    +  replicas: 3
+    (no change to kube-system/coredns in the last 14 days)
+  pod_status: |
+    coredns-6b9f7d4c8-2xk9p   Running  ready=1/1  restarts=0  age=12d  ip=10.244.1.14
+    coredns-6b9f7d4c8-9mt4q   Running  ready=1/1  restarts=0  age=12d  ip=10.244.2.19
+    metrics-server-5c8d9f-7lq  Running  ready=1/1  restarts=0  age=18m  ip=10.244.1.42
+  kube_events: |
+    2026-11-24T09:12:04Z Warning Pod/checkout-api-6d8f7-abcde Unhealthy: Liveness probe failed: dial tcp: lookup api.stripe.com on 10.96.0.10:53: server misbehaving
+  pod_logs: |
+    coredns-6b9f7d4c8-2xk9p  [ERROR] plugin/errors: 2 api.stripe.com. A: read udp 10.244.1.14:49120->169.254.169.253:53: i/o timeout
+    coredns-6b9f7d4c8-2xk9p  [ERROR] plugin/errors: 2 registry.npmjs.org. A: read udp 10.244.1.14:51802->169.254.169.253:53: i/o timeout
+    coredns-6b9f7d4c8-9mt4q  [ERROR] plugin/errors: 2 api.stripe.com. A: read udp 10.244.2.19:38214->169.254.169.253:53: i/o timeout
+  query_metrics: |
+    sum(rate(coredns_dns_responses_total{rcode="SERVFAIL"}[5m])) = 42.6
+    sum(rate(coredns_forward_healthcheck_failures_total{to="169.254.169.253:53"}[5m])) = 12.0
+    sum(rate(coredns_dns_responses_total{rcode="NOERROR",zone="cluster.local."}[5m])) = 815.2
+expected:
+  must_contain: ["upstream|forward", "timeout|servfail"]
+  min_confidence: 0.5
+  root_cause_entities: [coredns, "169.254.169.253"]
+  distractors: [metrics-server]
+ground_truth:
+  root_cause: |
+    CoreDNS is healthy and serving cluster.local queries normally, but external lookups
+    return SERVFAIL because the upstream forwarder 169.254.169.253:53 is timing out
+    (i/o timeout, elevated coredns_forward_healthcheck_failures_total). The recent
+    metrics-server replica bump is unrelated.
+  expected_sources: [kubernetes, metrics]
+  optional_sources: [gitops, logs]
+  expected_action: check VPC resolver / upstream DNS forwarder 169.254.169.253:53 reachability and node egress rules
+  must_reach_root: true

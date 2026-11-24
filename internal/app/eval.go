@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/eval"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/providers"
@@ -32,6 +33,25 @@ func evalCostUSD(cfg *config.Config, u providers.Usage) *float64 {
 	}
 	c := eval.EstimateCostUSD(u, p.InputUSDPerMTok, p.CachedInputUSDPerMTok, p.OutputUSDPerMTok)
 	return &c
+}
+
+// evalHybridRecall builds the replay runner's hybrid recall configuration when both
+// catalog.instant_recall.hybrid and model.embeddings are configured. Nil keeps replay
+// BM25-only (matching production BuildCatalog).
+func evalHybridRecall(cfg *config.Config) *eval.HybridRecallConfig {
+	if !cfg.Catalog.InstantRecall.Hybrid || cfg.Model.Embeddings == nil {
+		return nil
+	}
+	e := cfg.Model.Embeddings
+	key := ""
+	if e.APIKeyEnv != "" {
+		key = os.Getenv(e.APIKeyEnv)
+	}
+	return &eval.HybridRecallConfig{
+		Embedder:  embed.New(e.BaseURL, e.Model, key),
+		MinScore:  cfg.Catalog.InstantRecall.HybridMinScore,
+		MarginGap: cfg.Catalog.InstantRecall.HybridMarginGap,
+	}
 }
 
 // evalSpend is the per-investigation ceiling set every eval runner is handed. It is
@@ -229,9 +249,10 @@ func RunEval(args []string) error {
 	defer cancel()
 	counting := &eval.CountingModel{Inner: budget.Wrap(BuildModel(cfg, apiKey))}
 	runner := &eval.Runner{
-		Model: counting,
-		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Spend: evalSpend(cfg),
+		Model:  counting,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Spend:  evalSpend(cfg),
+		Hybrid: evalHybridRecall(cfg),
 	}
 	// Progress to STDERR (stdout carries the result table the report/scorecard read):
 	// a nightly campaign is ~30 sequential live investigations and used to print

@@ -106,9 +106,10 @@ func comparedCase(name string, runs ...runTuple) ComparedCase {
 	cc := ComparedCase{Name: name}
 	for _, r := range runs {
 		cr := ComparedRun{
-			Result:   Result{Name: name, Pass: r.pass},
-			Coverage: Coverage{Ratio: r.coverage},
-			Graded:   r.graded,
+			Result:      Result{Name: name, Pass: r.pass},
+			Coverage:    Coverage{Ratio: r.coverage},
+			HasCoverage: true,
+			Graded:      r.graded,
 		}
 		if r.graded {
 			cr.Verdict = Verdict{
@@ -167,7 +168,7 @@ func TestAggregateModel(t *testing.T) {
 		t.Fatalf("graded runs: %d", mc.GradedRuns)
 	}
 	// coverage over all runs: 1,0.5,1,1,1,1 → median 1.
-	if mc.CoverageMedian != 1.0 {
+	if mc.CoverageMedian == nil || *mc.CoverageMedian != 1.0 {
 		t.Fatalf("coverage median: %v", mc.CoverageMedian)
 	}
 	if mc.ConfidentWrong != 1 {
@@ -225,17 +226,17 @@ func comparisonFixture() ComparisonReport {
 			RubricMedian: map[string]float64{
 				"root_cause": 3, "evidence": 2.5, "solution": 2, "description": 2, "calibration": 2,
 			},
-			GradedRuns: 6, CoverageMedian: 1.0, ConfidentWrong: 0,
+			GradedRuns: 6, JudgedCases: 2, CoverageCases: 2, CoverageMedian: costPtr(1.0), ConfidentWrong: 0,
 			InputTokens: 500_000, OutputTokens: 40_000, CostUSD: costPtr(0.9),
 		},
 		{
 			Name: "local-qwen", Provider: "openai", Model: "qwen3", Effort: "low",
-			PassRate: 0.5, Reached: 1,
+			PassRate: 0.5, Reached: 1, Total: 2,
 			Cases: []CompareCaseRow{
-				{Name: "alpha", Runs: 3, PassRate: 1, Reached: true, Coverage: 1},
-				{Name: "zeta", Runs: 3, PassRate: 0.33, Reached: false, Flaky: true, Coverage: 0.5},
+				{Name: "alpha", Runs: 3, PassRate: 1, Reached: true, Coverage: 1, HasCoverage: true},
+				{Name: "zeta", Runs: 3, PassRate: 0.33, Reached: false, Flaky: true, Coverage: 0.5, HasCoverage: true},
 			},
-			GradedRuns: 0, CoverageMedian: 0.75, ConfidentWrong: 2,
+			GradedRuns: 0, CoverageCases: 2, CoverageMedian: costPtr(0.75), ConfidentWrong: 2,
 			InputTokens: 800_000, OutputTokens: 90_000,
 		},
 	})

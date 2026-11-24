@@ -1,0 +1,52 @@
+# Hermetic replay case: Cilium Hubble policy drop blocking service-to-service traffic.
+name: network-cilium-policy-drop
+alert_title: OrdersToPaymentsErrors
+workload:
+  namespace: commerce
+  name: orders-api
+prompt: |
+  OrdersToPaymentsErrors (critical, prod, namespace commerce): orders-api requests to
+  payments-svc are timing out with 504 errors since 14:20 UTC.
+tools:
+  what_changed: |
+    flux Kustomization/security  98aa11..bc22ff  (14:19 UTC)
+    --- security/cilium/payments-egress-cnp.yaml
+    +apiVersion: cilium.io/v2
+    +kind: CiliumNetworkPolicy
+    +metadata:
+    +  name: payments-restrict-ingress
+    +  namespace: payments
+    +spec:
+    +  endpointSelector:
+    +    matchLabels:
+    +      app: payments-svc
+    +  ingress:
+    +    - fromEndpoints:
+    +        - matchLabels:
+    +            app: billing-worker
+    --- commerce/catalog-ui/values.yaml
+    -  bannerText: "Spring Sale"
+    +  bannerText: "Summer Sale"
+  pod_status: |
+    orders-api-7f8d9c-4kp2m     Running  ready=1/1  restarts=0  age=4d  ip=10.244.3.21
+    payments-svc-5b6c7d-8nq1r   Running  ready=1/1  restarts=0  age=4d  ip=10.244.4.55
+    catalog-ui-6a4b5c-9tz3k     Running  ready=1/1  restarts=0  age=15m ip=10.244.3.88
+  network_drops: |
+    14:20:03 DROPPED (Policy denied) commerce/orders-api-7f8d9c-4kp2m (10.244.3.21) -> payments/payments-svc-5b6c7d-8nq1r:8080 (10.244.4.55) TCP SYN (count=412)
+    14:22:15 DROPPED (Policy denied) commerce/orders-api-7f8d9c-4kp2m (10.244.3.21) -> payments/payments-svc-5b6c7d-8nq1r:8080 (10.244.4.55) TCP SYN (count=389)
+  query_logs: |
+    orders-api  POST http://payments-svc.payments.svc:8080/charge failed: context deadline exceeded (i/o timeout)
+expected:
+  must_contain: ["policy|cilium", "drop|denied"]
+  min_confidence: 0.5
+  root_cause_entities: [payments-restrict-ingress, payments-svc]
+  distractors: [catalog-ui]
+ground_truth:
+  root_cause: |
+    CiliumNetworkPolicy payments-restrict-ingress added at 14:19 UTC only permits ingress
+    to payments-svc from billing-worker, causing Cilium to drop TCP traffic from
+    commerce/orders-api with Policy denied. The catalog-ui banner update is unrelated.
+  expected_sources: [network, gitops]
+  optional_sources: [kubernetes, logs]
+  expected_action: update CiliumNetworkPolicy payments-restrict-ingress to allow ingress from commerce/orders-api (or revert the policy commit)
+  must_reach_root: true

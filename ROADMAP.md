@@ -20,7 +20,6 @@ today, and they are what a new adopter hits first.
 | Item | Why it matters |
 |---|---|
 | [glm-4.6 stalls on forced `tool_choice`](https://github.com/Smana/runlore/issues/391), silently degrading verify, recall reranking and the eval judge | Silent degradation of the safety passes is worse than a loud failure |
-| [Model-comparison report publishes vacuous columns](https://github.com/Smana/runlore/issues/394) when cases lack `ground_truth` | The published eval is a trust artifact; it must not overstate what it measured |
 
 ## Next
 

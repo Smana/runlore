@@ -31,11 +31,11 @@ type UsageSink struct {
 	tokens int
 }
 
-// record charges one /embeddings round trip to the sink. promptTokens is what the
+// Record charges one /embeddings round trip to the sink. promptTokens is what the
 // endpoint reported for it, or 0 when it reported nothing — which means UNKNOWN, not
 // free, exactly as providers.Usage's zero value does. The call is counted either way:
 // a request the endpoint accepted is billed whether or not we could parse its answer.
-func (s *UsageSink) record(promptTokens int) {
+func (s *UsageSink) Record(promptTokens int) {
 	if s == nil {
 		return
 	}

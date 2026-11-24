@@ -1,0 +1,43 @@
+# Hermetic replay case: Expired TLS certificate caused by a failing ACME DNS-01 challenge.
+name: cert-manager-expiry
+alert_title: CertManagerCertNotReady
+workload:
+  namespace: ingress
+  name: api-gateway-tls
+prompt: |
+  CertManagerCertNotReady (critical, prod, namespace ingress): TLS certificate
+  api-gateway-tls has expired and HTTPS clients are failing certificate validation.
+tools:
+  what_changed: |
+    flux Kustomization/ingress  77aa01..88bb02  (3 days ago)
+    --- ingress/nginx-controller/values.yaml
+    -  workerConnections: 4096
+    +  workerConnections: 8192
+    (no changes to cert-manager or api-gateway-tls resources)
+  pod_status: |
+    cert-manager-7c9d8f-3kp1q          Running  ready=1/1  restarts=0  age=21d
+    cert-manager-webhook-5b4a3c-9lm2n  Running  ready=1/1  restarts=0  age=21d
+    nginx-controller-6f7e8d-1ab2c      Running  ready=1/1  restarts=0  age=3d
+  kube_events: |
+    2026-11-24T06:00:12Z Warning Certificate/api-gateway-tls Issuing: The certificate has expired and renewal failed
+    2026-11-24T06:00:15Z Warning Challenge/api-gateway-tls-r4k9m-12345 PresentError: Error presenting challenge: AccessDenied: User is not authorized to perform: route53:ChangeResourceRecordSets on resource: arn:aws:route53:::hostedzone/Z0192837465
+  controller_logs: |
+    cert-manager-7c9d8f-3kp1q  E1124 06:00:15.412 controller.go:167] "re-queuing item due to error processing" err="AccessDenied: route53:ChangeResourceRecordSets denied for hostedzone Z0192837465" key="ingress/api-gateway-tls-r4k9m-12345"
+  query_metrics: |
+    certmanager_certificate_ready_status{namespace="ingress",name="api-gateway-tls",condition="False"} = 1
+    certmanager_certificate_expiration_timestamp_seconds{namespace="ingress",name="api-gateway-tls"} - time() = -3600
+expected:
+  must_contain: ["acme|challenge|route53", "accessdenied|permission|authorized"]
+  min_confidence: 0.5
+  root_cause_entities: [api-gateway-tls, route53]
+  distractors: [nginx-controller]
+ground_truth:
+  root_cause: |
+    Certificate ingress/api-gateway-tls expired because cert-manager's ACME DNS-01
+    challenge cannot create the verification TXT record: AWS Route53 returns AccessDenied
+    for route53:ChangeResourceRecordSets on hostedzone Z0192837465. The nginx-controller
+    workerConnections change 3 days ago is unrelated.
+  expected_sources: [kubernetes, metrics]
+  optional_sources: [gitops]
+  expected_action: restore route53:ChangeResourceRecordSets IAM permission for cert-manager on hostedzone Z0192837465 and re-trigger renewal
+  must_reach_root: true

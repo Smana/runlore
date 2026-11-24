@@ -1,0 +1,44 @@
+# Hermetic replay case: Lexical-mismatch paraphrase recall (OOM / RAM ceiling).
+# Alert wording ("container killed due to RAM ceiling") deliberately avoids the KB entry's
+# vocabulary ("OOMKilled", "exit 137", "cgroup memory limit") to measure hybrid vs BM25 recall.
+name: recall-paraphrase-oom
+alert_title: ContainerTerminatedRAMCeiling
+workload:
+  namespace: payments
+  name: billing-api
+prompt: |
+  ContainerTerminatedRAMCeiling (critical, prod, namespace payments): billing-api worker
+  process was abruptly terminated by the kernel after exceeding its RAM ceiling during
+  invoice batch generation.
+gate: false
+catalog_dir: fixtures/paraphrase-oom
+expect_recall: fired
+tools:
+  pod_status: |
+    billing-api-5f8d7c-2kp9m  CrashLoopBackOff  ready=0/1  restarts=6  lastState=Terminated (OOMKilled, exit=137)
+    billing-api-5f8d7c-7nq4r  Running           ready=1/1  restarts=4  lastState=Terminated (OOMKilled, exit=137)
+    audit-sink-4b3c2d-8lm1q   Running           ready=1/1  restarts=0  age=11d
+  kube_events: |
+    2026-11-24T09:30:12Z Warning Pod/billing-api-5f8d7c-2kp9m OOMKilling: Memory cgroup out of memory: Killed process 412 (billing-api)
+  query_metrics: |
+    container_memory_working_set_bytes{namespace="payments",pod=~"billing-api-.*"} / kube_pod_container_resource_limits{resource="memory"} = 0.99
+  what_changed: |
+    flux Kustomization/payments  12ab34..56cd78  (2 days ago)
+    --- payments/audit-sink/values.yaml
+    -  flushInterval: 10s
+    +  flushInterval: 15s
+    (no changes to payments/billing-api)
+expected:
+  must_contain: ["oom|memory"]
+  min_confidence: 0.5
+  root_cause_entities: [billing-api]
+  distractors: [audit-sink]
+ground_truth:
+  root_cause: |
+    billing-api pods are being OOMKilled (exit 137) by the kernel cgroup memory limit
+    during invoice batch generation. The stored KB entry documents this exact failure
+    for payments/billing-api under OOMKilled vocabulary. The audit-sink change is unrelated.
+  expected_sources: [kubernetes, metrics]
+  optional_sources: [gitops, kb]
+  expected_action: increase billing-api container memory limit and cap invoice batch concurrency
+  must_reach_root: true

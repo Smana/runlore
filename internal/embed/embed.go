@@ -130,7 +130,7 @@ func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 	// free.
 	promptTokens := 0
 	if sink := UsageSinkFrom(ctx); sink != nil {
-		defer func() { sink.record(promptTokens) }()
+		defer func() { sink.Record(promptTokens) }()
 	}
 	newReq := func() (*http.Request, error) {
 		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(body))

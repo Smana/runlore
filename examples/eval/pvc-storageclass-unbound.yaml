@@ -1,0 +1,41 @@
+# Hermetic replay case: Unbound PVC due to a nonexistent StorageClass (FailedScheduling / Pending).
+name: pvc-storageclass-unbound
+alert_title: KubePodPending
+workload:
+  namespace: analytics
+  name: clickhouse-shard-0
+prompt: |
+  KubePodPending (warning, prod, namespace analytics): StatefulSet clickhouse-shard-0
+  pod has been stuck in Pending state for 15 minutes after a manifest update.
+tools:
+  what_changed: |
+    flux Kustomization/analytics  44cc10..55dd21  (16 minutes before the alert)
+    --- analytics/clickhouse/statefulset.yaml
+    -  storageClassName: gp3-encrypted
+    +  storageClassName: gp3-fast-nvme
+    --- analytics/metabase/values.yaml
+    -  logLevel: info
+    +  logLevel: warn
+  pod_status: |
+    clickhouse-shard-0-0  Pending  ready=0/1  restarts=0  age=16m
+    metabase-6d5f4c-2lm8k Running  ready=1/1  restarts=0  age=16m
+  kube_events: |
+    2026-11-24T08:45:10Z Warning PersistentVolumeClaim/data-clickhouse-shard-0-0 ProvisioningFailed: storageclass.storage.k8s.io "gp3-fast-nvme" not found
+    2026-11-24T08:45:12Z Warning Pod/clickhouse-shard-0-0 FailedScheduling: 0/6 nodes are available: pod has unbound immediate PersistentVolumeClaims. preemption: 0/6 nodes are available: 6 Preemption is not helpful for scheduling.
+  query_logs: |
+    (no logs — pod has not been scheduled to any node)
+expected:
+  must_contain: ["storageclass|storage class", "pvc|persistentvolumeclaim|unbound"]
+  min_confidence: 0.5
+  root_cause_entities: [clickhouse-shard-0, gp3-fast-nvme]
+  distractors: [metabase]
+ground_truth:
+  root_cause: |
+    StatefulSet clickhouse-shard-0's volumeClaimTemplate was changed to storageClassName
+    gp3-fast-nvme, which does not exist in the cluster. PersistentVolumeClaim
+    data-clickhouse-shard-0-0 fails provisioning and remains unbound, blocking pod
+    scheduling. The metabase logLevel change is unrelated.
+  expected_sources: [kubernetes, gitops]
+  optional_sources: [logs]
+  expected_action: revert storageClassName to gp3-encrypted (or provision StorageClass gp3-fast-nvme)
+  must_reach_root: true

@@ -33,10 +33,11 @@ var _ UsageCounter = (*CountingModel)(nil)
 // deterministic keyword score, the tool-call coverage, and (when the case
 // carries ground truth and a judge is set) the judge's rubric verdict.
 type ComparedRun struct {
-	Result   Result
-	Coverage Coverage
-	Verdict  Verdict
-	Graded   bool
+	Result      Result
+	Coverage    Coverage
+	HasCoverage bool // true when the case declared ground_truth.expected_sources
+	Verdict     Verdict
+	Graded      bool
 }
 
 // ComparedCase is all N runs of one case for one model entry.
@@ -110,11 +111,10 @@ func (cr *ComparisonRunner) runOnce(ctx context.Context, c Case) ComparedRun {
 	}
 
 	run := ComparedRun{Result: Score(c.Name, got, c.Expected)}
-	var expected, optional []string
-	if c.GroundTruth != nil {
-		expected, optional = c.GroundTruth.ExpectedSources, c.GroundTruth.OptionalSources
+	if c.GroundTruth != nil && len(c.GroundTruth.ExpectedSources) > 0 {
+		run.HasCoverage = true
+		run.Coverage = ScoreCoverage(c.GroundTruth.ExpectedSources, c.GroundTruth.OptionalSources, rec.Calls())
 	}
-	run.Coverage = ScoreCoverage(expected, optional, rec.Calls())
 	if cr.Judge != nil && c.GroundTruth != nil {
 		scn := Scenario{ID: c.Name, GroundTruth: *c.GroundTruth}
 		v, err := cr.Judge.Grade(ctx, scn, got)

@@ -1,0 +1,56 @@
+# Hermetic replay case: Argo CD Application Degraded after a bad readiness probe path commit.
+name: argocd-degraded-sync
+alert_title: ArgoAppDegraded
+workload:
+  namespace: checkout
+  name: cart-service
+prompt: |
+  ArgoAppDegraded (critical, prod, namespace checkout): Argo CD Application cart-service
+  has been Degraded for 12 minutes after the latest sync.
+tools:
+  gitops_resource_status: |
+    Application argocd/cart-service  sync=Synced  health=Degraded  revision=9f4a21c
+    message: Deployment checkout/cart-service is Progressing/Degraded: 0/3 updated replicas available (ProgressDeadlineExceeded)
+    Application argocd/inventory-sync  sync=Synced  health=Healthy  revision=8e1b09d
+  gitops_tree: |
+    Application argocd/cart-service (Synced, Degraded)
+      Deployment checkout/cart-service (Degraded)
+        ReplicaSet checkout/cart-service-6c9d8f7b (Progressing: 0/3 ready)
+          Pod checkout/cart-service-6c9d8f7b-k2m9p (Running, 0/1 ready)
+          Pod checkout/cart-service-6c9d8f7b-n4q8r (Running, 0/1 ready)
+      Service checkout/cart-service (Healthy)
+  what_changed: |
+    argocd Application/cart-service  3c1d00..9f4a21c  (14 minutes before the alert)
+    --- apps/cart-service/deployment.yaml
+    -        readinessProbe:
+    -          httpGet:
+    -            path: /healthz
+    +        readinessProbe:
+    +          httpGet:
+    +            path: /api/v2/health
+    argocd Application/inventory-sync  7a0b12..8e1b09d  (20 minutes before the alert)
+    --- apps/inventory-sync/values.yaml
+    -  batchSize: 100
+    +  batchSize: 150
+  kube_events: |
+    2026-11-24T10:02:11Z Warning Pod/cart-service-6c9d8f7b-k2m9p Unhealthy: Readiness probe failed: HTTP probe failed with statuscode: 404
+    2026-11-24T10:02:14Z Warning Pod/cart-service-6c9d8f7b-n4q8r Unhealthy: Readiness probe failed: HTTP probe failed with statuscode: 404
+  pod_status: |
+    cart-service-6c9d8f7b-k2m9p   Running  ready=0/1  restarts=0  age=14m
+    cart-service-6c9d8f7b-n4q8r   Running  ready=0/1  restarts=0  age=14m
+    inventory-sync-5d4c3b-7xq2v   Running  ready=1/1  restarts=0  age=20m
+expected:
+  must_contain: ["readiness|probe", "404|/api/v2/health"]
+  min_confidence: 0.5
+  root_cause_entities: [cart-service]
+  distractors: [inventory-sync]
+ground_truth:
+  root_cause: |
+    Revision 9f4a21c synced by Argo CD changed cart-service's readinessProbe path from
+    /healthz to /api/v2/health, which returns HTTP 404. New pods never become ready,
+    leaving Deployment and Argo CD Application cart-service Degraded. The inventory-sync
+    batchSize change is unrelated.
+  expected_sources: [gitops, kubernetes]
+  optional_sources: []
+  expected_action: revert the readinessProbe path in apps/cart-service/deployment.yaml back to /healthz (or roll back Application cart-service to 3c1d00)
+  must_reach_root: true
