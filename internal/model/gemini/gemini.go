@@ -38,13 +38,18 @@ const DefaultBaseURL = "https://generativelanguage.googleapis.com"
 // Client is a Gemini (streamGenerateContent) model provider.
 type Client struct {
 	clientcore.Base
+	effort string
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
 // maxTokens caps output tokens per request; <= 0 falls back to
-// clientcore.DefaultMaxTokens.
-func New(baseURL, model, apiKey string, maxTokens int) *Client {
-	return &Client{Base: clientcore.NewBase(baseURL, DefaultBaseURL, model, apiKey, maxTokens)}
+// clientcore.DefaultMaxTokens. effort is the opt-in reasoning level (empty
+// omits thinkingConfig, preserving each model's native default).
+func New(baseURL, model, apiKey string, maxTokens int, effort string) *Client {
+	return &Client{
+		Base:   clientcore.NewBase(baseURL, DefaultBaseURL, model, apiKey, maxTokens),
+		effort: effort,
+	}
 }
 
 var _ providers.ModelProvider = (*Client)(nil)
@@ -73,9 +78,15 @@ type functionCallingConfig struct {
 
 // generationConfig carries per-request decoding controls. MaxOutputTokens caps the
 // output tokens; without it Gemini applies the model's (often small) default and a
-// long completion is silently cut off (a MAX_TOKENS truncation).
+// long completion is silently cut off (a MAX_TOKENS truncation). ThinkingConfig is
+// omitted when effort is unset so each model uses its native default.
 type generationConfig struct {
-	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+	MaxOutputTokens int             `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig  *thinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type thinkingConfig struct {
+	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 }
 
 type content struct {
@@ -85,8 +96,39 @@ type content struct {
 
 type part struct {
 	Text             string            `json:"text,omitempty"`
+	Thought          bool              `json:"thought,omitempty"`
+	ThoughtSignature string            `json:"thoughtSignature,omitempty"`
 	FunctionCall     *functionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *functionResponse `json:"functionResponse,omitempty"`
+}
+
+const (
+	opaqueVersion  = 1
+	opaqueProvider = "gemini"
+)
+
+// opaqueEnvelope stores the exact Gemini response parts (including opaque
+// thoughtSignature fields required by Gemini 3/4) in providers.Message.Opaque.
+// Version and provider tags prevent misparsing foreign opaque payloads (such as
+// Anthropic's signed thinking-block array).
+type opaqueEnvelope struct {
+	Version  int    `json:"v"`
+	Provider string `json:"provider"`
+	Parts    []part `json:"parts"`
+}
+
+func decodeOpaqueParts(raw json.RawMessage) ([]part, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var env opaqueEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, false
+	}
+	if env.Version != opaqueVersion || env.Provider != opaqueProvider || len(env.Parts) == 0 {
+		return nil, false
+	}
+	return env.Parts, true
 }
 
 type functionCall struct {
@@ -128,6 +170,7 @@ type genResponse struct {
 	UsageMetadata *struct {
 		PromptTokenCount        int `json:"promptTokenCount"`
 		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
 		CachedContentTokenCount int `json:"cachedContentTokenCount"`
 	} `json:"usageMetadata"`
 	Error *struct {
@@ -140,9 +183,13 @@ type genResponse struct {
 // callers see the same one-shot interface; consuming the stream avoids the flat
 // request deadline truncating a long completion.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	genCfg := &generationConfig{MaxOutputTokens: c.MaxTokens}
+	if c.effort != "" {
+		genCfg.ThinkingConfig = &thinkingConfig{ThinkingLevel: strings.ToUpper(c.effort)}
+	}
 	greq := genRequest{
 		Contents:         toContents(req.Messages),
-		GenerationConfig: &generationConfig{MaxOutputTokens: c.MaxTokens},
+		GenerationConfig: genCfg,
 	}
 	if req.System != "" {
 		greq.SystemInstruction = &content{Parts: []part{{Text: req.System}}}
@@ -199,6 +246,8 @@ func geminiErrorDetail(body []byte) string {
 // ends before any finishReason (a mid-stream drop), is an error.
 func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	var out providers.CompletionResponse
+	var replayParts []part
+	hasSignature := false
 	sawFinish := false
 
 	for gr, err := range clientcore.SSEEvents[genResponse](r) {
@@ -210,10 +259,12 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		}
 		// usageMetadata accumulates across chunks (last non-nil block wins; Gemini
 		// resends the running totals, so the final chunk carries the full count).
+		// ThoughtsTokenCount bills at the output token rate and is folded into
+		// OutputTokens to match Anthropic and OpenAI accounting.
 		if gr.UsageMetadata != nil {
 			out.Usage = providers.Usage{
 				InputTokens:       gr.UsageMetadata.PromptTokenCount,
-				OutputTokens:      gr.UsageMetadata.CandidatesTokenCount,
+				OutputTokens:      gr.UsageMetadata.CandidatesTokenCount + gr.UsageMetadata.ThoughtsTokenCount,
 				CachedInputTokens: gr.UsageMetadata.CachedContentTokenCount,
 			}
 		}
@@ -227,6 +278,9 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 			out.Truncated = cand.FinishReason == "MAX_TOKENS"
 		}
 		for _, p := range cand.Content.Parts {
+			if p.ThoughtSignature != "" {
+				hasSignature = true
+			}
 			switch {
 			case p.FunctionCall != nil:
 				// Newer Gemini responses carry a call id that correlates parallel calls
@@ -235,13 +289,49 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 				if id == "" {
 					id = p.FunctionCall.Name
 				}
+				args := argString(p.FunctionCall.Args)
 				out.ToolCalls = append(out.ToolCalls, providers.ToolCall{
 					ID:   id,
 					Name: p.FunctionCall.Name,
-					Args: argString(p.FunctionCall.Args),
+					Args: args,
 				})
-			case p.Text != "":
-				out.Text += p.Text
+				replayParts = append(replayParts, part{
+					FunctionCall: &functionCall{
+						ID:   wireID(id, p.FunctionCall.Name),
+						Name: p.FunctionCall.Name,
+						Args: clientcore.RawObject(args),
+					},
+					ThoughtSignature: p.ThoughtSignature,
+				})
+			case p.Thought:
+				// Never leak thought-summary text into visible output; keep signed
+				// thought parts for verbatim replay and drop unsigned ones.
+				if p.ThoughtSignature != "" {
+					replayParts = append(replayParts, part{
+						Text:             p.Text,
+						Thought:          true,
+						ThoughtSignature: p.ThoughtSignature,
+					})
+				}
+			default:
+				if p.Text != "" {
+					out.Text += p.Text
+				}
+				if p.ThoughtSignature != "" {
+					replayParts = append(replayParts, part{
+						Text:             p.Text,
+						ThoughtSignature: p.ThoughtSignature,
+					})
+				} else if p.Text != "" {
+					if n := len(replayParts); n > 0 &&
+						replayParts[n-1].FunctionCall == nil &&
+						!replayParts[n-1].Thought &&
+						replayParts[n-1].ThoughtSignature == "" {
+						replayParts[n-1].Text += p.Text
+					} else {
+						replayParts = append(replayParts, part{Text: p.Text})
+					}
+				}
 			}
 		}
 	}
@@ -249,6 +339,15 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	// completion — surface it as an error rather than a silently-truncated success.
 	if !sawFinish {
 		return out.CostOnly(), fmt.Errorf("stream ended before a finishReason (truncated upstream)")
+	}
+	if hasSignature && len(replayParts) > 0 {
+		if b, err := json.Marshal(opaqueEnvelope{
+			Version:  opaqueVersion,
+			Provider: opaqueProvider,
+			Parts:    replayParts,
+		}); err == nil {
+			out.Opaque = b
+		}
 	}
 	return out, nil
 }
@@ -268,12 +367,29 @@ func toContents(in []providers.Message) []content {
 		for _, tc := range m.ToolCalls {
 			idToName[tc.ID] = tc.Name
 		}
+		if len(m.ToolCalls) == 0 && len(m.Opaque) > 0 {
+			if parts, ok := decodeOpaqueParts(m.Opaque); ok {
+				for _, p := range parts {
+					if p.FunctionCall != nil {
+						id := p.FunctionCall.ID
+						if id == "" {
+							id = p.FunctionCall.Name
+						}
+						idToName[id] = p.FunctionCall.Name
+					}
+				}
+			}
+		}
 	}
 	var out []content
 	for i := 0; i < len(in); i++ {
 		m := in[i]
 		switch m.Role {
 		case "assistant":
+			if parts, ok := decodeOpaqueParts(m.Opaque); ok {
+				out = append(out, content{Role: "model", Parts: parts})
+				continue
+			}
 			var parts []part
 			if m.Content != "" {
 				parts = append(parts, part{Text: m.Content})

@@ -432,10 +432,11 @@ Also records the human 👍/👎 ratings when `notify.slack.feedback_buttons` is
 `anthropic` · `gemini`. `base_url`, `model`, `api_key_env`. Optional `verify` (a separate model for the
 adversarial verify pass) and `embeddings` (for hybrid recall). Optional `effort` opts into deeper
 reasoning per request — `anthropic`: `low`·`medium`·`high`·`max` (sent as `output_config.effort`);
-`openai`: `minimal`·`low`·`medium`·`high` (sent as `reasoning_effort`); not supported for `gemini`
-(rejected at startup); empty = omitted (default). Models that don't support the knob return a 400,
-which is classified permanent (dropped, not retried). `verify.effort` overrides the parent's value,
-inheriting it when empty like the other verify fields.
+`openai`: `minimal`·`low`·`medium`·`high` (sent as `reasoning_effort`); `gemini`:
+`minimal`·`low`·`medium`·`high`·`xhigh` (sent uppercase as
+`generationConfig.thinkingConfig.thinkingLevel`); empty = omitted (default). Models that don't
+support a level return a 400, which is classified permanent (dropped, not retried). `verify.effort`
+overrides the parent's value, inheriting it when empty like the other verify fields.
 
 Optional `thinking` opts into Anthropic **adaptive extended thinking** — set `thinking: adaptive` (the
 only value; sent as `thinking: {type: "adaptive"}`). **Anthropic-only**: it is rejected at startup for

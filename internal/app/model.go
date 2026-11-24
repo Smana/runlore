@@ -62,8 +62,8 @@ func chatMaxTokens(cfg *config.Config) int {
 
 // NewModelClient builds a ModelProvider for a wire protocol + endpoint. maxTokens
 // is the per-request output-token ceiling passed through to the provider. effort
-// is the opt-in reasoning knob (config-validated per provider; "" = omitted);
-// gemini does not take it — config.Validate rejects effort for that provider.
+// is the opt-in reasoning knob (config-validated per provider; "" = omitted) and
+// is forwarded to anthropic, gemini, and openai-compatible clients.
 // thinking is the opt-in adaptive-thinking knob (anthropic-only, config-validated;
 // "" = omitted); only the anthropic client consumes it.
 func NewModelClient(provider, baseURL, model, apiKey string, maxTokens int, effort, thinking string) providers.ModelProvider {
@@ -71,7 +71,7 @@ func NewModelClient(provider, baseURL, model, apiKey string, maxTokens int, effo
 	case "anthropic":
 		return anthropic.New(baseURL, model, apiKey, maxTokens, effort, thinking)
 	case "gemini":
-		return gemini.New(baseURL, model, apiKey, maxTokens)
+		return gemini.New(baseURL, model, apiKey, maxTokens, effort)
 	default:
 		return openai.New(baseURL, model, apiKey, maxTokens, effort)
 	}
