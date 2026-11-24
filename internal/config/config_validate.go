@@ -265,11 +265,10 @@ func checkSecureKeyEndpoint(urlField, keyField, baseURL, apiKeyEnv string) error
 
 // effortLevels is the per-provider vocabulary of the opt-in model.effort knob.
 // Unknown provider names use the "openai" set (NewModelClient routes them to the
-// OpenAI-compatible client). Gemini is deliberately absent: its thinkingConfig has
-// replay semantics (thought signatures) the provider-agnostic message history
-// can't carry, so effort is rejected there rather than half-supported.
+// OpenAI-compatible client).
 var effortLevels = map[string]map[string]bool{
 	"anthropic": {"low": true, "medium": true, "high": true, "max": true},
+	"gemini":    {"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true},
 	"openai":    {"minimal": true, "low": true, "medium": true, "high": true},
 }
 
@@ -288,9 +287,6 @@ func ValidateEffort(field, provider, effort string) error {
 func validateEffort(field, provider, effort string) error {
 	if effort == "" {
 		return nil
-	}
-	if provider == "gemini" {
-		return fmt.Errorf("%s: effort is not supported for provider gemini yet", field)
 	}
 	levels, ok := effortLevels[provider]
 	if !ok {

@@ -260,10 +260,10 @@ func TestValidateCompactionMode(t *testing.T) {
 
 // TestValidateEffort locks in the per-provider effort vocabulary: anthropic
 // low|medium|high|max, openai (and any OpenAI-compatible/unknown provider)
-// minimal|low|medium|high, gemini rejected outright, and empty always fine
-// (effort is opt-in — unset keeps today's requests unchanged). The verify
-// override validates against its EFFECTIVE provider and effort (inherit-when-
-// empty, mirroring BuildVerifyModel).
+// minimal|low|medium|high, gemini minimal|low|medium|high|xhigh, and empty
+// always fine (effort is opt-in — unset keeps today's requests unchanged). The
+// verify override validates against its EFFECTIVE provider and effort
+// (inherit-when-empty, mirroring BuildVerifyModel).
 func TestValidateThinking(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -327,8 +327,14 @@ func TestValidateEffort(t *testing.T) {
 		{"openai rejects max", Model{Provider: "openai", Effort: "max"}, "model.effort"},
 		{"empty provider defaults to openai vocabulary", Model{Effort: "minimal"}, ""},
 		{"unknown provider uses the openai vocabulary", Model{Provider: "vllm", Effort: "low"}, ""},
-		{"gemini rejects effort", Model{Provider: "gemini", Effort: "low"}, "not supported for provider gemini"},
+		{"gemini minimal", Model{Provider: "gemini", Effort: "minimal"}, ""},
+		{"gemini low", Model{Provider: "gemini", Effort: "low"}, ""},
+		{"gemini medium", Model{Provider: "gemini", Effort: "medium"}, ""},
+		{"gemini high", Model{Provider: "gemini", Effort: "high"}, ""},
+		{"gemini xhigh", Model{Provider: "gemini", Effort: "xhigh"}, ""},
 		{"gemini without effort is fine", Model{Provider: "gemini"}, ""},
+		{"gemini rejects max", Model{Provider: "gemini", Effort: "max"}, "model.effort"},
+		{"gemini rejects unknown level", Model{Provider: "gemini", Effort: "auto"}, "model.effort"},
 		{
 			"verify override inherits the parent effort and provider",
 			Model{Provider: "anthropic", Effort: "max", Verify: &ModelOverride{Model: "cheap"}},
@@ -345,9 +351,24 @@ func TestValidateEffort(t *testing.T) {
 			"model.verify.effort",
 		},
 		{
-			"verify override to gemini rejects an inherited effort",
-			Model{Provider: "anthropic", Effort: "high", Verify: &ModelOverride{Provider: "gemini"}},
-			"not supported for provider gemini",
+			"verify override inherits gemini effort and provider",
+			Model{Provider: "gemini", Effort: "xhigh", Verify: &ModelOverride{Model: "gemini-4-carbon"}},
+			"",
+		},
+		{
+			"verify override overrides gemini effort",
+			Model{Provider: "gemini", Effort: "xhigh", Verify: &ModelOverride{Model: "gemini-4-carbon", Effort: "low"}},
+			"",
+		},
+		{
+			"inherited gemini xhigh invalid for anthropic verify override",
+			Model{Provider: "gemini", Effort: "xhigh", Verify: &ModelOverride{Provider: "anthropic"}},
+			"model.verify.effort",
+		},
+		{
+			"verify override to gemini rejects inherited anthropic max",
+			Model{Provider: "anthropic", Effort: "max", Verify: &ModelOverride{Provider: "gemini"}},
+			"model.verify.effort",
 		},
 	}
 	for _, tc := range cases {
@@ -1410,6 +1431,16 @@ func TestValidateModelChat(t *testing.T) {
 		{"inherited parent effort invalid for the override's own provider", func(c *Config) {
 			c.Model.Effort = "max" // valid for anthropic, not for openai
 			c.Model.Chat.Provider = "openai"
+		}, "model.chat.effort", ""},
+		{"chat inherits gemini effort when unset", func(c *Config) {
+			c.Model.Provider = "gemini"
+			c.Model.Effort = "xhigh"
+			c.Model.Chat.Model = "gemini-4-carbon"
+		}, "", ""},
+		{"inherited gemini xhigh invalid for anthropic chat override", func(c *Config) {
+			c.Model.Provider = "gemini"
+			c.Model.Effort = "xhigh"
+			c.Model.Chat.Provider = "anthropic"
 		}, "model.chat.effort", ""},
 		{"chat's own thinking mode validated", func(c *Config) {
 			c.Model.Chat.Thinking = "enabled" // not a valid mode

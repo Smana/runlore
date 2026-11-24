@@ -35,8 +35,9 @@ type ModelEntry struct {
 	BaseURL   string `yaml:"base_url"`
 	Model     string `yaml:"model"`
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
-	// Effort is the OpenAI-compatible reasoning_effort request field (e.g. "low",
-	// "medium", "high"). Only valid for the openai provider; other providers reject it.
+	// Effort is the opt-in per-provider reasoning knob validated via
+	// config.ValidateEffort (anthropic low|medium|high|max, openai
+	// minimal|low|medium|high, gemini minimal|low|medium|high|xhigh).
 	Effort string `yaml:"effort,omitempty"`
 	// Prices enables the estimated-cost column; omit it to omit the column.
 	Prices *Prices `yaml:"prices,omitempty"`
@@ -87,8 +88,9 @@ func (s CompareSpec) validate() error {
 		seen[e.Name] = true
 		// Effort is validated against the provider it will actually be sent to, using
 		// config's single source of truth (anthropic low|medium|high|max, openai
-		// minimal|low|medium|high, rejected for gemini). An empty provider defaults to
-		// the OpenAI-compatible wire protocol, mirroring NewModelClient.
+		// minimal|low|medium|high, gemini minimal|low|medium|high|xhigh). An empty
+		// provider defaults to the OpenAI-compatible wire protocol, mirroring
+		// NewModelClient.
 		field := fmt.Sprintf("models[%d] (%s).effort", i, e.Name)
 		if err := config.ValidateEffort(field, e.Provider, e.Effort); err != nil {
 			return err

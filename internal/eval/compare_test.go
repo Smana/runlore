@@ -64,7 +64,7 @@ func TestLoadCompareSpecRejectsBadSpecs(t *testing.T) {
 		{"missing name", `models: [{model: m}]`, "name"},
 		{"missing model", `models: [{name: a}]`, "model"},
 		{"duplicate names", `models: [{name: a, model: m1}, {name: a, model: m2}]`, "duplicate"},
-		{"effort on gemini", `models: [{name: a, provider: gemini, model: m, effort: high}]`, "effort is not supported for provider gemini"},
+		{"invalid effort level on gemini", `models: [{name: a, provider: gemini, model: m, effort: max}]`, "not a valid effort"},
 		{"bad effort level", `models: [{name: a, provider: openai, model: m, effort: turbo}]`, "not a valid effort"},
 		{"unknown key", `models: [{name: a, model: m, pricess: {}}]`, "field pricess not found"},
 	}
@@ -79,12 +79,13 @@ func TestLoadCompareSpecRejectsBadSpecs(t *testing.T) {
 }
 
 func TestLoadCompareSpecEffortAccepted(t *testing.T) {
-	// Effort is valid on the OpenAI-compatible default and on anthropic (different
-	// vocabularies), matching config's per-provider effort validation.
+	// Effort is valid on the OpenAI-compatible default, anthropic, and gemini
+	// (each with its own vocabulary), matching config's per-provider effort validation.
 	for _, body := range []string{
 		`models: [{name: a, model: m, effort: high}]`,                      // empty provider ⇒ openai-compatible
 		`models: [{name: a, provider: anthropic, model: m, effort: max}]`,  // anthropic-only level
-		`models: [{name: a, provider: openai, model: m, effort: minimal}]`, // openai-only level
+		`models: [{name: a, provider: openai, model: m, effort: minimal}]`, // openai/gemini level
+		`models: [{name: a, provider: gemini, model: gemini-4-neon, effort: xhigh}]`,
 	} {
 		if _, err := LoadCompareSpec(writeSpec(t, body)); err != nil {
 			t.Fatalf("effort should be accepted for %q: %v", body, err)

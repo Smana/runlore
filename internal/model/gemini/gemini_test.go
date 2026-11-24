@@ -52,7 +52,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -128,7 +128,7 @@ func TestNon2xxPermanence(t *testing.T) {
 				w.WriteHeader(tc.code)
 			}))
 			defer srv.Close()
-			_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			_, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err == nil {
@@ -162,7 +162,7 @@ func TestComplete(t *testing.T) {
 	})
 	defer srv.Close()
 
-	c := New(srv.URL, "gemini-x", "k", 16384)
+	c := New(srv.URL, "gemini-x", "k", 16384, "")
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -236,7 +236,7 @@ func TestToolChoice(t *testing.T) {
 			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
 			defer srv.Close()
 
-			_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			_, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
 				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
 				ToolChoice: tc.choice,
@@ -281,7 +281,7 @@ func TestTruncation(t *testing.T) {
 		`data: {"candidates":[{"finishReason":"MAX_TOKENS","content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":220,"candidatesTokenCount":4096}}` + "\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -310,7 +310,7 @@ func TestRefusal(t *testing.T) {
 		`data: {"candidates":[{"finishReason":"SAFETY","content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":0}}` + "\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -342,7 +342,7 @@ func TestMidStreamDrop(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -404,7 +404,7 @@ func TestErrorPreservesObservedUsage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := tc.srv(t)
 			defer srv.Close()
-			resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			resp, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err == nil {
@@ -429,7 +429,7 @@ func TestToolResultCoalescing(t *testing.T) {
 	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
 			{Role: "assistant", ToolCalls: []providers.ToolCall{
@@ -474,7 +474,7 @@ func TestParallelSameFunctionCorrelatesByID(t *testing.T) {
 	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
 			{Role: "assistant", ToolCalls: []providers.ToolCall{
@@ -526,7 +526,7 @@ func TestUsageCachedContent(t *testing.T) {
 		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":220,\"candidatesTokenCount\":8,\"cachedContentTokenCount\":180}}\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -549,7 +549,7 @@ func TestRequestPrefixStable(t *testing.T) {
 	events := []string{"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}\n\n"}
 	srv := sseServer(t, capture, events)
 	defer srv.Close()
-	c := New(srv.URL, "gemini-x", "k", 0)
+	c := New(srv.URL, "gemini-x", "k", 0, "")
 	tools := []providers.ToolSpec{{Name: "a", Description: "d", Schema: `{"type":"object"}`}}
 
 	// Step N
@@ -628,7 +628,7 @@ func TestResponseFunctionCallID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := sseServer(t, nil, tt.events)
 			defer srv.Close()
-			resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			resp, err := New(srv.URL, "gemini-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err != nil {
@@ -638,5 +638,389 @@ func TestResponseFunctionCallID(t *testing.T) {
 				t.Fatalf("ToolCall = %+v, want id=%q name=%q", resp.ToolCalls, tt.wantID, tt.wantName)
 			}
 		})
+	}
+}
+
+// TestEffortSendsThinkingLevel verifies effort maps uppercase to
+// generationConfig.thinkingConfig.thinkingLevel and that empty effort omits
+// thinkingConfig entirely.
+func TestEffortSendsThinkingLevel(t *testing.T) {
+	events := []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n",
+	}
+	cases := []struct {
+		name      string
+		effort    string
+		wantLevel string
+	}{
+		{"high maps uppercase", "high", "HIGH"},
+		{"xhigh maps uppercase", "xhigh", "XHIGH"},
+		{"empty omits thinkingConfig", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			var gotReq genRequest
+			srv := sseServer(t, func(r *http.Request) {
+				body, _ = io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &gotReq)
+			}, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "gemini-4-neon", "k", 0, tc.effort).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if tc.wantLevel == "" {
+				if gotReq.GenerationConfig == nil || gotReq.GenerationConfig.ThinkingConfig != nil {
+					t.Fatalf("thinkingConfig must be nil when effort is empty, got %+v", gotReq.GenerationConfig)
+				}
+				if strings.Contains(string(body), "thinkingConfig") {
+					t.Fatalf("request body must omit thinkingConfig when effort is empty: %s", body)
+				}
+				return
+			}
+			if gotReq.GenerationConfig == nil || gotReq.GenerationConfig.ThinkingConfig == nil ||
+				gotReq.GenerationConfig.ThinkingConfig.ThinkingLevel != tc.wantLevel {
+				t.Fatalf("thinkingConfig = %+v, want thinkingLevel %q", gotReq.GenerationConfig, tc.wantLevel)
+			}
+		})
+	}
+}
+
+// TestUsageIncludesThoughtsTokenCount asserts thoughtsTokenCount is folded into
+// Usage.OutputTokens alongside candidatesTokenCount.
+func TestUsageIncludesThoughtsTokenCount(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":200,"candidatesTokenCount":50,"thoughtsTokenCount":350,"cachedContentTokenCount":120}}` + "\n\n",
+	})
+	defer srv.Close()
+
+	resp, err := New(srv.URL, "gemini-4-neon", "k", 0, "high").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	want := providers.Usage{InputTokens: 200, OutputTokens: 400, CachedInputTokens: 120}
+	if resp.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", resp.Usage, want)
+	}
+}
+
+// TestThoughtSignatureMultiTurnReplay verifies a thoughtSignature on a turn-1
+// functionCall is captured into resp.Opaque and replayed verbatim as a sibling of
+// functionCall on turn 2, including when ToolChoice forces a function call.
+func TestThoughtSignatureMultiTurnReplay(t *testing.T) {
+	var turn int
+	var turn2Body []byte
+	var turn2Req genRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		b, _ := io.ReadAll(r.Body)
+		if turn == 2 {
+			turn2Body = b
+			_ = json.Unmarshal(b, &turn2Req)
+		}
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		if turn == 1 {
+			_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"what_changed","args":{"ns":"apps"}},"thoughtSignature":"sig-turn-1"}]},"finishReason":"STOP"}]}`+"\n\n")
+		} else {
+			_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"call_2","name":"submit_findings","args":{"summary":"ok"}}}]},"finishReason":"STOP"}]}`+"\n\n")
+		}
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "gemini-4-neon", "k", 0, "high")
+	tools := []providers.ToolSpec{
+		{Name: "what_changed", Description: "d", Schema: `{"type":"object"}`},
+		{Name: "submit_findings", Description: "d", Schema: `{"type":"object"}`},
+	}
+
+	resp1, err := c.Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "investigate"}},
+		Tools:    tools,
+	})
+	if err != nil {
+		t.Fatalf("turn 1 Complete: %v", err)
+	}
+	if len(resp1.Opaque) == 0 {
+		t.Fatal("want non-empty Opaque when response carries a thoughtSignature")
+	}
+	var env struct {
+		V        int    `json:"v"`
+		Provider string `json:"provider"`
+		Parts    []part `json:"parts"`
+	}
+	if err := json.Unmarshal(resp1.Opaque, &env); err != nil {
+		t.Fatalf("unmarshal Opaque: %v", err)
+	}
+	if env.V != 1 || env.Provider != "gemini" || len(env.Parts) != 1 || env.Parts[0].ThoughtSignature != "sig-turn-1" {
+		t.Fatalf("unexpected Opaque envelope: %+v", env)
+	}
+
+	_, err = c.Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{
+			{Role: "user", Content: "investigate"},
+			{Role: "assistant", Content: resp1.Text, ToolCalls: resp1.ToolCalls, Opaque: resp1.Opaque},
+			{Role: "tool", ToolCallID: resp1.ToolCalls[0].ID, Content: "rollout changed"},
+		},
+		Tools:      tools,
+		ToolChoice: "submit_findings",
+	})
+	if err != nil {
+		t.Fatalf("turn 2 Complete: %v", err)
+	}
+	if len(turn2Req.Contents) != 3 {
+		t.Fatalf("turn 2 contents len = %d, want 3: %s", len(turn2Req.Contents), turn2Body)
+	}
+	modelTurn := turn2Req.Contents[1]
+	if modelTurn.Role != "model" || len(modelTurn.Parts) != 1 ||
+		modelTurn.Parts[0].FunctionCall == nil ||
+		modelTurn.Parts[0].FunctionCall.Name != "what_changed" ||
+		modelTurn.Parts[0].ThoughtSignature != "sig-turn-1" {
+		t.Fatalf("turn 2 model turn did not replay thoughtSignature verbatim: %+v (body: %s)", modelTurn, turn2Body)
+	}
+	if turn2Req.ToolConfig == nil || turn2Req.ToolConfig.FunctionCallingConfig.Mode != "ANY" {
+		t.Fatalf("turn 2 toolConfig = %+v, want ANY", turn2Req.ToolConfig)
+	}
+	if turn2Req.GenerationConfig == nil || turn2Req.GenerationConfig.ThinkingConfig == nil ||
+		turn2Req.GenerationConfig.ThinkingConfig.ThinkingLevel != "HIGH" {
+		t.Fatalf("turn 2 thinkingConfig = %+v, want HIGH", turn2Req.GenerationConfig)
+	}
+}
+
+// TestParallelFunctionCallsPreserveFirstSignatureOnly verifies that when only the
+// first functionCall in a parallel turn carries a thoughtSignature, the signature
+// stays on parts[0] only (never duplicated onto sibling calls) and both
+// functionResponses correlate properly.
+func TestParallelFunctionCallsPreserveFirstSignatureOnly(t *testing.T) {
+	var turn int
+	var turn2Req genRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		if turn == 2 {
+			_ = json.NewDecoder(r.Body).Decode(&turn2Req)
+		}
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		if turn == 1 {
+			_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"c1","name":"get_status","args":{"ns":"a"}},"thoughtSignature":"sig-par-1"},{"functionCall":{"id":"c2","name":"get_status","args":{"ns":"b"}}}]},"finishReason":"STOP"}]}`+"\n\n")
+		} else {
+			_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP"}]}`+"\n\n")
+		}
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "gemini-4-neon", "k", 0, "")
+	resp1, err := c.Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "check both"}},
+	})
+	if err != nil {
+		t.Fatalf("turn 1 Complete: %v", err)
+	}
+	if len(resp1.ToolCalls) != 2 {
+		t.Fatalf("want 2 tool calls, got %+v", resp1.ToolCalls)
+	}
+
+	_, err = c.Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{
+			{Role: "user", Content: "check both"},
+			{Role: "assistant", Content: resp1.Text, ToolCalls: resp1.ToolCalls, Opaque: resp1.Opaque},
+			{Role: "tool", ToolCallID: "c1", Content: "a ok"},
+			{Role: "tool", ToolCallID: "c2", Content: "b failing"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("turn 2 Complete: %v", err)
+	}
+	modelParts := turn2Req.Contents[1].Parts
+	if len(modelParts) != 2 {
+		t.Fatalf("want 2 model parts, got %+v", modelParts)
+	}
+	if modelParts[0].ThoughtSignature != "sig-par-1" {
+		t.Fatalf("parts[0].ThoughtSignature = %q, want sig-par-1", modelParts[0].ThoughtSignature)
+	}
+	if modelParts[1].ThoughtSignature != "" {
+		t.Fatalf("parts[1].ThoughtSignature = %q, want empty (must not duplicate signature)", modelParts[1].ThoughtSignature)
+	}
+	resParts := turn2Req.Contents[2].Parts
+	if len(resParts) != 2 ||
+		resParts[0].FunctionResponse == nil || resParts[0].FunctionResponse.ID != "c1" || resParts[0].FunctionResponse.Name != "get_status" ||
+		resParts[1].FunctionResponse == nil || resParts[1].FunctionResponse.ID != "c2" || resParts[1].FunctionResponse.Name != "get_status" {
+		t.Fatalf("functionResponse correlation wrong: %+v", resParts)
+	}
+}
+
+// TestThoughtPartsFilteredAndSignedRetained verifies thought:true parts never leak
+// into resp.Text, unsigned thought:true parts are dropped from Opaque, signed
+// thought:true parts are retained verbatim, adjacent unsigned text deltas coalesce,
+// and trailing empty-text parts carrying a thoughtSignature are retained.
+func TestThoughtPartsFilteredAndSignedRetained(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"internal scratchpad"}]}}]}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"signed scratch","thoughtSignature":"sig-t"}]}}]}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Hello "}]}}]}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"world"}]}}]}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig-end"}]},"finishReason":"STOP"}]}` + "\n\n",
+	})
+	defer srv.Close()
+
+	resp, err := New(srv.URL, "gemini-4-neon", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Text != "Hello world" {
+		t.Fatalf("resp.Text = %q, want %q", resp.Text, "Hello world")
+	}
+	parts, ok := decodeOpaqueParts(resp.Opaque)
+	if !ok {
+		t.Fatalf("expected valid Gemini Opaque envelope, got %s", resp.Opaque)
+	}
+	want := []part{
+		{Text: "signed scratch", Thought: true, ThoughtSignature: "sig-t"},
+		{Text: "Hello world"},
+		{Text: "", ThoughtSignature: "sig-end"},
+	}
+	if !reflect.DeepEqual(parts, want) {
+		t.Fatalf("decoded Opaque parts =\n  %+v\nwant\n  %+v", parts, want)
+	}
+}
+
+// TestNoSignatureLeavesOpaqueNil verifies Gemini 2.5 responses (plain text +
+// unsigned functionCall) keep resp.Opaque == nil.
+func TestNoSignatureLeavesOpaqueNil(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"checking"},{"functionCall":{"name":"what_changed","args":{"ns":"apps"}}}]},"finishReason":"STOP"}]}` + "\n\n",
+	})
+	defer srv.Close()
+
+	resp, err := New(srv.URL, "gemini-2.5-flash-lite", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Opaque != nil {
+		t.Fatalf("want nil Opaque when no thoughtSignature is present, got %s", resp.Opaque)
+	}
+}
+
+// TestForeignOrCorruptOpaqueFallsBackCleanly verifies foreign (e.g. Anthropic) or
+// malformed Opaque payloads fall back cleanly to synthesizing parts from Content +
+// ToolCalls, with no skip_thought_signature_validator sentinel emitted.
+func TestForeignOrCorruptOpaqueFallsBackCleanly(t *testing.T) {
+	cases := []struct {
+		name   string
+		opaque json.RawMessage
+	}{
+		{"anthropic thinking array", json.RawMessage(`[{"type":"thinking","thinking":"x","signature":"s"}]`)},
+		{"wrong version", json.RawMessage(`{"v":2,"provider":"gemini","parts":[{"text":"x"}]}`)},
+		{"wrong provider", json.RawMessage(`{"v":1,"provider":"openai","parts":[{"text":"x"}]}`)},
+		{"corrupt json", json.RawMessage(`{corrupt`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			var gotReq genRequest
+			srv := sseServer(t, func(r *http.Request) {
+				body, _ = io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &gotReq)
+			}, []string{
+				`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n",
+			})
+			defer srv.Close()
+
+			_, err := New(srv.URL, "gemini-4-neon", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{
+					{Role: "user", Content: "hi"},
+					{
+						Role:      "assistant",
+						Content:   "checking",
+						ToolCalls: []providers.ToolCall{{ID: "c1", Name: "what_changed", Args: `{"ns":"apps"}`}},
+						Opaque:    tc.opaque,
+					},
+					{Role: "tool", ToolCallID: "c1", Content: "done"},
+				},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if strings.Contains(string(body), "skip_thought_signature_validator") {
+				t.Fatalf("fallback must never emit skip_thought_signature_validator: %s", body)
+			}
+			modelParts := gotReq.Contents[1].Parts
+			if len(modelParts) != 2 || modelParts[0].Text != "checking" ||
+				modelParts[1].FunctionCall == nil || modelParts[1].FunctionCall.Name != "what_changed" {
+				t.Fatalf("unexpected fallback parts: %+v", modelParts)
+			}
+		})
+	}
+}
+
+// TestRequestPrefixStableWithThoughtSignature guards Gemini's implicit prefix cache
+// across multi-turn conversations carrying signed Opaque assistant turns.
+func TestRequestPrefixStableWithThoughtSignature(t *testing.T) {
+	var bodies [][]byte
+	capture := func(r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, b)
+	}
+	events := []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n",
+	}
+	srv := sseServer(t, capture, events)
+	defer srv.Close()
+
+	c := New(srv.URL, "gemini-4-neon", "k", 0, "high")
+	tools := []providers.ToolSpec{{Name: "a", Description: "d", Schema: `{"type":"object"}`}}
+	opaque1 := json.RawMessage(`{"v":1,"provider":"gemini","parts":[{"functionCall":{"id":"t1","name":"a","args":{"k":"v"}},"thoughtSignature":"sig-1"}]}`)
+	opaque2 := json.RawMessage(`{"v":1,"provider":"gemini","parts":[{"functionCall":{"id":"t2","name":"a","args":{"k":"v2"}},"thoughtSignature":"sig-2"}]}`)
+
+	turn2Msgs := []providers.Message{
+		{Role: "user", Content: "incident"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "t1", Name: "a", Args: `{"k":"v"}`}}, Opaque: opaque1},
+		{Role: "tool", ToolCallID: "t1", Content: "res1"},
+	}
+	turn3Msgs := append(append([]providers.Message(nil), turn2Msgs...),
+		providers.Message{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "t2", Name: "a", Args: `{"k":"v2"}`}}, Opaque: opaque2},
+		providers.Message{Role: "tool", ToolCallID: "t2", Content: "res2"},
+	)
+
+	if _, err := c.Complete(context.Background(), providers.CompletionRequest{
+		System: "sys", Tools: tools, Messages: turn2Msgs,
+	}); err != nil {
+		t.Fatalf("turn 2 Complete: %v", err)
+	}
+	if _, err := c.Complete(context.Background(), providers.CompletionRequest{
+		System: "sys", Tools: tools, Messages: turn3Msgs,
+	}); err != nil {
+		t.Fatalf("turn 3 Complete: %v", err)
+	}
+
+	var r2, r3 genRequest
+	if err := json.Unmarshal(bodies[0], &r2); err != nil {
+		t.Fatalf("unmarshal r2: %v", err)
+	}
+	if err := json.Unmarshal(bodies[1], &r3); err != nil {
+		t.Fatalf("unmarshal r3: %v", err)
+	}
+	b2Prefix, _ := json.Marshal(r2.Contents)
+	b3Prefix, _ := json.Marshal(r3.Contents[:len(r2.Contents)])
+	if string(b2Prefix) != string(b3Prefix) {
+		t.Fatalf("signed Opaque prefix drifted across turns:\n  turn2: %s\n  turn3: %s", b2Prefix, b3Prefix)
 	}
 }

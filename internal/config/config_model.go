@@ -124,10 +124,11 @@ type Model struct {
 	// Effort opts into deeper model reasoning per request. Provider-specific
 	// vocabulary, validated at startup: anthropic low|medium|high|max (sent as
 	// output_config.effort), openai minimal|low|medium|high (sent as
-	// reasoning_effort). Empty = omitted from requests (today's behavior). Not
-	// supported for provider gemini (its thinkingConfig has replay semantics —
-	// thought signatures — the provider-agnostic history can't carry). Models that
-	// don't support the knob return a 400, which is classified permanent.
+	// reasoning_effort), gemini minimal|low|medium|high|xhigh (sent uppercase as
+	// generationConfig.thinkingConfig.thinkingLevel). Empty = omitted from
+	// requests (preserving each model's native default). Models that don't
+	// support a level (e.g. minimal on Gemini 4) return a 400, which is
+	// classified permanent.
 	Effort string `yaml:"effort"`
 	// Thinking opts into adaptive extended thinking, sent as thinking:{type:"adaptive"}.
 	// Only value is "adaptive"; only supported for provider anthropic (the client

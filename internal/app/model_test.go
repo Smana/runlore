@@ -3,11 +3,17 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
 	anthropic "github.com/Smana/runlore/internal/model/anthropic"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // TestEffectiveMaxTokens locks in the output-token defaulting: an unset (0)
@@ -126,6 +132,39 @@ func TestNewModelClient(t *testing.T) {
 				t.Fatalf("NewModelClient(%q) type = %s, want %s", tc.provider, got, tc.wantType)
 			}
 		})
+	}
+}
+
+// TestNewModelClientGeminiEffort asserts NewModelClient passes effort through
+// to the Gemini client, emitting generationConfig.thinkingConfig.thinkingLevel.
+func TestNewModelClientGeminiEffort(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`+"\n\n")
+	}))
+	defer srv.Close()
+
+	client := NewModelClient("gemini", srv.URL, "gemini-4-neon", "k", 8192, "xhigh", "")
+	if _, err := client.Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	var got struct {
+		GenerationConfig struct {
+			ThinkingConfig *struct {
+				ThinkingLevel string `json:"thinkingLevel"`
+			} `json:"thinkingConfig"`
+		} `json:"generationConfig"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	if got.GenerationConfig.ThinkingConfig == nil || got.GenerationConfig.ThinkingConfig.ThinkingLevel != "XHIGH" {
+		t.Fatalf("thinkingConfig = %+v, want XHIGH (body: %s)", got.GenerationConfig.ThinkingConfig, body)
 	}
 }
 
