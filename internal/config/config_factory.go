@@ -14,11 +14,14 @@ import (
 // whole integration off.
 type Factory struct {
 	URL             string          `yaml:"url"`               // factory API base URL; empty disables the integration
-	TokenURL        string          `yaml:"token_url"`         // OAuth2 token endpoint (client credentials); https only
+	TokenEnv        string          `yaml:"token_env"`         // env var holding a static Bearer token (mutually exclusive with OAuth2 fields)
+	TokenURL        string          `yaml:"token_url"`         // OAuth2 token endpoint (client credentials); https or loopback/in-cluster
 	CAFile          string          `yaml:"ca_file"`           // optional PEM of a private CA, trusted besides the system roots, for factory.url and token_url only
 	ClientIDEnv     string          `yaml:"client_id_env"`     // env var holding the client id
 	ClientSecretEnv string          `yaml:"client_secret_env"` // env var holding the client secret
-	ProjectIDEnv    string          `yaml:"project_id_env"`    // env var holding the identity provider project id (token audience)
+	ProjectIDEnv    string          `yaml:"project_id_env"`    // env var holding the ZITADEL project id (emits ZITADEL audience scope; mutually exclusive with oauth_scope)
+	OAuthScope      string          `yaml:"oauth_scope"`       // optional OAuth2 scope for generic client credentials (omitted when empty; mutually exclusive with project_id_env)
+	OAuthAudience   string          `yaml:"oauth_audience"`    // optional OAuth2 audience form parameter for generic client credentials (omitted when empty)
 	Repository      string          `yaml:"repository"`        // owner/name the factory works on
 	MaxCostUSD      float64         `yaml:"max_cost_usd"`      // per-task cost ceiling sent with each task; must be above 0
 	Webhook         FactoryWebhook  `yaml:"webhook"`           // the inbound webhook receiver
@@ -85,21 +88,50 @@ func validateFactory(f Factory) error {
 	if !f.Enabled() {
 		return nil
 	}
-	if f.TokenURL == "" {
-		return fmt.Errorf("factory.token_url is required when factory.url is set")
-	}
-	if !strings.HasPrefix(f.TokenURL, "https://") {
-		return fmt.Errorf("factory.token_url must be https (client credentials never travel in clear), got %q", f.TokenURL)
-	}
-	for name, v := range map[string]string{
-		"factory.client_id_env":      f.ClientIDEnv,
-		"factory.client_secret_env":  f.ClientSecretEnv,
-		"factory.project_id_env":     f.ProjectIDEnv,
-		"factory.webhook.secret_env": f.Webhook.SecretEnv,
-	} {
-		if v == "" {
-			return fmt.Errorf("%s is required when factory.url is set", name)
+	if f.TokenEnv != "" {
+		var conflicts []string
+		for _, kv := range []struct{ name, val string }{
+			{"factory.token_url", f.TokenURL},
+			{"factory.client_id_env", f.ClientIDEnv},
+			{"factory.client_secret_env", f.ClientSecretEnv},
+			{"factory.project_id_env", f.ProjectIDEnv},
+			{"factory.oauth_scope", f.OAuthScope},
+			{"factory.oauth_audience", f.OAuthAudience},
+		} {
+			if kv.val != "" {
+				conflicts = append(conflicts, kv.name)
+			}
 		}
+		if len(conflicts) > 0 {
+			return fmt.Errorf("factory.token_env cannot be combined with OAuth2 settings (%s)", strings.Join(conflicts, ", "))
+		}
+		if err := checkSecureKeyEndpoint("factory.url", "factory.token_env", f.URL, f.TokenEnv); err != nil {
+			return err
+		}
+	} else {
+		if f.TokenURL == "" {
+			return fmt.Errorf("factory.token_url is required when factory.url is set (or set factory.token_env for a static bearer token)")
+		}
+		for _, kv := range []struct{ name, val string }{
+			{"factory.client_id_env", f.ClientIDEnv},
+			{"factory.client_secret_env", f.ClientSecretEnv},
+		} {
+			if kv.val == "" {
+				return fmt.Errorf("%s is required when factory.url is set", kv.name)
+			}
+		}
+		if f.ProjectIDEnv != "" && f.OAuthScope != "" {
+			return fmt.Errorf("factory.project_id_env and factory.oauth_scope cannot both be set (ambiguous OAuth2 scope)")
+		}
+		if err := checkSecureKeyEndpoint("factory.token_url", "factory.client_secret_env", f.TokenURL, f.ClientSecretEnv); err != nil {
+			return err
+		}
+		if err := checkSecureKeyEndpoint("factory.url", "factory.client_secret_env", f.URL, f.ClientSecretEnv); err != nil {
+			return err
+		}
+	}
+	if f.Webhook.SecretEnv == "" {
+		return fmt.Errorf("factory.webhook.secret_env is required when factory.url is set")
 	}
 	if owner, repo, ok := strings.Cut(f.Repository, "/"); !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
 		return fmt.Errorf("factory.repository must be owner/name, got %q", f.Repository)
