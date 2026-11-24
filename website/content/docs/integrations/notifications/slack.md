@@ -389,7 +389,7 @@ notify:
     thread_capture: true         # the chat layer has no channel without it
   thread:
     chat_calls_per_hour: 30      # default 30
-    chat_tokens_per_hour: 109480 # default 109480 — derived, not round
+    chat_tokens_per_hour: 110700 # default 110700 — derived, not round
 outcome:
   ledger_path: /var/lib/runlore/outcome.jsonl   # required by thread_capture, as above
 ```

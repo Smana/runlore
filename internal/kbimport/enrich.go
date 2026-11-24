@@ -10,6 +10,8 @@ import (
 
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/untrusted"
 )
 
 const submitFrontmatterName = "submit_frontmatter"
@@ -33,7 +35,7 @@ func submitFrontmatterSpec() providers.ToolSpec {
 const enrichSystemPrompt = `You refine YAML frontmatter for an SRE runbook being imported into a knowledge
 catalog. You are given the deterministic draft frontmatter and the document body.
 Improve title/description/tags only where the draft is weak; keep them faithful
-to the document — never invent facts. Answer ONLY via submit_frontmatter.`
+to the document — never invent facts. Answer ONLY via submit_frontmatter.` + "\n\n" + untrusted.SystemNotice
 
 // Enrich optionally refines a Result's frontmatter with the configured model.
 // It NEVER gates (mirrors kbvalidate.ReviewSemantic): nil model, a model
@@ -45,8 +47,9 @@ func Enrich(ctx context.Context, r Result, m providers.ModelProvider) Result {
 	if m == nil {
 		return r
 	}
-	prompt := fmt.Sprintf("Draft frontmatter:\ntype: %s\ntitle: %s\ndescription: %s\ntags: %s\n\nDocument body:\n\n%s",
+	raw := fmt.Sprintf("Draft frontmatter:\ntype: %s\ntitle: %s\ndescription: %s\ntags: %s\n\nDocument body:\n\n%s",
 		r.Entry.Type, r.Entry.Title, r.Entry.Description, strings.Join(r.Entry.Tags, ", "), r.Entry.Body)
+	prompt := untrusted.Wrap("imported_document", redact.Secrets(raw))
 	resp, err := m.Complete(ctx, providers.CompletionRequest{
 		System:     enrichSystemPrompt,
 		Messages:   []providers.Message{{Role: "user", Content: prompt}},

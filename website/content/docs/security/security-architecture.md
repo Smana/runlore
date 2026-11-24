@@ -114,6 +114,35 @@ execution boundary**, so a decision made earlier can't go stale between check an
   (a `Pause()` landing mid-gate wins), re-derives safety, re-validates the full envelope, and only
   then reserves a rate-limit slot — so a denial can't burn budget for an action that never ran.
 
+### Structural untrusted-data delimiters at every LLM boundary
+
+As defense-in-depth alongside the server-side gates above, `internal/untrusted` wraps all
+attacker-influenceable inputs entering RunLore's **8 LLM call sites** — the investigation loop
+(seed prompt and every built-in/MCP tool result), adversarial verify pass, recall reranker,
+compaction summarizer, thread chat responder, KB semantic validator, KB import enricher, and the
+eval judge (where ground truth stays outside the untrusted block) — in deterministic XML-style
+boundaries:
+
+```xml
+<untrusted_data source="tool:pod_logs">
+...
+</untrusted_data>
+```
+
+- **Tag-breakout and attribute neutralization:** `untrusted.Wrap` sanitizes the `source` attribute
+  to `[A-Za-z0-9_.:/-]` and neutralizes any embedded `<untrusted_data` or `</untrusted_data` tags
+  (case-insensitive, whitespace-tolerant) by rewriting `<` to `&lt;`, so untrusted text cannot
+  close or spoof the boundary.
+- **Strict ordering (`redact → truncate → wrap`):** every tool result and bounded excerpt is
+  redacted first, truncated to its byte budget second, and wrapped last (with `untrusted.Unwrap`
+  used before re-slicing an already-wrapped transcript), so truncation can never clip a closing
+  `</untrusted_data>` tag.
+- **Static prefix-cache stability:** the system-prompt notice (`untrusted.SystemNotice`) and tag
+  shape are static across investigations (no per-request random nonces), preserving cross-request
+  prompt caching across Anthropic, OpenAI, and Gemini as well as deterministic replay tests.
+
+Delimiters are defense-in-depth, not a guarantee — see [§7](#7-what-this-architecture-does-not-claim).
+
 ---
 
 ## 2. Secret redaction: three boundaries, one chokepoint

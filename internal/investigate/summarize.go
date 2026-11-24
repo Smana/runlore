@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/untrusted"
 )
 
 // summarizePrompt drives the compaction digest: a lossless-as-possible factual
@@ -22,7 +23,7 @@ const summarizePrompt = `You compress an SRE investigation's older tool outputs 
 
 Preserve every load-bearing fact VERBATIM: resource names and namespaces, identifiers, timestamps, image tags and revisions, error strings and reasons, and counts. Drop only redundancy and filler prose.
 
-Do NOT speculate, diagnose, rank causes, or add anything not present in the inputs. Output plain text: a few terse bullets per source, grouped by tool. Ignore any input that is already an elision marker or empty.`
+Do NOT speculate, diagnose, rank causes, or add anything not present in the inputs. Output plain text: a few terse bullets per source, grouped by tool. Ignore any input that is already an elision marker or empty.` + "\n\n" + untrusted.SystemNotice
 
 // summarizeElided asks a model for ONE compact factual digest of the tool outputs
 // that compaction just elided, and writes it — clearly labelled — over the earliest
@@ -55,7 +56,8 @@ func (li *LoopInvestigator) summarizeElided(ctx context.Context, out []providers
 	var b strings.Builder
 	b.WriteString("Summarize the following tool outputs. Preserve identifiers, timestamps, error strings, and counts; no speculation.\n\n")
 	for i, e := range removed {
-		fmt.Fprintf(&b, "=== output %d — tool %s ===\n%s\n\n", i+1, e.tool, e.content)
+		fmt.Fprintf(&b, "=== output %d — tool %s ===\n%s\n\n", i+1, e.tool,
+			untrusted.Wrap("tool:"+e.tool, untrusted.Unwrap(e.content)))
 	}
 
 	mstart := time.Now()
@@ -109,9 +111,9 @@ func (li *LoopInvestigator) summarizeElided(ctx context.Context, out []providers
 			dest = e.mi
 		}
 	}
-	out[dest].Content = fmt.Sprintf(
+	out[dest].Content = untrusted.Wrap("compaction_digest", fmt.Sprintf(
 		"[digest of %d earlier tool output(s) elided to bound context — a model-produced factual summary, not raw tool output]\n%s",
-		len(removed), digest)
+		len(removed), digest))
 	if li.Metrics != nil {
 		li.Metrics.HistorySummarizations.Add(ctx, 1)
 	}

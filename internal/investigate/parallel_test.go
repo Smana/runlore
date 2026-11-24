@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/untrusted"
 )
 
 // slowTool is a fake investigation tool that sleeps for delay (respecting ctx) and
@@ -134,7 +135,7 @@ func TestToolCallsRunConcurrentlyAndKeepOrder(t *testing.T) {
 		if ids[i] != want {
 			t.Fatalf("tool result order = %v, want %v", ids, wantIDs)
 		}
-		if wantContent := fmt.Sprintf(`slow:{"n":%d}`, i+1); contents[i] != wantContent {
+		if wantContent := untrusted.Wrap("tool:slow_tool", fmt.Sprintf(`slow:{"n":%d}`, i+1)); contents[i] != wantContent {
 			t.Fatalf("tool result %s content = %q, want %q (result matched to wrong call)", ids[i], contents[i], wantContent)
 		}
 	}
@@ -253,7 +254,7 @@ func TestMalformedSubmitFindingsAmongCalls(t *testing.T) {
 	if !strings.HasPrefix(contents[0], "error: ") {
 		t.Fatalf("malformed submit_findings must be answered with a parse-error result, got %q", contents[0])
 	}
-	if contents[1] != `slow:{"go":"on"}` {
-		t.Fatalf("other call's result = %q, want its own output", contents[1])
+	if want := untrusted.Wrap("tool:next_tool", `slow:{"go":"on"}`); contents[1] != want {
+		t.Fatalf("other call's result = %q, want %q", contents[1], want)
 	}
 }

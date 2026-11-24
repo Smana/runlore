@@ -9,6 +9,8 @@ import (
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/untrusted"
 )
 
 // Verdict is one advisory judgement: whether the property holds, with a reason.
@@ -36,7 +38,7 @@ checks cannot judge. Be skeptical and call submit_review exactly once.
 2. durable — is this a durable, generalizable incident worth keeping, or transient/
    environmental/bootstrap-convergence noise unlikely to recur or teach anything?
 
-Default ok=false when uncertain; give a one-line rationale for each.`
+Default ok=false when uncertain; give a one-line rationale for each.` + "\n\n" + untrusted.SystemNotice
 
 func submitReviewSpec() providers.ToolSpec {
 	return providers.ToolSpec{
@@ -105,8 +107,9 @@ func ReviewSemantic(ctx context.Context, e catalog.Entry, m providers.ModelProvi
 	return Advisory{Skipped: true}, nil
 }
 
-// renderEntry presents the entry to the reviewer model.
+// renderEntry presents the entry to the reviewer model, redacted and wrapped as untrusted data.
 func renderEntry(e catalog.Entry) string {
-	return fmt.Sprintf("Type: %s\nTitle: %s\nResource: %s\nDescription: %s\n\n%s",
+	raw := fmt.Sprintf("Type: %s\nTitle: %s\nResource: %s\nDescription: %s\n\n%s",
 		e.Type, e.Title, e.Resource, e.Description, e.Body)
+	return untrusted.Wrap("kb_entry", redact.Secrets(raw))
 }
