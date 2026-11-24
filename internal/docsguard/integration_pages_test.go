@@ -280,3 +280,90 @@ func TestIntegrationPagesAreLinkedFromTheIndex(t *testing.T) {
 	}
 	t.Logf("verified %d integration pages are linked from the landing page", checked)
 }
+
+// readmeSkippedIntegrationIDs lists integration pages that are worked recipes or
+// deployment-mode guides rather than distinct backends in README.md's table.
+var readmeSkippedIntegrationIDs = map[string]bool{
+	"grafana-mcp":   true, // worked MCP recipe; MCP itself is listed
+	"local-keyless": true, // deployment guide for OpenAI-compatible; covered by openai-compatible
+}
+
+// TestReadmeListsAllIntegrationPages ensures README.md's Supported integrations
+// section links to the canonical docs page of every non-recipe integration under
+// website/content/docs/integrations/. Matching on canonical URLs avoids coupling
+// to display-name prose while keeping GitHub's landing page in sync with shipped
+// backends (including non-registry ones like GitLab, cloud, network, and LLMs).
+func TestReadmeListsAllIntegrationPages(t *testing.T) {
+	root := repoRoot(t)
+	dir := filepath.Join(root, "website", "content", "docs", "integrations")
+
+	pages := loadIntegrationPages(t, dir)
+
+	raw, err := os.ReadFile(filepath.Join(root, "README.md")) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	section := readmeSection(t, string(raw), "Supported integrations")
+
+	seenSkipped := map[string]bool{}
+	var checked int
+	for _, p := range pages {
+		if readmeSkippedIntegrationIDs[p.ID] {
+			seenSkipped[p.ID] = true
+			continue
+		}
+		rel, rerr := filepath.Rel(dir, p.Path)
+		if rerr != nil {
+			t.Fatalf("rel %s: %v", p.Path, rerr)
+		}
+		wantURL := "https://runlore.io/docs/integrations/" + strings.TrimSuffix(filepath.ToSlash(rel), ".md") + "/"
+		if !strings.Contains(section, wantURL) {
+			t.Errorf("%s (%s/%s) is not linked from README.md's Supported integrations section — add %s", rel, p.Kind, p.ID, wantURL)
+		}
+		checked++
+	}
+
+	if checked == 0 {
+		t.Fatal("no integration pages checked — this guard is now inert")
+	}
+
+	skippedIDs := make([]string, 0, len(readmeSkippedIntegrationIDs))
+	for id := range readmeSkippedIntegrationIDs {
+		skippedIDs = append(skippedIDs, id)
+	}
+	sort.Strings(skippedIDs)
+	for _, id := range skippedIDs {
+		if !seenSkipped[id] {
+			t.Errorf("readmeSkippedIntegrationIDs[%q] did not match any integration page — remove the stale skip entry", id)
+		}
+	}
+
+	t.Logf("verified %d integration pages are linked from README.md", checked)
+}
+
+// readmeSection returns the slice of content starting at the first level-2
+// heading (`## ...`) containing headingSubstr and ending just before the next
+// level-2 heading (or EOF). It fails the test if no matching heading is found,
+// preventing the guard from silently passing if the heading is renamed.
+func readmeSection(t *testing.T, content, headingSubstr string) string {
+	t.Helper()
+	lines := strings.Split(content, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "## ") && strings.Contains(line, headingSubstr) {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		t.Fatalf("README.md: level-2 heading containing %q not found", headingSubstr)
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") {
+			end = i
+			break
+		}
+	}
+	return strings.Join(lines[start:end], "\n")
+}

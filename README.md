@@ -151,6 +151,10 @@ reranker's call, the failed verify call, and *then* a full ReAct loop, and it la
 the verify endpoint is already unhealthy — worth knowing ahead of an incident, not during one. The
 shipped eval suite includes a poisoned-entry scenario proving a bad entry is rejected at recall time.
 
+Every drafted or imported KB entry is also screened deterministically for prompt-injection patterns
+(`threatcheck`, gating `ready-to-merge`), operators can turn chat thread replies in Slack or Matrix
+directly into KB notes, and external tools can query the live catalog over HTTP or via `lore kb resolve`.
+
 → **[How the learning loop works](https://runlore.io/docs/concepts/learning-loop/)** · **[Reviewing & approving knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/)**
 
 > [!NOTE]
@@ -190,16 +194,19 @@ additive. Full setup detail in **[Data sources](https://runlore.io/docs/concepts
 | Category | Supported | Config |
 |---|---|---|
 | **GitOps** — *what changed* | Flux · Argo CD | `gitops.engine` |
-| **Metrics** | VictoriaMetrics · Prometheus *(PromQL)* | `metrics.url` |
-| **Logs** | VictoriaLogs *(LogsQL)* | `logs.url` |
-| **Network flows** | Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs | `network.provider` |
-| **Cloud** | AWS — CloudTrail + EC2 / ASG / EKS · GCP — [Cloud Audit Logs + GKE / MIG / Compute](https://runlore.io/docs/integrations/data-sources/gcp-cloud/) (starts on live GKE; lens responses unobserved) | `cloud.provider` |
-| **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
-| **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
-| **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
-| **Notifiers** | Slack *(bot token: threaded summary + detail; opt-in 👍/👎 buttons)* · Matrix *(opt-in 👍/👎 reactions)* — both feed the learning loop · Slack incoming webhook / generic webhook *(single verdict-first message)* | `notify.*` |
-| **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
-| **MCP** | Server — query your KB from Claude Code / any MCP client · Client — wire external MCP tool servers into investigations (allowlist-gated) | `mcp.*` |
+| **Metrics** | [Prometheus / VictoriaMetrics](https://runlore.io/docs/integrations/data-sources/prometheus/) *(PromQL)* | `metrics.url` |
+| **Logs** | [VictoriaLogs](https://runlore.io/docs/integrations/data-sources/victorialogs/) · [Loki](https://runlore.io/docs/integrations/data-sources/loki/) · [Elasticsearch](https://runlore.io/docs/integrations/data-sources/elasticsearch/) · [OpenSearch](https://runlore.io/docs/integrations/data-sources/opensearch/) | `logs.url` |
+| **Network flows** | [Cilium Hubble](https://runlore.io/docs/integrations/data-sources/hubble/) · [AWS VPC Flow Logs](https://runlore.io/docs/integrations/data-sources/aws-vpc-flow-logs/) · [GCP Firewall Logs](https://runlore.io/docs/integrations/data-sources/gcp-firewall-logs/) | `network.provider` |
+| **Cloud** | [AWS](https://runlore.io/docs/integrations/data-sources/aws-cloud/) *(CloudTrail + EC2 / ASG / EKS)* · [GCP](https://runlore.io/docs/integrations/data-sources/gcp-cloud/) *(Cloud Audit Logs + GKE / MIG / Compute; starts on live GKE, lens responses unobserved)* | `cloud.provider` |
+| **Kubernetes** | [Kubernetes](https://runlore.io/docs/integrations/data-sources/kubernetes/) *(client-go — pod status, events, specs, controller & pod logs)* | *(in-cluster)* |
+| **Source repos** | [Source repos](https://runlore.io/docs/integrations/data-sources/source-repos/) *(code diffs behind manifest image bumps)* | `source_repos.*` |
+| **LLM** | [Anthropic](https://runlore.io/docs/integrations/llm/anthropic/) · [Google Gemini](https://runlore.io/docs/integrations/llm/gemini/) · [OpenAI-compatible](https://runlore.io/docs/integrations/llm/openai-compatible/) *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
+| **Decision model** | Optional smaller/faster "System One" model for recall reranking and dedup | `decision_model.*` |
+| **Triggers** *(sources)* | [Alertmanager](https://runlore.io/docs/integrations/triggers/alertmanager/) · [GitOps failures](https://runlore.io/docs/integrations/triggers/gitops/) · [PagerDuty](https://runlore.io/docs/integrations/triggers/pagerduty/) · [Grafana Alerting](https://runlore.io/docs/integrations/triggers/grafana/) · [Custom webhook](https://runlore.io/docs/integrations/triggers/custom-webhook/) | `sources.*` |
+| **Notifiers** | [Slack](https://runlore.io/docs/integrations/notifications/slack/) *(threaded summary, feedback buttons, silence, thread Q&A & reply-to-KB)* · [Matrix](https://runlore.io/docs/integrations/notifications/matrix/) *(reactions, silence, thread Q&A & reply-to-KB)* · [Webhook](https://runlore.io/docs/integrations/notifications/webhook/) · [Templated](https://runlore.io/docs/integrations/notifications/templated/) | `notify.*` |
+| **Knowledge base** *(git forge)* | [GitHub](https://runlore.io/docs/integrations/forge/github/) *(App auth)* · [GitLab](https://runlore.io/docs/integrations/forge/gitlab/) *(access token)* | `forge.*` |
+| **Remediation handoff** | Optional external factory client for task handoff and post-soak verification | `factory.*` |
+| **MCP** | [MCP server & client](https://runlore.io/docs/integrations/data-sources/mcp/) — expose your KB via `lore mcp`, or wire external MCP tool servers into investigations (allowlist-gated) | `mcp.*` |
 
 ## No native integration? Point RunLore at any MCP server
 
@@ -344,9 +351,11 @@ between commits. It's usable today, but "stable" means different things across t
   investigation, then human-approves a **pause-auto-sync** action that executes reversibly (the prior
   `syncPolicy.automated` is preserved for resume). Both engines share the same reversible-only,
   allowlisted action envelope.
-- **Functional but less exercised:** **Matrix**, **Gemini**, the **PagerDuty** webhook source, cloud
-  integrations, and the network (Hubble) provider. They work and are unit-tested, but see less
-  real-world mileage — expect rougher edges and please file issues.
+- **Functional but less exercised:** **Loki**, **Elasticsearch**, and **OpenSearch** log backends;
+  **GitLab** as a KB forge; **Grafana Alerting**, **PagerDuty**, and **custom webhook** trigger
+  sources; **Matrix** and **templated** notifiers; **Gemini**; cloud integrations (AWS / GCP); and
+  network flow providers (Hubble / AWS VPC Flow Logs / GCP Firewall Logs). They work and are
+  unit-tested, but see less real-world mileage — expect rougher edges and please file issues.
 - **The `auto` autonomy rung is experimental, frozen, and not recommended on real
   clusters.** The supported posture is **read-only → suggest → approve**: RunLore reads
   and recommends, a human reviews and merges. Hands-off `auto` remains on the roadmap,

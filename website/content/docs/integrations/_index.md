@@ -42,7 +42,7 @@ What runs the investigation loop.
   {{< hextra/feature-card link="llm/anthropic/" icon="chip" title="Anthropic"
     subtitle="Native Claude, keyed or in-cluster via a compatible gateway." >}}
   {{< hextra/feature-card link="llm/gemini/" icon="chip" title="Gemini"
-    subtitle="Google's models over the OpenAI-compatible endpoint — version caveats apply." >}}
+    subtitle="Google's Gemini models over the native streamGenerateContent API." >}}
   {{< hextra/feature-card link="llm/local-keyless/" icon="terminal" title="Local / keyless"
     subtitle="In-cluster vLLM or Ollama — no API key, no egress." >}}
 {{< /hextra/feature-grid >}}
