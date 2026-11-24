@@ -98,6 +98,7 @@ distributions — keep the SDK defaults and are read as heatmaps, not percentile
 | `runlore_investigations_started_total` | counter | — | investigations actually begun |
 | `runlore_investigations_completed_total` | counter | `result` | investigations finished (`resolved`/`unresolved`/`recall`/`timeout`/`error`/`max_steps`/`max_steps_degraded`/`budget_exceeded`/`inconclusive`/`recurrence_suppressed`/`silenced`) |
 | `runlore_investigation_duration_seconds` | histogram | `result` | wall-clock per investigation |
+| `runlore_investigation_grounding_ratio` | histogram | `recalled` | fraction of cited evidence bullets traced to tool output during the adversarial verify pass (`0`–`1`, buckets `0, 0.25, 0.5, 0.75, 0.9, 1.0`); omitted when verify did not run or had no tool transcript |
 | `runlore_investigations_throttled_total` | counter | — | starts requeued by the rate limiter |
 | `runlore_investigations_dropped_total` | counter | — | dropped (rate-limiter max-requeues or token-budget kill) |
 | `runlore_investigations_cancelled_total` | counter | — | queued (not yet started) investigations cancelled because the incident resolved first (`triggers.incidents.cancel_queued_on_resolve`) |

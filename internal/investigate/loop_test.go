@@ -2060,3 +2060,40 @@ func (s staticTool) Name() string                                 { return s.nam
 func (s staticTool) Description() string                          { return s.name }
 func (s staticTool) Schema() string                               { return `{}` }
 func (s staticTool) Call(context.Context, string) (string, error) { return s.out, nil }
+
+func TestLoopRecordsGroundingRatioMetric(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "c1", Name: "pod_logs", Args: "{}"}}},
+		{ToolCalls: []providers.ToolCall{{ID: "c2", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"oom","confidence":0.8,"evidence":["OOMKilled","unverified"]}]}`}}},
+		{ToolCalls: []providers.ToolCall{{ID: "c3", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8,"ungrounded_evidence":[1]}]}`}}},
+	}}
+	li := &LoopInvestigator{
+		Model:      model,
+		Tools:      []Tool{staticTool{name: "pod_logs", out: "OOMKilled exit code 137"}},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Verify:     true,
+		Metrics:    m,
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "GroundingMetric"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	body := scrapeMetrics(t, h)
+	if !strings.Contains(body, `runlore_investigation_grounding_ratio_bucket{`) {
+		t.Fatalf("expected runlore_investigation_grounding_ratio_bucket in metrics:\n%s", body)
+	}
+	if !strings.Contains(body, `recalled="false"`) {
+		t.Fatalf("expected recalled=\"false\" attribute on grounding ratio metric:\n%s", body)
+	}
+	if !strings.Contains(body, `runlore_investigation_grounding_ratio_sum{`) || !strings.Contains(body, `recalled="false"} 0.5`) {
+		t.Fatalf("expected grounding ratio sum 0.5:\n%s", body)
+	}
+}

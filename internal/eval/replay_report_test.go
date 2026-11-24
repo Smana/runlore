@@ -96,3 +96,33 @@ func TestReportCarriesFailedClaims(t *testing.T) {
 		t.Fatalf("green report must omit failed_claims:\n%s", cb)
 	}
 }
+
+func TestReplayReportGrounding(t *testing.T) {
+	c := Case{Name: "grounded-case"}
+	agg := aggregateResults(c, []Result{
+		{Pass: true, Confidence: 0.8, GroundingTraced: 2, GroundingTotal: 4},
+		{Pass: true, Confidence: 0.9, GroundingTraced: 3, GroundingTotal: 4},
+		{Pass: true, Confidence: 0.85}, // unmeasured run ignored in median
+	})
+	if agg.GroundingMedian == nil || *agg.GroundingMedian != 0.625 {
+		t.Fatalf("GroundingMedian = %v, want 0.625", agg.GroundingMedian)
+	}
+
+	unmeasured := aggregateResults(Case{Name: "unmeasured-case"}, []Result{{Pass: true, Confidence: 0.8}})
+	if unmeasured.GroundingMedian != nil {
+		t.Fatalf("unmeasured case must have nil GroundingMedian, got %v", *unmeasured.GroundingMedian)
+	}
+
+	camp := Campaign{N: 3, Aggregates: []CaseAggregate{agg, unmeasured}}
+	rep := camp.Report("2026-11-24T00:00:00Z", "anthropic/test", providers.Usage{}, nil)
+	md := ScorecardMarkdown(rep, nil, 0, 0, 0)
+	if !strings.Contains(md, "| grounding |") {
+		t.Fatalf("scorecard missing grounding column:\n%s", md)
+	}
+	if !strings.Contains(md, "| 62% |") && !strings.Contains(md, "| 63% |") {
+		t.Fatalf("scorecard missing measured grounding cell:\n%s", md)
+	}
+	if !strings.Contains(md, "| unmeasured-case |") || !strings.Contains(md, "| — |") {
+		t.Fatalf("scorecard missing em-dash for unmeasured grounding:\n%s", md)
+	}
+}

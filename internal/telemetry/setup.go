@@ -67,6 +67,15 @@ var probabilityHistograms = []string{
 	"runlore_decision_model_confidence",
 }
 
+// groundingBuckets are the bucket boundaries for the evidence grounding ratio
+// histogram (0 to 1, traced / total cited evidence bullets).
+var groundingBuckets = []float64{0, 0.25, 0.5, 0.75, 0.9, 1.0}
+
+// groundingHistograms are the instrument names that get groundingBuckets.
+var groundingHistograms = []string{
+	"runlore_investigation_grounding_ratio",
+}
+
 // bucketViews builds one explicit-bucket-histogram view per named instrument.
 func bucketViews(names []string, boundaries []float64) []sdkmetric.View {
 	views := make([]sdkmetric.View, 0, len(names))
@@ -93,6 +102,7 @@ func Setup(_ context.Context) (http.Handler, func(context.Context) error, error)
 	views := bucketViews(latencyHistograms, latencyBuckets)
 	views = append(views, bucketViews(scoreHistograms, scoreBuckets)...)
 	views = append(views, bucketViews(probabilityHistograms, probabilityBuckets)...)
+	views = append(views, bucketViews(groundingHistograms, groundingBuckets)...)
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(exporter),
 		sdkmetric.WithView(views...),

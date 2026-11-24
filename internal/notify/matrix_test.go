@@ -647,3 +647,32 @@ func TestMatrixDeliverNeutralisesRoomPing(t *testing.T) {
 		t.Errorf("the ping was censored rather than word-joined; the text must still read normally:\n%s", body)
 	}
 }
+
+func TestMatrixGrounding(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"event_id":"$abc"}`))
+	}))
+	defer srv.Close()
+
+	inv := sampleInvestigation()
+	inv.RootCauses[0].Evidence = []string{"pg_up=0", "unverified claim", "migration lock timeout"}
+	inv.Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 3}
+	inv.RootCauses[0].Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 3, UngroundedIndices: []int{1}}
+
+	if err := NewMatrix(srv.URL, "!room:hs", "tok").Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	body, _ := gotBody["body"].(string)
+	formatted, _ := gotBody["formatted_body"].(string)
+	for _, rendered := range []string{body, formatted} {
+		if !strings.Contains(rendered, "2/3 evidence traced — 1 unverified") {
+			t.Errorf("Matrix output missing grounding badge:\n%s", rendered)
+		}
+		if !strings.Contains(rendered, "unverified claim (unverified)") {
+			t.Errorf("Matrix output missing (unverified) tag:\n%s", rendered)
+		}
+	}
+}

@@ -3,6 +3,7 @@
 package eval
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -34,10 +35,24 @@ type Result struct {
 	RecallFired        bool
 	RecallShortCircuit bool
 
+	// Evidence grounding telemetry copied from inv.Grounding when measured
+	// (GroundingTotal > 0). Zero values mean grounding was not measured.
+	GroundingTraced int
+	GroundingTotal  int
+
 	// Usage is the provider-reported token spend of THIS run, attributed by the
 	// runner differencing its cumulative counter. Zero means the provider reported
 	// nothing — treated downstream as unknown, never as free.
 	Usage providers.Usage
+}
+
+// GroundingRatio returns GroundingTraced / GroundingTotal and true when
+// grounding was measured (GroundingTotal > 0), or (0, false) when unmeasured.
+func (r Result) GroundingRatio() (float64, bool) {
+	if r.GroundingTotal <= 0 {
+		return 0, false
+	}
+	return float64(r.GroundingTraced) / float64(r.GroundingTotal), true
 }
 
 // Score reports whether the investigation identifies the expected root cause.
@@ -69,12 +84,27 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 		}
 	}
 
+	var groundingTraced, groundingTotal int
+	if inv.Grounding != nil && inv.Grounding.Total > 0 {
+		groundingTraced = inv.Grounding.Traced
+		groundingTotal = inv.Grounding.Total
+	}
+	if exp.MinGrounding > 0 {
+		if groundingTotal <= 0 {
+			missing = append(missing, fmt.Sprintf("grounding unmeasured < %.2f", exp.MinGrounding))
+		} else if ratio := float64(groundingTraced) / float64(groundingTotal); ratio < exp.MinGrounding {
+			missing = append(missing, fmt.Sprintf("grounding %.2f < %.2f", ratio, exp.MinGrounding))
+		}
+	}
+
 	res := Result{
-		Name:        name,
-		Pass:        len(missing) == 0 && inv.Confidence >= exp.MinConfidence,
-		Confidence:  inv.Confidence,
-		Missing:     missing,
-		OverClaimed: overClaimed,
+		Name:            name,
+		Pass:            len(missing) == 0 && inv.Confidence >= exp.MinConfidence,
+		Confidence:      inv.Confidence,
+		Missing:         missing,
+		OverClaimed:     overClaimed,
+		GroundingTraced: groundingTraced,
+		GroundingTotal:  groundingTotal,
 	}
 	if !res.Pass {
 		res.Claim = reportableClaim(blamed)

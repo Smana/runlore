@@ -3,6 +3,7 @@
 package providers
 
 import (
+	"slices"
 	"strings"
 	"time"
 )
@@ -81,6 +82,7 @@ type Investigation struct {
 	RuledOut   []string // hypotheses considered and rejected, one line each with the disproving evidence
 	DataGaps   []string // signals that could not be obtained (tool errors, missing metrics, truncation) — a data limitation, not a question for a human
 	Confidence float64
+	Grounding  *EvidenceGrounding `json:"grounding,omitempty"` // server-computed rollup across surviving RootCauses; nil when unmeasured
 	// Resolutions are the fixes RunLore verified after merge. Set by RunLore at
 	// runtime, never by the model.
 	Resolutions []AppliedResolution
@@ -282,12 +284,40 @@ type UsageTotals struct {
 	Priced            bool    // pricing was configured, so CostUSD is populated (may legitimately be 0)
 }
 
+// EvidenceGrounding records how many cited evidence bullets traced back to actual
+// tool results during the adversarial verify pass. A nil pointer (or Total == 0)
+// means grounding was not measured (verify skipped, failed, or no tool transcript
+// was available to check against).
+type EvidenceGrounding struct {
+	Traced            int   `json:"traced,omitempty"`
+	Total             int   `json:"total,omitempty"`
+	UngroundedIndices []int `json:"ungrounded_indices,omitempty"` // sorted, unique 0-based indices into Hypothesis.Evidence
+}
+
+// Ratio returns Traced / Total in [0, 1], or 0 when g is nil or Total <= 0.
+func (g *EvidenceGrounding) Ratio() float64 {
+	if g == nil || g.Total <= 0 {
+		return 0
+	}
+	return float64(g.Traced) / float64(g.Total)
+}
+
+// IsUngrounded reports whether evidence index idx was flagged as ungrounded.
+// Safe to call on a nil receiver (returns false).
+func (g *EvidenceGrounding) IsUngrounded(idx int) bool {
+	if g == nil || len(g.UngroundedIndices) == 0 {
+		return false
+	}
+	return slices.Contains(g.UngroundedIndices, idx)
+}
+
 // Hypothesis is one ranked root-cause candidate with its evidence.
 type Hypothesis struct {
 	Summary         string
 	Confidence      float64
 	ChangeRef       string
 	Evidence        []string
-	SuggestedAction string // reversible-first
+	Grounding       *EvidenceGrounding `json:"grounding,omitempty"`
+	SuggestedAction string             // reversible-first
 	Reversible      bool
 }

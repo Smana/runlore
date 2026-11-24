@@ -646,3 +646,52 @@ func TestFormatCurateFailureIsCapped(t *testing.T) {
 		t.Fatalf("a cut reason must show it was cut:\n%s", out)
 	}
 }
+
+func TestGroundingBadge(t *testing.T) {
+	cases := []struct {
+		name string
+		g    *providers.EvidenceGrounding
+		want string
+	}{
+		{"nil", nil, ""},
+		{"zero total", &providers.EvidenceGrounding{Traced: 0, Total: 0}, ""},
+		{"full", &providers.EvidenceGrounding{Traced: 3, Total: 3}, "3/3 evidence traced"},
+		{"partial one", &providers.EvidenceGrounding{Traced: 2, Total: 3}, "2/3 evidence traced — 1 unverified"},
+		{"none traced", &providers.EvidenceGrounding{Traced: 0, Total: 2}, "0/2 evidence traced — 2 unverified"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := groundingBadge(providers.Investigation{Grounding: tc.g})
+			if got != tc.want {
+				t.Fatalf("groundingBadge() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatGrounding(t *testing.T) {
+	base := sampleInvestigation()
+	base.RootCauses[0].Evidence = []string{"pg_up=0", "unverified claim", "migration lock timeout"}
+
+	// Nil grounding: nothing added.
+	plain := Format(base)
+	if strings.Contains(plain, "evidence traced") || strings.Contains(plain, "(unverified)") {
+		t.Fatalf("nil grounding should not render grounding badge or tag:\n%s", plain)
+	}
+
+	// Partial grounding: inline badge on confidence line + (unverified) on bullet 1 only.
+	partial := base
+	partial.Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 3}
+	partial.RootCauses = []providers.Hypothesis{base.RootCauses[0]}
+	partial.RootCauses[0].Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 3, UngroundedIndices: []int{1}}
+	out := Format(partial)
+	if !strings.Contains(out, "High confidence · 82% · 2/3 evidence traced — 1 unverified") {
+		t.Fatalf("confidence line missing grounding badge:\n%s", out)
+	}
+	if !strings.Contains(out, "• unverified claim (unverified)\n") {
+		t.Fatalf("ungrounded bullet missing (unverified) tag:\n%s", out)
+	}
+	if strings.Contains(out, "• pg_up=0 (unverified)") || strings.Contains(out, "• migration lock timeout (unverified)") {
+		t.Fatalf("grounded bullets must not carry (unverified) tag:\n%s", out)
+	}
+}

@@ -254,7 +254,11 @@ func Format(inv providers.Investigation) string {
 	// Confidence — shown once. confidenceBadge is the SAME function Slack calls,
 	// so the two never headline different numbers for the same investigation.
 	emoji, level, pct, stated := confidenceBadge(inv)
-	fmt.Fprintf(&b, "%s %s\n", emoji, confidenceText(level, pct, stated))
+	confLine := confidenceText(level, pct, stated)
+	if badge := groundingBadge(inv); badge != "" {
+		confLine += " · " + badge
+	}
+	fmt.Fprintf(&b, "%s %s\n", emoji, confLine)
 	if note := recallConfidenceNote(inv, pct); note != "" {
 		fmt.Fprintf(&b, "   (%s)\n", note)
 	}
@@ -332,8 +336,12 @@ func Format(inv providers.Investigation) string {
 		if rc.ChangeRef != "" {
 			fmt.Fprintf(&b, "   What changed: %s\n", rc.ChangeRef)
 		}
-		for _, e := range rc.Evidence {
-			fmt.Fprintf(&b, "   • %s\n", e)
+		for j, e := range rc.Evidence {
+			if rc.Grounding.IsUngrounded(j) {
+				fmt.Fprintf(&b, "   • %s (unverified)\n", e)
+			} else {
+				fmt.Fprintf(&b, "   • %s\n", e)
+			}
 		}
 		if rc.SuggestedAction != "" {
 			rev := ""
@@ -435,6 +443,21 @@ func Format(inv providers.Investigation) string {
 		fmt.Fprintf(&b, "%s\n", foot)
 	}
 	return b.String()
+}
+
+// groundingBadge renders "3/3 evidence traced" or "2/3 evidence traced — 1 unverified",
+// returning "" when inv.Grounding == nil or inv.Grounding.Total == 0. Shared by Format,
+// Slack, and Matrix so all three render identical copy. Uses no mrkdwn-meta chars (& < >).
+func groundingBadge(inv providers.Investigation) string {
+	g := inv.Grounding
+	if g == nil || g.Total <= 0 {
+		return ""
+	}
+	unverified := g.Total - g.Traced
+	if unverified <= 0 {
+		return fmt.Sprintf("%d/%d evidence traced", g.Traced, g.Total)
+	}
+	return fmt.Sprintf("%d/%d evidence traced — %d unverified", g.Traced, g.Total, unverified)
 }
 
 // metadataLine assembles the trigger-time facts stamped on the investigation

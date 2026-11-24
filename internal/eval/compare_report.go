@@ -13,12 +13,13 @@ import (
 
 // CompareCaseRow is one case's k-of-n verdict for one model, in the comparison.
 type CompareCaseRow struct {
-	Name     string  `json:"name"`
-	Runs     int     `json:"runs"`
-	PassRate float64 `json:"pass_rate"`
-	Reached  bool    `json:"reached"`
-	Flaky    bool    `json:"flaky"`
-	Coverage float64 `json:"coverage"` // median coverage ratio over the case's runs
+	Name      string   `json:"name"`
+	Runs      int      `json:"runs"`
+	PassRate  float64  `json:"pass_rate"`
+	Reached   bool     `json:"reached"`
+	Flaky     bool     `json:"flaky"`
+	Coverage  float64  `json:"coverage"`            // median coverage ratio over the case's runs
+	Grounding *float64 `json:"grounding,omitempty"` // median grounding ratio over measured runs; nil when unmeasured
 }
 
 // ModelComparison is one model entry's aggregated result across all cases.
@@ -29,13 +30,14 @@ type ModelComparison struct {
 	Effort   string `json:"effort,omitempty"`
 
 	// Aggregate scores.
-	PassRate       float64            `json:"pass_rate"`               // fraction of cases that reached the k-of-n bar
-	Reached        int                `json:"reached"`                 // cases whose pass-rate met the k-of-n bar
-	Total          int                `json:"total"`                   // cases run
-	RubricMedian   map[string]float64 `json:"rubric_median,omitempty"` // per-dimension median over graded runs; nil when ungraded
-	GradedRuns     int                `json:"graded_runs"`             // runs the judge graded (0 ⇒ rubric omitted)
-	CoverageMedian float64            `json:"coverage_median"`         // median coverage ratio over all runs
-	ConfidentWrong int                `json:"confident_wrong"`         // graded runs flagged confident-and-wrong
+	PassRate        float64            `json:"pass_rate"`                  // fraction of cases that reached the k-of-n bar
+	Reached         int                `json:"reached"`                    // cases whose pass-rate met the k-of-n bar
+	Total           int                `json:"total"`                      // cases run
+	RubricMedian    map[string]float64 `json:"rubric_median,omitempty"`    // per-dimension median over graded runs; nil when ungraded
+	GradedRuns      int                `json:"graded_runs"`                // runs the judge graded (0 ⇒ rubric omitted)
+	CoverageMedian  float64            `json:"coverage_median"`            // median coverage ratio over all runs
+	GroundingMedian *float64           `json:"grounding_median,omitempty"` // median grounding ratio over measured runs; nil when unmeasured
+	ConfidentWrong  int                `json:"confident_wrong"`            // graded runs flagged confident-and-wrong
 
 	// Usage + cost.
 	InputTokens  int      `json:"input_tokens"`
@@ -59,16 +61,22 @@ func AggregateModel(entry ModelEntry, cases []ComparedCase, usage providers.Usag
 	}
 
 	var allCoverage []float64
+	var allGrounding []float64
 	perDim := map[string][]float64{}
 	for _, cc := range cases {
 		passes := 0
 		var covs []float64
+		var groundings []float64
 		for _, run := range cc.Runs {
 			if run.Result.Pass {
 				passes++
 			}
 			covs = append(covs, run.Coverage.Ratio)
 			allCoverage = append(allCoverage, run.Coverage.Ratio)
+			if r, ok := run.Result.GroundingRatio(); ok {
+				groundings = append(groundings, r)
+				allGrounding = append(allGrounding, r)
+			}
 			if run.Graded {
 				mc.GradedRuns++
 				if run.Verdict.ConfidentWrong {
@@ -84,13 +92,19 @@ func AggregateModel(entry ModelEntry, cases []ComparedCase, usage providers.Usag
 		if n > 0 {
 			rate = float64(passes) / float64(n)
 		}
+		var rowGround *float64
+		if len(groundings) > 0 {
+			m := medianFloat(groundings)
+			rowGround = &m
+		}
 		row := CompareCaseRow{
-			Name:     cc.Name,
-			Runs:     n,
-			PassRate: rate,
-			Reached:  rate >= evalMinPassRate,
-			Flaky:    rate > 1-evalMinPassRate && rate < evalMinPassRate,
-			Coverage: medianFloat(covs),
+			Name:      cc.Name,
+			Runs:      n,
+			PassRate:  rate,
+			Reached:   rate >= evalMinPassRate,
+			Flaky:     rate > 1-evalMinPassRate && rate < evalMinPassRate,
+			Coverage:  medianFloat(covs),
+			Grounding: rowGround,
 		}
 		if row.Reached {
 			mc.Reached++
@@ -103,6 +117,10 @@ func AggregateModel(entry ModelEntry, cases []ComparedCase, usage providers.Usag
 		mc.PassRate = float64(mc.Reached) / float64(mc.Total)
 	}
 	mc.CoverageMedian = medianFloat(allCoverage)
+	if len(allGrounding) > 0 {
+		m := medianFloat(allGrounding)
+		mc.GroundingMedian = &m
+	}
 	if mc.GradedRuns > 0 {
 		mc.RubricMedian = map[string]float64{}
 		for _, d := range Rubric {
@@ -173,7 +191,7 @@ func (r ComparisonReport) Markdown() string {
 	for _, d := range Rubric {
 		header = append(header, d.Key)
 	}
-	header = append(header, "coverage", "confident-wrong", "in tok", "out tok")
+	header = append(header, "coverage", "grounding", "confident-wrong", "in tok", "out tok")
 	if showCost {
 		header = append(header, "est. cost (USD)")
 	}
@@ -202,8 +220,13 @@ func (r ComparisonReport) Markdown() string {
 				cells = append(cells, fmt.Sprintf("%.1f/%d", m.RubricMedian[d.Key], d.Max))
 			}
 		}
+		groundingCell := "—"
+		if m.GroundingMedian != nil {
+			groundingCell = fmt.Sprintf("%.0f%%", *m.GroundingMedian*100)
+		}
 		cells = append(cells,
 			fmt.Sprintf("%.0f%%", m.CoverageMedian*100),
+			groundingCell,
 			fmt.Sprintf("%d", m.ConfidentWrong),
 			fmt.Sprintf("%d", m.InputTokens),
 			fmt.Sprintf("%d", m.OutputTokens),

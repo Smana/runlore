@@ -44,8 +44,12 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 	// --- Investigate (evidence trail) ---
 	b.WriteString("\n## Investigate\n\n")
 	for _, rc := range inv.RootCauses {
-		for _, e := range rc.Evidence {
-			fmt.Fprintf(&b, "- %s\n", e)
+		for j, e := range rc.Evidence {
+			if rc.Grounding.IsUngrounded(j) {
+				fmt.Fprintf(&b, "- %s *(unverified)*\n", e)
+			} else {
+				fmt.Fprintf(&b, "- %s\n", e)
+			}
 		}
 	}
 

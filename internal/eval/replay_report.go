@@ -67,6 +67,10 @@ type ReportCase struct {
 	// cost-per-investigation table is computed from.
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
+
+	// GroundingMedian is the median evidence grounding ratio across measured repeats;
+	// nil (omitted) when no repeat measured grounding.
+	GroundingMedian *float64 `json:"grounding_median,omitempty"`
 }
 
 // Report projects the campaign plus its provenance into the serializable report.

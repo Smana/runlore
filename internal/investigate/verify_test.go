@@ -153,7 +153,7 @@ func TestApplyVerdictsRejectedGoesToRuledOut(t *testing.T) {
 		Verdict:    providers.VerdictNoAction,
 		RootCauses: []providers.Hypothesis{{Summary: "crds-actions-runner-controller change", Confidence: 0.8}},
 	}
-	out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: "reject", Confidence: 0.1, Reason: "correlation only; diff never read"}})
+	out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: "reject", Confidence: 0.1, Reason: "correlation only; diff never read"}}, false)
 
 	if len(out.RuledOut) != 1 {
 		t.Fatalf("rejected hypothesis should be recorded in RuledOut, got %v", out.RuledOut)
@@ -224,7 +224,7 @@ func TestApplyVerdictsClampsConfidence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := providers.Investigation{Confidence: 1, RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: 1}}}
-			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}})
+			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}}, false)
 			if len(out.RootCauses) != 1 || out.RootCauses[0].Confidence != tc.want {
 				t.Fatalf("root-cause confidence = %v, want %v", out.RootCauses[0].Confidence, tc.want)
 			}
@@ -262,7 +262,7 @@ func TestVerifyNeverRaisesConfidence(t *testing.T) {
 				Confidence: tc.enter,
 				RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: tc.enter}},
 			}
-			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}})
+			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}}, false)
 			if len(out.RootCauses) != 1 || out.RootCauses[0].Confidence != tc.want {
 				t.Fatalf("root-cause confidence = %v, want %v", out.RootCauses[0].Confidence, tc.want)
 			}
@@ -455,7 +455,7 @@ func TestApplyVerdictsKeepsOnUnrecognizedVerdict(t *testing.T) {
 				Confidence: 0.8,
 				RootCauses: []providers.Hypothesis{{Summary: "oom", Confidence: 0.8, Evidence: []string{"OOMKilled"}}},
 			}
-			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: v}})
+			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: v}}, false)
 			if len(out.RootCauses) != 1 {
 				t.Fatalf("verdict %q dropped the root cause (kept %d) — an unparseable verdict must never delete evidence",
 					v, len(out.RootCauses))
@@ -506,5 +506,182 @@ func TestVerifyUntrustedDelimiters(t *testing.T) {
 	if strings.Count(got, "</untrusted_data>") != 3 {
 		t.Errorf("expected exactly 3 closing </untrusted_data> tags (incident, proposed_findings, tool_transcript), got %d:\n%s",
 			strings.Count(got, "</untrusted_data>"), got)
+	}
+}
+
+func TestVerifyGroundingRenderNumbersEvidence(t *testing.T) {
+	inv := providers.Investigation{
+		RootCauses: []providers.Hypothesis{{
+			Summary:    "oom",
+			Confidence: 0.8,
+			Evidence:   []string{"first bullet", "second bullet", "third bullet"},
+		}},
+	}
+	got := renderForReview(Request{Title: "x"}, inv, nil)
+	for _, want := range []string{"[0] first bullet", "[1] second bullet", "[2] third bullet"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderForReview missing numbered evidence %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestVerifyGroundingExtractionAndRollup(t *testing.T) {
+	transcript := []providers.Message{
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "c1", Name: "pod_logs", Args: "{}"}}},
+		{Role: "tool", ToolCallID: "c1", Content: "OOMKilled exit code 137\nmemory limit 256Mi"},
+	}
+
+	cases := []struct {
+		name           string
+		inv            providers.Investigation
+		transcript     []providers.Message
+		verdictArgs    string
+		wantInvGround  *providers.EvidenceGrounding
+		wantRCGround   []*providers.EvidenceGrounding
+		wantRatio      float64
+		wantUngrounded map[int]bool
+	}{
+		{
+			name: "all evidence grounded",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:    "oom",
+					Confidence: 0.8,
+					Evidence:   []string{"OOMKilled", "exit code 137"},
+				}},
+			},
+			transcript:    transcript,
+			verdictArgs:   `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8,"ungrounded_evidence":[]}]}`,
+			wantInvGround: &providers.EvidenceGrounding{Traced: 2, Total: 2},
+			wantRCGround:  []*providers.EvidenceGrounding{{Traced: 2, Total: 2}},
+			wantRatio:     1.0,
+		},
+		{
+			name: "partial grounding deduplicates and clamps indices",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:    "oom",
+					Confidence: 0.8,
+					Evidence:   []string{"OOMKilled", "hallucinated metric", "memory limit 256Mi"},
+				}},
+			},
+			transcript:     transcript,
+			verdictArgs:    `{"verdicts":[{"index":0,"verdict":"downgrade","confidence":0.6,"ungrounded_evidence":[1,1,99,-2]}]}`,
+			wantInvGround:  &providers.EvidenceGrounding{Traced: 2, Total: 3},
+			wantRCGround:   []*providers.EvidenceGrounding{{Traced: 2, Total: 3, UngroundedIndices: []int{1}}},
+			wantRatio:      2.0 / 3.0,
+			wantUngrounded: map[int]bool{1: true},
+		},
+		{
+			name: "nil transcript leaves grounding nil even if model emits indices",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{
+					Summary:    "oom",
+					Confidence: 0.8,
+					Evidence:   []string{"OOMKilled", "exit code 137"},
+				}},
+			},
+			transcript:    nil,
+			verdictArgs:   `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8,"ungrounded_evidence":[0]}]}`,
+			wantInvGround: nil,
+			wantRCGround:  []*providers.EvidenceGrounding{nil},
+			wantRatio:     0,
+		},
+		{
+			name: "multi-hypothesis rollup excludes rejected cause",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{
+					{Summary: "oom", Confidence: 0.8, Evidence: []string{"OOMKilled", "exit code 137"}},
+					{Summary: "leak", Confidence: 0.6, Evidence: []string{"memory limit 256Mi", "heap spike"}},
+					{Summary: "bad deploy", Confidence: 0.5, Evidence: []string{"started after deploy"}},
+				},
+			},
+			transcript: transcript,
+			verdictArgs: `{"verdicts":[` +
+				`{"index":0,"verdict":"keep","confidence":0.8,"ungrounded_evidence":[]},` +
+				`{"index":1,"verdict":"downgrade","confidence":0.4,"ungrounded_evidence":[1]},` +
+				`{"index":2,"verdict":"reject","reason":"correlation only","ungrounded_evidence":[0]}` +
+				`]}`,
+			wantInvGround: &providers.EvidenceGrounding{Traced: 3, Total: 4},
+			wantRCGround: []*providers.EvidenceGrounding{
+				{Traced: 2, Total: 2},
+				{Traced: 1, Total: 2, UngroundedIndices: []int{1}},
+			},
+			wantRatio: 0.75,
+		},
+		{
+			name: "unrecognized verdict or missing verdict leaves grounding nil",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{
+					{Summary: "cause0", Confidence: 0.8, Evidence: []string{"OOMKilled"}},
+					{Summary: "cause1", Confidence: 0.7, Evidence: []string{"exit code 137"}},
+				},
+			},
+			transcript:    transcript,
+			verdictArgs:   `{"verdicts":[{"index":0,"verdict":"approve","ungrounded_evidence":[0]}]}`,
+			wantInvGround: nil,
+			wantRCGround:  []*providers.EvidenceGrounding{nil, nil},
+			wantRatio:     0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &scriptModel{responses: []providers.CompletionResponse{
+				{ToolCalls: []providers.ToolCall{{ID: "v1", Name: submitVerdictsName, Args: tc.verdictArgs}}},
+			}}
+			li := &LoopInvestigator{Model: model, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			got, verified := li.verifyFindings(context.Background(), Request{Title: "x"}, tc.inv, tc.transcript, nil)
+			if !verified {
+				t.Fatalf("expected verified=true")
+			}
+			assertGroundingEqual(t, "inv.Grounding", got.Grounding, tc.wantInvGround)
+			if got.Grounding.Ratio() != tc.wantRatio {
+				t.Errorf("inv.Grounding.Ratio() = %v, want %v", got.Grounding.Ratio(), tc.wantRatio)
+			}
+			if len(got.RootCauses) != len(tc.wantRCGround) {
+				t.Fatalf("len(RootCauses) = %d, want %d", len(got.RootCauses), len(tc.wantRCGround))
+			}
+			for i, wantRC := range tc.wantRCGround {
+				assertGroundingEqual(t, "rc.Grounding", got.RootCauses[i].Grounding, wantRC)
+			}
+			if len(tc.wantUngrounded) > 0 {
+				g := got.RootCauses[0].Grounding
+				for j := range got.RootCauses[0].Evidence {
+					if g.IsUngrounded(j) != tc.wantUngrounded[j] {
+						t.Errorf("IsUngrounded(%d) = %v, want %v", j, g.IsUngrounded(j), tc.wantUngrounded[j])
+					}
+				}
+			}
+		})
+	}
+}
+
+func assertGroundingEqual(t *testing.T, label string, got, want *providers.EvidenceGrounding) {
+	t.Helper()
+	if want == nil {
+		if got != nil {
+			t.Fatalf("%s = %+v, want nil", label, got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("%s = nil, want %+v", label, want)
+	}
+	if got.Traced != want.Traced || got.Total != want.Total {
+		t.Fatalf("%s = {Traced:%d Total:%d}, want {Traced:%d Total:%d}", label, got.Traced, got.Total, want.Traced, want.Total)
+	}
+	if len(got.UngroundedIndices) != len(want.UngroundedIndices) {
+		t.Fatalf("%s.UngroundedIndices = %v, want %v", label, got.UngroundedIndices, want.UngroundedIndices)
+	}
+	for i := range want.UngroundedIndices {
+		if got.UngroundedIndices[i] != want.UngroundedIndices[i] {
+			t.Fatalf("%s.UngroundedIndices = %v, want %v", label, got.UngroundedIndices, want.UngroundedIndices)
+		}
 	}
 }

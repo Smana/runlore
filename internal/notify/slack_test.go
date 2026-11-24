@@ -1972,3 +1972,37 @@ func TestSlackBuildWiresThreadsForTheFactory(t *testing.T) {
 		t.Fatal("factory off and thread_capture off: no sink, as before")
 	}
 }
+
+func TestSlackGrounding(t *testing.T) {
+	inv := sampleInvestigation()
+	inv.RootCauses[0].Evidence = []string{"pg_up=0", "unverified claim", "migration lock timeout"}
+	inv.Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 3}
+	inv.RootCauses[0].Grounding = &providers.EvidenceGrounding{Traced: 2, Total: 3, UngroundedIndices: []int{1}}
+
+	summaryJSON, err := json.Marshal(summaryBlocks(inv))
+	if err != nil {
+		t.Fatalf("marshal summary: %v", err)
+	}
+	summary := string(summaryJSON)
+	if !strings.Contains(summary, "High confidence* · 82% · 2/3 evidence traced — 1 unverified") {
+		t.Fatalf("summary confidence block missing grounding badge:\n%s", summary)
+	}
+	if !strings.Contains(summary, "• unverified claim *(unverified)*") {
+		t.Fatalf("summary ungrounded bullet missing *(unverified)*:\n%s", summary)
+	}
+	if strings.Contains(summary, "• pg_up=0 *(unverified)*") {
+		t.Fatalf("grounded bullet must not be tagged in summary:\n%s", summary)
+	}
+
+	detailJSON, err := json.Marshal(detailBlocks(inv))
+	if err != nil {
+		t.Fatalf("marshal detail: %v", err)
+	}
+	detail := string(detailJSON)
+	if !strings.Contains(detail, "• unverified claim *(unverified)*") {
+		t.Fatalf("detail thread ungrounded bullet missing *(unverified)*:\n%s", detail)
+	}
+	if strings.Contains(detail, "• pg_up=0 *(unverified)*") {
+		t.Fatalf("grounded bullet must not be tagged in detail:\n%s", detail)
+	}
+}

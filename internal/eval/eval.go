@@ -239,6 +239,10 @@ type CaseAggregate struct {
 	// the model does not report usage.
 	InputTokens  int
 	OutputTokens int
+
+	// GroundingMedian is the median evidence grounding ratio across repeats that
+	// measured grounding (Result.GroundingTotal > 0); nil when no repeat measured it.
+	GroundingMedian *float64
 }
 
 // Campaign is the aggregate of a multi-repeat replay run.
@@ -376,6 +380,7 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 	confs := make([]float64, 0, len(results))
 	ins := make([]float64, 0, len(results))
 	outs := make([]float64, 0, len(results))
+	var groundings []float64
 	missSet := map[string]struct{}{}
 	ocSet := map[string]struct{}{}
 	var failedClaims []string
@@ -397,6 +402,9 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		confs = append(confs, res.Confidence)
 		ins = append(ins, float64(res.Usage.InputTokens))
 		outs = append(outs, float64(res.Usage.OutputTokens))
+		if r, ok := res.GroundingRatio(); ok {
+			groundings = append(groundings, r)
+		}
 		for _, m := range res.Missing {
 			missSet[m] = struct{}{}
 		}
@@ -408,6 +416,11 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		failedClaims[i] = capClaim(c)
 	}
 	rate := float64(passes) / float64(len(results))
+	var groundingMed *float64
+	if len(groundings) > 0 {
+		m := medianFloat(groundings)
+		groundingMed = &m
+	}
 	return CaseAggregate{
 		Name:               c.Name,
 		Runs:               len(results),
@@ -425,6 +438,7 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		RecallShortCircuit: shortCircuits,
 		InputTokens:        int(medianFloat(ins)),
 		OutputTokens:       int(medianFloat(outs)),
+		GroundingMedian:    groundingMed,
 	}
 }
 

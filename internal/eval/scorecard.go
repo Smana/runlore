@@ -263,11 +263,11 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 			fmt.Fprintf(&b, "| %s | 🚫 ERRORED | %s |\n", c.Name, notesCell(c))
 		}
 	} else {
-		b.WriteString("| scenario | result | pass-rate | median confidence | recall | notes |\n")
-		b.WriteString("|---|---|---|---|---|---|\n")
+		b.WriteString("| scenario | result | pass-rate | median confidence | grounding | recall | notes |\n")
+		b.WriteString("|---|---|---|---|---|---|---|\n")
 		for _, c := range rep.Cases {
-			fmt.Fprintf(&b, "| %s | %s | %.0f%% (n=%d) | %.2f | %s | %s |\n",
-				c.Name, resultCell(c), c.PassRate*100, c.Runs, c.Confidence, recallCell(c), notesCell(c))
+			fmt.Fprintf(&b, "| %s | %s | %.0f%% (n=%d) | %.2f | %s | %s | %s |\n",
+				c.Name, resultCell(c), c.PassRate*100, c.Runs, c.Confidence, groundingCell(c), recallCell(c), notesCell(c))
 		}
 	}
 
@@ -422,6 +422,13 @@ func resultCell(c ReportCase) string {
 	default:
 		return "❌ MISS"
 	}
+}
+
+func groundingCell(c ReportCase) string {
+	if c.GroundingMedian == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%.0f%%", *c.GroundingMedian*100)
 }
 
 func recallCell(c ReportCase) string {

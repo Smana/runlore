@@ -308,3 +308,39 @@ func TestComparisonJSONRoundTrip(t *testing.T) {
 		t.Fatalf("rubric lost in round trip: %+v", got.Models[0].RubricMedian)
 	}
 }
+
+func TestCompareReportGrounding(t *testing.T) {
+	measured := ComparedCase{
+		Name: "c1",
+		Runs: []ComparedRun{
+			{Result: Result{Name: "c1", Pass: true, GroundingTraced: 3, GroundingTotal: 4}, Coverage: Coverage{Ratio: 1}},
+			{Result: Result{Name: "c1", Pass: true, GroundingTraced: 4, GroundingTotal: 4}, Coverage: Coverage{Ratio: 1}},
+		},
+	}
+	unmeasured := ComparedCase{
+		Name: "c1",
+		Runs: []ComparedRun{
+			{Result: Result{Name: "c1", Pass: true}, Coverage: Coverage{Ratio: 1}},
+		},
+	}
+	m1 := AggregateModel(ModelEntry{Name: "grounded", Model: "m1"}, []ComparedCase{measured}, providers.Usage{})
+	m2 := AggregateModel(ModelEntry{Name: "unmeasured", Model: "m2"}, []ComparedCase{unmeasured}, providers.Usage{})
+
+	if m1.GroundingMedian == nil || *m1.GroundingMedian != 0.875 {
+		t.Fatalf("m1.GroundingMedian = %v, want 0.875", m1.GroundingMedian)
+	}
+	if m2.GroundingMedian != nil {
+		t.Fatalf("m2.GroundingMedian = %v, want nil", m2.GroundingMedian)
+	}
+
+	md := NewComparisonReport("2026-11-24T00:00:00Z", 2, "judge", []ModelComparison{m1, m2}).Markdown()
+	if !strings.Contains(md, "| grounding |") {
+		t.Fatalf("compare markdown missing grounding column:\n%s", md)
+	}
+	if !strings.Contains(md, "| 88% |") {
+		t.Fatalf("compare markdown missing 88%% grounding cell:\n%s", md)
+	}
+	if !strings.Contains(md, "| unmeasured |") || !strings.Contains(md, "| — |") {
+		t.Fatalf("compare markdown missing em-dash for unmeasured grounding:\n%s", md)
+	}
+}
