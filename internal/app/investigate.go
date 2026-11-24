@@ -48,6 +48,7 @@ import (
 // BuildModelAndTools assembles the model, investigation tools, and the instant-recall
 // short-circuit from config + the GitOps provider. Shared by serve and investigate.
 func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall, *catalog.Catalog) {
+	kubeContext := kubeContextFrom(ctx)
 	apiKey := ""
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
@@ -282,7 +283,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	// read, which is not part of the providers.KubeReader interface (and should not be —
 	// no tool consumes it).
 	var clusterReader *cluster.Reader
-	if cs := KubeClientset(log); cs != nil {
+	if cs := KubeClientsetForContext(kubeContext, log); cs != nil {
 		cr := cluster.New(cs)
 		kubeReader = cr
 		clusterReader = cr
@@ -299,7 +300,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	// names, which it does badly and expensively (32 wasted calls in one real
 	// investigation, and a card that could not name the policy it had proven was denying
 	// traffic).
-	if sr := BuildResourceSpecReader(log); sr != nil {
+	if sr := BuildResourceSpecReaderForContext(kubeContext, log); sr != nil {
 		tools = append(tools, investigate.ResourceSpecTool{Reader: sr}, investigate.ResourceListTool{Lister: sr})
 	}
 	// Cloud context: the control-plane "what changed" and node-health lenses. Opt-in.

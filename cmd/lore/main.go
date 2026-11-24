@@ -24,7 +24,8 @@ var version = "0.0.0-dev"
 const usage = `lore — the RunLore SRE agent
 
 Usage:
-  lore investigate --alert <name> [--namespace <ns>] [--message <text>]   investigate on-demand, print findings
+  lore status [--namespace <ns>] [--kube-context <name>] [--json] [--exit-code]   zero-LLM snapshot of unhealthy pods, failing GitOps objects, and recent Warning events
+  lore investigate [<ns>/<name> | <kind>/<ns>/<name>] [--alert <name>] [--namespace <ns>] [--message <text>] [--provider <p>] [--model <m>] [--effort <lvl>] [--kube-context <ctx>] [--json] [--quiet]   investigate on-demand, print findings
   lore demo investigate --offline default                watch a REAL recorded investigation — no cluster, no API key, no network
   lore demo investigate [--scenario <name>]           watch a full investigation against fake providers (no cluster; needs a model API key)
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
@@ -65,6 +66,13 @@ func main() {
 	case "eval":
 		if err := app.RunEval(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "eval:", err)
+			os.Exit(1)
+		}
+	case "status":
+		if err := app.RunStatus(os.Args[2:]); err != nil {
+			if !errors.Is(err, app.ErrStatusUnhealthy) {
+				fmt.Fprintln(os.Stderr, "status:", err)
+			}
 			os.Exit(1)
 		}
 	case "investigate":

@@ -295,6 +295,12 @@ type LoopInvestigator struct {
 	// pings even when OnProgress is set.
 	ProgressEverySteps int
 
+	// OnToolCall, when set, is invoked on the loop goroutine right before each
+	// non-terminal tool call is dispatched. Nil-safe with zero overhead when unset;
+	// used by the interactive CLI (`lore investigate`) to stream concise tool progress
+	// to stderr.
+	OnToolCall func(step int, call providers.ToolCall)
+
 	// Pricing (optional) estimates a per-investigation cost from the accumulated token
 	// totals. nil ⇒ token totals are still reported but no cost is shown. The verify
 	// pass's tokens are priced at Verifier's own rates when it has a model of its own,
@@ -753,6 +759,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		for _, tc := range run {
 			if tc.Name != submitFindingsName { // malformed submit_findings runs no tool
 				used[tc.Name]++
+				if li.OnToolCall != nil {
+					li.OnToolCall(step, tc)
+				}
 			}
 		}
 		for i, tr := range li.dispatchTools(ctx, byName, run) {

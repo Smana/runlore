@@ -2097,3 +2097,39 @@ func TestLoopRecordsGroundingRatioMetric(t *testing.T) {
 		t.Fatalf("expected grounding ratio sum 0.5:\n%s", body)
 	}
 }
+
+func TestOnToolCall(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{
+			{ID: "c1", Name: "what_changed", Args: `{"namespace":"apps"}`},
+			{ID: "c2", Name: "pod_status", Args: `{"namespace":"apps"}`},
+		}},
+		{ToolCalls: []providers.ToolCall{
+			{ID: "c3", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"bad deploy"}]}`},
+		}},
+	}}
+	type recorded struct {
+		step int
+		call providers.ToolCall
+	}
+	var calls []recorded
+	li := &LoopInvestigator{
+		Model: model,
+		Tools: []Tool{
+			echoTool{name: "what_changed"},
+			echoTool{name: "pod_status"},
+		},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnToolCall: func(step int, call providers.ToolCall) { calls = append(calls, recorded{step: step, call: call}) },
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "checkout-api"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("OnToolCall fired %d times, want 2: %+v", len(calls), calls)
+	}
+	if calls[0].step != 0 || calls[0].call.Name != "what_changed" || calls[1].step != 0 || calls[1].call.Name != "pod_status" {
+		t.Errorf("unexpected OnToolCall sequence: %+v", calls)
+	}
+}

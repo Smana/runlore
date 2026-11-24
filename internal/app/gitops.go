@@ -97,7 +97,13 @@ func BuildExecutor(cfg *config.Config, dc dynamic.Interface) action.Executor {
 
 // GitOpsFromKube builds the GitOps provider from the ambient kubeconfig (best-effort).
 func GitOpsFromKube(cfg *config.Config, log *slog.Logger) providers.GitOpsProvider {
-	restCfg, err := RestConfig()
+	return GitOpsFromKubeContext(cfg, "", log)
+}
+
+// GitOpsFromKubeContext builds the GitOps provider using the named kubeconfig
+// context (empty uses the ambient kubeconfig / in-cluster config).
+func GitOpsFromKubeContext(cfg *config.Config, kubeContext string, log *slog.Logger) providers.GitOpsProvider {
+	restCfg, err := RestConfigForContext(kubeContext)
 	if err != nil {
 		log.Warn("no kube client; what-changed disabled", "err", err)
 		return nil

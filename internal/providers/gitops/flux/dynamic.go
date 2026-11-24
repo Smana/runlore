@@ -88,6 +88,19 @@ func (r *dynamicReader) ListKustomizations(ctx context.Context) ([]kustomization
 	return out, nil
 }
 
+// ListHelmReleases lists all Flux HelmReleases across all namespaces.
+func (r *dynamicReader) ListHelmReleases(ctx context.Context) ([]helmRelease, error) {
+	list, err := r.client.Resource(helmReleaseGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list helmreleases: %w", err)
+	}
+	out := make([]helmRelease, 0, len(list.Items))
+	for i := range list.Items {
+		out = append(out, helmReleaseFromUnstructured(&list.Items[i]))
+	}
+	return out, nil
+}
+
 // GetGitRepository retrieves a specific Flux GitRepository by namespace and name.
 func (r *dynamicReader) GetGitRepository(ctx context.Context, namespace, name string) (gitRepository, error) {
 	u, err := r.client.Resource(gitRepositoryGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -392,14 +405,17 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 }
 
 // helmReleaseFromUnstructured maps an unstructured HelmRelease to the minimal
-// helmRelease type the failure watcher needs (identity + Ready condition).
+// helmRelease type the failure watcher and status lister need.
 func helmReleaseFromUnstructured(u *unstructured.Unstructured) helmRelease {
+	targetNS, _, _ := unstructured.NestedString(u.Object, "spec", "targetNamespace")
 	status, reason, message := readyCondition(u)
 	return helmRelease{
-		Name:         u.GetName(),
-		Namespace:    u.GetNamespace(),
-		ReadyStatus:  status,
-		ReadyReason:  reason,
-		ReadyMessage: message,
+		Name:            u.GetName(),
+		Namespace:       u.GetNamespace(),
+		TargetNamespace: targetNS,
+		ReadyStatus:     status,
+		ReadyReason:     reason,
+		ReadyMessage:    message,
+		ReadyTime:       readyTransitionTime(u),
 	}
 }

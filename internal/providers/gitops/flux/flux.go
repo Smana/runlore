@@ -47,15 +47,17 @@ type KustomizationEvent struct {
 	Kustomization kustomization
 }
 
-// helmRelease is the minimal Flux HelmRelease data the failure watcher needs: its
-// identity and Ready condition. Unlike kustomization it carries no source/path/
-// revision — a HelmRelease failure is reported for investigation, not Git-diffed
-// through the Kustomization Change path.
+// helmRelease is the minimal Flux HelmRelease data the failure watcher and status
+// lister need: its identity, target namespace, and Ready condition. Unlike
+// kustomization it carries no source/path/revision — a HelmRelease failure is
+// reported for investigation, not Git-diffed through the Kustomization Change path.
 type helmRelease struct {
 	Name, Namespace string
+	TargetNamespace string
 	ReadyStatus     string // status.conditions[type=Ready].status ("True"/"False"/"Unknown")
 	ReadyReason     string
 	ReadyMessage    string
+	ReadyTime       time.Time
 }
 
 // HelmReleaseEvent is a single watch event for a HelmRelease.
@@ -67,6 +69,7 @@ type HelmReleaseEvent struct {
 // client-go implementation lives in dynamic.go; tests use a fake.
 type Reader interface {
 	ListKustomizations(ctx context.Context) ([]kustomization, error)
+	ListHelmReleases(ctx context.Context) ([]helmRelease, error)
 	GetGitRepository(ctx context.Context, namespace, name string) (gitRepository, error)
 	// SourceRevision returns a source's current synced revision
 	// (status.artifact.revision) for a GitRepository/OCIRepository/Bucket/
@@ -579,8 +582,52 @@ func dependsOn(u *unstructured.Unstructured, parentKind, defaultNS string) []pro
 	return out
 }
 
+// ListFailures returns a one-shot snapshot of Ready=False Flux Kustomizations
+// and HelmReleases without starting watch informers. Missing CRDs (404) are
+// treated as empty so clusters without one or both Flux controllers degrade cleanly.
+func (p *Provider) ListFailures(ctx context.Context, namespace string) ([]providers.FailureEvent, error) {
+	var out []providers.FailureEvent
+	ks, err := p.reader.ListKustomizations(ctx)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	for _, k := range ks {
+		if k.ReadyStatus != "False" || !matchesNamespace(k, namespace) {
+			continue
+		}
+		out = append(out, providers.FailureEvent{
+			Workload: providers.Workload{Kind: "Kustomization", Name: k.Name, Namespace: k.Namespace},
+			Engine:   providers.EngineFlux,
+			Reason:   k.ReadyReason,
+			Message:  k.ReadyMessage,
+			When:     k.ReadyTime,
+		})
+	}
+	hrs, err := p.reader.ListHelmReleases(ctx)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	for _, h := range hrs {
+		if h.ReadyStatus != "False" {
+			continue
+		}
+		if namespace != "" && h.Namespace != namespace && h.TargetNamespace != namespace {
+			continue
+		}
+		out = append(out, providers.FailureEvent{
+			Workload: providers.Workload{Kind: "HelmRelease", Name: h.Name, Namespace: h.Namespace},
+			Engine:   providers.EngineFlux,
+			Reason:   h.ReadyReason,
+			Message:  h.ReadyMessage,
+			When:     h.ReadyTime,
+		})
+	}
+	return out, nil
+}
+
 // compile-time check that Provider satisfies the contracts.
 var (
-	_ providers.GitOpsProvider  = (*Provider)(nil)
-	_ providers.GitOpsInspector = (*Provider)(nil)
+	_ providers.GitOpsProvider      = (*Provider)(nil)
+	_ providers.GitOpsInspector     = (*Provider)(nil)
+	_ providers.GitOpsFailureLister = (*Provider)(nil)
 )
