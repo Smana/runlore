@@ -289,3 +289,152 @@ func TestPostVerification(t *testing.T) {
 		t.Fatal("three 503s are an error")
 	}
 }
+
+func TestFactoryStaticBearerAuth(t *testing.T) {
+	var tokenCalls, taskCalls, verifyCalls atomic.Int32
+	var gotAuth string
+	script := []int{http.StatusCreated, http.StatusUnauthorized}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tasks":
+			taskCalls.Add(1)
+			gotAuth = r.Header.Get("Authorization")
+			code := script[0]
+			script = script[1:]
+			w.WriteHeader(code)
+			if code == http.StatusCreated {
+				_, _ = w.Write([]byte(`{"task":"t1","room":"r1","issue":7}`))
+			}
+		case "/v1/tasks/t1/verification":
+			verifyCalls.Add(1)
+			gotAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			tokenCalls.Add(1)
+			http.Error(w, "unexpected token call", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	env := map[string]string{"STATIC_TOK": "my-static-secret"}
+	cfg := config.Factory{URL: srv.URL, TokenEnv: "STATIC_TOK", Repository: "Smana/cloud-native-ref", MaxCostUSD: 2}
+	c := NewClient(cfg, func(k string) string { return env[k] }, srv.Client(), time.Now)
+	if !c.Enabled() {
+		t.Fatal("static bearer client should be enabled")
+	}
+
+	got, err := c.CreateTask(context.Background(), "k1", req)
+	if err != nil || got.Status != http.StatusCreated || got.Task != "t1" {
+		t.Fatalf("CreateTask: got %+v %v", got, err)
+	}
+	if gotAuth != "Bearer my-static-secret" {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer my-static-secret")
+	}
+	if tokenCalls.Load() != 0 {
+		t.Fatalf("static bearer must make zero token calls, got %d", tokenCalls.Load())
+	}
+
+	// 401 must not trigger a retry/refresh loop for static bearer tokens.
+	got, err = c.CreateTask(context.Background(), "k2", req)
+	if err != nil || got.Status != http.StatusUnauthorized {
+		t.Fatalf("401 static bearer: got %+v %v", got, err)
+	}
+	if taskCalls.Load() != 2 {
+		t.Fatalf("expected 2 total /v1/tasks calls (no 401 retry), got %d", taskCalls.Load())
+	}
+
+	status, _, err := c.PostVerification(context.Background(), "t1", Verification{Verdict: "resolved", CheckedAt: time.Now().UTC()})
+	if err != nil || status != http.StatusUnauthorized || verifyCalls.Load() != 1 {
+		t.Fatalf("PostVerification 401: status=%d calls=%d err=%v", status, verifyCalls.Load(), err)
+	}
+
+	// Empty env leaves static client disabled.
+	disabled := NewClient(cfg, func(string) string { return "" }, srv.Client(), time.Now)
+	if disabled.Enabled() {
+		t.Fatal("static bearer client with empty env must be disabled")
+	}
+}
+
+func TestFactoryGenericOAuth2Auth(t *testing.T) {
+	tests := []struct {
+		name         string
+		scope        string
+		audience     string
+		wantHasScope bool
+		wantHasAud   bool
+	}{
+		{name: "minimal no scope or audience", wantHasScope: false, wantHasAud: false},
+		{name: "with scope and audience", scope: "tasks:write", audience: "https://broker.example.com", wantHasScope: true, wantHasAud: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := time.Unix(1_800_000_000, 0)
+			var tokenCalls atomic.Int32
+			var seenForms []map[string][]string
+			script := []int{http.StatusCreated, http.StatusUnauthorized, http.StatusCreated}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/oauth/token":
+					_ = r.ParseForm()
+					cp := make(map[string][]string, len(r.Form))
+					for k, v := range r.Form {
+						cp[k] = append([]string(nil), v...)
+					}
+					seenForms = append(seenForms, cp)
+					n := tokenCalls.Add(1)
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": fmt.Sprintf("gen-tok-%d", n), "expires_in": 3600})
+				case "/v1/tasks":
+					code := script[0]
+					script = script[1:]
+					w.WriteHeader(code)
+					if code == http.StatusCreated {
+						_, _ = w.Write([]byte(`{"task":"t2","room":"r2","issue":9}`))
+					}
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			env := map[string]string{"CID": "my-client", "CSEC": "my-secret"}
+			cfg := config.Factory{
+				URL:             srv.URL,
+				TokenURL:        srv.URL + "/oauth/token",
+				ClientIDEnv:     "CID",
+				ClientSecretEnv: "CSEC", // pragma: allowlist secret
+				OAuthScope:      tc.scope,
+				OAuthAudience:   tc.audience,
+				Repository:      "Smana/cloud-native-ref",
+				MaxCostUSD:      2,
+			}
+			c := NewClient(cfg, func(k string) string { return env[k] }, srv.Client(), func() time.Time { return clock })
+			if !c.Enabled() {
+				t.Fatal("generic OAuth2 client should be enabled without project_id_env")
+			}
+
+			got, err := c.CreateTask(context.Background(), "k1", req)
+			if err != nil || got.Status != http.StatusCreated {
+				t.Fatalf("first CreateTask: %+v %v", got, err)
+			}
+			// 401 should refresh token once and succeed.
+			got, err = c.CreateTask(context.Background(), "k2", req)
+			if err != nil || got.Status != http.StatusCreated {
+				t.Fatalf("401-refresh CreateTask: %+v %v", got, err)
+			}
+			if tokenCalls.Load() != 2 {
+				t.Fatalf("expected 2 token calls (initial + 401 refresh), got %d", tokenCalls.Load())
+			}
+			f := seenForms[0]
+			if f["grant_type"][0] != "client_credentials" || f["client_id"][0] != "my-client" || f["client_secret"][0] != "my-secret" {
+				t.Fatalf("unexpected OAuth2 form: %+v", f)
+			}
+			_, hasScope := f["scope"]
+			if hasScope != tc.wantHasScope || (tc.wantHasScope && f["scope"][0] != tc.scope) {
+				t.Fatalf("scope mismatch: has=%v val=%v want=%q", hasScope, f["scope"], tc.scope)
+			}
+			_, hasAud := f["audience"]
+			if hasAud != tc.wantHasAud || (tc.wantHasAud && f["audience"][0] != tc.audience) {
+				t.Fatalf("audience mismatch: has=%v val=%v want=%q", hasAud, f["audience"], tc.audience)
+			}
+		})
+	}
+}

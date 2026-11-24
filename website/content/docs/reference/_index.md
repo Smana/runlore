@@ -13,6 +13,9 @@ and a full worked investigation.
   a leaderboard.
 - **[kb-steward]({{< relref "kb-steward.md" >}})** — the skill for seeding, capturing and curating
   catalog entries. Diagnosis stays RunLore's job; the skill only writes knowledge down well.
+- **[Remediation Factory Protocol]({{< relref "remediation-factory.md" >}})** — the open
+  `POST /v1/tasks`, signed webhook, and post-soak verification protocol, plus static Bearer,
+  generic OAuth2, and ZITADEL authentication modes.
 - **[Examples]({{< relref "/docs/reference/examples/harbor-registry-down.md" >}})** — a real
   investigation end to end, from the firing alert to the merged catalog entry.
 

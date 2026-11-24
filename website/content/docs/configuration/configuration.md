@@ -1018,10 +1018,16 @@ it may do, and whether a fix is published. RunLore only files, listens and repor
 ```yaml
 factory:
   url: http://agent-factory.agent-system.svc.cluster.local:8082
+  # Auth mode A (static Bearer, mutually exclusive with OAuth2 keys below):
+  # token_env: FACTORY_API_TOKEN
+  # Auth mode B (generic OAuth2 client credentials: Keycloak, Auth0, Okta, Dex, Entra ID, ...):
   token_url: https://auth.example.com/oauth/v2/token
   ca_file: /etc/runlore-factory-ca/ca.crt         # optional; PEM of a private CA, trusted besides the system roots
   client_id_env: FACTORY_CLIENT_ID
   client_secret_env: FACTORY_CLIENT_SECRET
+  # oauth_scope: "tasks:write"                    # optional; omitted when empty (mutually exclusive with project_id_env)
+  # oauth_audience: "https://broker.example.com"  # optional; sent as form field `audience` when non-empty
+  # Auth mode C (ZITADEL shorthand, mutually exclusive with oauth_scope):
   project_id_env: FACTORY_PROJECT_ID
   repository: Smana/cloud-native-ref
   max_cost_usd: 2
@@ -1032,13 +1038,22 @@ factory:
     max_steps: 6                                  # default 6
 ```
 
-- **Credentials are env var names, never values.** The client authenticates to the identity
-  provider with the OAuth2 client-credentials grant (`token_url` must be `https`) and caches the
-  token until a minute before it expires. With `url` set but one of the three credential variables
-  empty, the client stays off and one warning at start names the variable.
-- **`url` may be plain `http` only inside the cluster** (a `svc.cluster.local` address behind a
-  NetworkPolicy). The bearer token travels with every call, so use `https` for anything that
-  leaves the cluster; only `token_url` is enforced to be `https`.
+- **Credentials are env var names, never values.** Three authentication modes are supported (see
+  [Remediation Factory Protocol]({{< relref "/docs/reference/remediation-factory.md" >}}) for the
+  wire contract and examples of all three):
+  - **Static Bearer (`token_env`)** — sends `Authorization: Bearer <token>` directly and skips any
+    OAuth2 exchange. Cannot be combined with `token_url`, `client_id_env`, `client_secret_env`,
+    `project_id_env`, `oauth_scope`, or `oauth_audience`.
+  - **Generic OAuth2 client credentials** — set `token_url`, `client_id_env`, and
+    `client_secret_env`, plus optional `oauth_scope` and `oauth_audience` (omitted when empty).
+    Caches the access token until a minute before expiry and refreshes once on `401`.
+  - **ZITADEL shorthand (`project_id_env`)** — emits scope
+    `openid urn:zitadel:iam:org:project:id:<project_id>:aud`. Mutually exclusive with `oauth_scope`.
+  With `url` set but a required credential variable for the chosen mode empty, the client stays off
+  and one warning at start names the missing variable.
+- **`url` and `token_url` require `https` on public hosts.** Plain `http` is accepted only for
+  loopback or private/in-cluster hosts (such as `*.svc.cluster.local` behind a NetworkPolicy),
+  so bearer tokens and client credentials never travel in cleartext over a public network.
 - **`ca_file`** is the PEM file of the private CA that signs the factory's certificate. It is added
   to the system roots, which stay trusted, and only the factory client reads it: both its calls to
   `url` and its call to `token_url` verify against it, so an identity provider with a public

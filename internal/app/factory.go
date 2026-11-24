@@ -54,9 +54,18 @@ func BuildFactory(cfg *config.Config, log *slog.Logger) (*factory.Ledger, *facto
 	}
 	client := factory.NewClient(f, os.Getenv, hc, time.Now)
 	if !client.Enabled() {
+		var check []string
+		if f.TokenEnv != "" {
+			check = []string{f.TokenEnv}
+		} else {
+			check = []string{f.ClientIDEnv, f.ClientSecretEnv}
+			if f.ProjectIDEnv != "" {
+				check = append(check, f.ProjectIDEnv)
+			}
+		}
 		var empty []string
-		for _, name := range []string{f.ClientIDEnv, f.ClientSecretEnv, f.ProjectIDEnv} {
-			if os.Getenv(name) == "" {
+		for _, name := range check {
+			if name != "" && os.Getenv(name) == "" {
 				empty = append(empty, name)
 			}
 		}

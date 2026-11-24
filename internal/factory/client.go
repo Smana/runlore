@@ -78,36 +78,58 @@ type Created struct {
 	Reason    string
 }
 
-// Client is the factory's API client: a ZITADEL client-credentials token, POST /v1/tasks.
+// Client is the factory's API client: static bearer or OAuth2 client-credentials auth,
+// POST /v1/tasks and POST /v1/tasks/{task}/verification.
 type Client struct {
-	cfg      config.Factory
-	clientID string
-	secret   string
-	project  string
-	hc       *http.Client
-	now      func() time.Time
+	cfg         config.Factory
+	staticToken string
+	clientID    string
+	secret      string
+	project     string
+	hc          *http.Client
+	now         func() time.Time
 
 	mu      sync.Mutex
 	token   string
 	expires time.Time
 }
 
-// NewClient reads the three credentials through getenv, once. The client is off (Enabled false)
-// unless the URL and all three are set.
+func envValue(getenv func(string) string, name string) string {
+	if name == "" || getenv == nil {
+		return ""
+	}
+	return getenv(name)
+}
+
+// NewClient reads the configured credentials through getenv, once. The client is off
+// (Enabled false) unless the URL and credentials for the chosen auth mode are set.
 func NewClient(cfg config.Factory, getenv func(string) string, hc *http.Client, now func() time.Time) *Client {
 	return &Client{
-		cfg:      cfg,
-		clientID: getenv(cfg.ClientIDEnv),
-		secret:   getenv(cfg.ClientSecretEnv),
-		project:  getenv(cfg.ProjectIDEnv),
-		hc:       hc,
-		now:      now,
+		cfg:         cfg,
+		staticToken: envValue(getenv, cfg.TokenEnv),
+		clientID:    envValue(getenv, cfg.ClientIDEnv),
+		secret:      envValue(getenv, cfg.ClientSecretEnv),
+		project:     envValue(getenv, cfg.ProjectIDEnv),
+		hc:          hc,
+		now:         now,
 	}
 }
 
-// Enabled reports whether the URL and every credential are set.
+// Enabled reports whether the URL and credentials for the configured auth mode are set.
 func (c *Client) Enabled() bool {
-	return c != nil && c.cfg.URL != "" && c.clientID != "" && c.secret != "" && c.project != ""
+	if c == nil || c.cfg.URL == "" {
+		return false
+	}
+	if c.cfg.TokenEnv != "" {
+		return c.staticToken != ""
+	}
+	if c.cfg.TokenURL == "" || c.clientID == "" || c.secret == "" {
+		return false
+	}
+	if c.cfg.ProjectIDEnv != "" {
+		return c.project != ""
+	}
+	return true
 }
 
 // IdempotencyKey is the TriggerKey, or its SHA-256 hex when it is past 255 bytes.
@@ -119,9 +141,13 @@ func IdempotencyKey(triggerKey string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// accessToken returns the cached token, fetching a new one within 60 s of its expiry. retry is
-// true for a failure worth another attempt: a transport error or a 5xx from the token endpoint.
+// accessToken returns the static bearer token when configured, or the cached OAuth2 token,
+// fetching a new one within 60 s of its expiry. retry is true for a failure worth another
+// attempt: a transport error or a 5xx from the token endpoint.
 func (c *Client) accessToken(ctx context.Context) (tok string, retry bool, err error) {
+	if c.staticToken != "" {
+		return c.staticToken, false, nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.token != "" && c.now().Add(tokenSkew).Before(c.expires) {
@@ -131,7 +157,15 @@ func (c *Client) accessToken(ctx context.Context) (tok string, retry bool, err e
 		"grant_type":    {"client_credentials"},
 		"client_id":     {c.clientID},
 		"client_secret": {c.secret},
-		"scope":         {"openid urn:zitadel:iam:org:project:id:" + c.project + ":aud"},
+	}
+	switch {
+	case c.project != "":
+		form.Set("scope", "openid urn:zitadel:iam:org:project:id:"+c.project+":aud")
+	case c.cfg.OAuthScope != "":
+		form.Set("scope", c.cfg.OAuthScope)
+	}
+	if c.cfg.OAuthAudience != "" {
+		form.Set("audience", c.cfg.OAuthAudience)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -181,7 +215,7 @@ func (c *Client) CreateTask(ctx context.Context, key string, req TaskRequest) (C
 			return Created{}, err
 		}
 		got, retry, err := c.postTask(ctx, key, payload)
-		if err == nil && got.Status == http.StatusUnauthorized && !refreshed {
+		if err == nil && got.Status == http.StatusUnauthorized && !refreshed && c.staticToken == "" {
 			// The cached token was revoked or rotated before its expiry: drop it and go again
 			// once, without spending one of the 503 attempts.
 			refreshed = true
@@ -285,7 +319,7 @@ func (c *Client) PostVerification(ctx context.Context, task string, v Verificati
 			return 0, "", err
 		}
 		status, reason, retry, err := c.postVerification(ctx, path, payload)
-		if err == nil && status == http.StatusUnauthorized && !refreshed {
+		if err == nil && status == http.StatusUnauthorized && !refreshed && c.staticToken == "" {
 			refreshed = true
 			c.dropToken()
 			attempt--
