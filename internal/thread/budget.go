@@ -38,13 +38,13 @@ const DefaultChatCallsPerHour = 30
 // assumptions, and the result was that DenyTokens could never fire at the
 // defaults: only chat_calls_per_hour was live.
 //
-//	    5,474  maxChatCallTokens — one call with every byte cap maxed at once
+//	    5,535  maxChatCallTokens — one call with every byte cap maxed at once
 //	x      30  DefaultChatCallsPerHour — a full hour of them
 //	  -------
-//	  164,220  what a sustained runaway costs before the call ceiling stops it
+//	  166,050  what a sustained runaway costs before the call ceiling stops it
 //	x     2/3
 //	  -------
-//	  109,480  this ceiling
+//	  110,700  this ceiling
 //
 // The 2/3 is the ordering the two limits are meant to have: this ceiling divided by
 // maxChatCallTokens is 20, so the twentieth maximum-size call of the hour exhausts it and

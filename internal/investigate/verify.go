@@ -10,6 +10,7 @@ import (
 
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/untrusted"
 )
 
 // verifyPrompt drives an adversarial review of an investigation's root causes —
@@ -33,7 +34,7 @@ bounded and may omit some results), so weigh it alongside the other evidence rat
 solely on a missing line.
 
 Call submit_verdicts once: one verdict per root cause by index, with a calibrated confidence and a
-short reason.`
+short reason.` + "\n\n" + untrusted.SystemNotice
 
 const submitVerdictsName = "submit_verdicts"
 
@@ -250,20 +251,24 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 // the tool transcript so groundedness can be verified against the actual tool output.
 func renderForReview(req Request, inv providers.Investigation, transcript []providers.Message) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Incident: %s. Workload: %s/%s. Reason: %s.\n\nProposed root causes to review:\n",
+	incident := fmt.Sprintf("Incident: %s. Workload: %s/%s. Reason: %s.",
 		req.Title, req.Workload.Namespace, req.Workload.Name, req.Reason)
+	fmt.Fprintf(&b, "%s\n\nProposed root causes to review:\n", untrusted.Wrap("incident", incident))
+	var causes strings.Builder
 	for i, rc := range inv.RootCauses {
-		fmt.Fprintf(&b, "[%d] (confidence %.2f) %s\n", i, rc.Confidence, rc.Summary)
+		fmt.Fprintf(&causes, "[%d] (confidence %.2f) %s\n", i, rc.Confidence, rc.Summary)
 		if rc.ChangeRef != "" {
-			fmt.Fprintf(&b, "    change_ref: %s\n", rc.ChangeRef)
+			fmt.Fprintf(&causes, "    change_ref: %s\n", rc.ChangeRef)
 		}
 		for _, e := range rc.Evidence {
-			fmt.Fprintf(&b, "    - %s\n", e)
+			fmt.Fprintf(&causes, "    - %s\n", e)
 		}
 	}
+	b.WriteString(untrusted.Wrap("proposed_findings", strings.TrimSuffix(causes.String(), "\n")))
+	b.WriteByte('\n')
 	if ex := transcriptExcerpt(transcript); ex != "" {
 		fmt.Fprintf(&b, "\nTool transcript excerpt (most recent tool results, may be truncated — "+
-			"check each cited evidence against it):\n%s", ex)
+			"check each cited evidence against it):\n%s", untrusted.Wrap("tool_transcript", ex))
 	}
 	return b.String()
 }
@@ -296,14 +301,18 @@ func transcriptExcerpt(transcript []providers.Message) string {
 	type entry struct{ label, content string }
 	var entries []entry
 	for _, m := range transcript {
-		if m.Role != "tool" || strings.TrimSpace(m.Content) == "" {
+		if m.Role != "tool" {
+			continue
+		}
+		raw := untrusted.Unwrap(m.Content)
+		if strings.TrimSpace(raw) == "" {
 			continue
 		}
 		label := names[m.ToolCallID]
 		if label == "" {
 			label = "tool"
 		}
-		entries = append(entries, entry{label: label, content: m.Content})
+		entries = append(entries, entry{label: label, content: raw})
 	}
 	if len(entries) == 0 {
 		return ""

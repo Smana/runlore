@@ -10,6 +10,7 @@ import (
 
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/untrusted"
 )
 
 // Dimension is one rubric axis and its max score.
@@ -70,7 +71,7 @@ trace to a tool result in the transcript, not be hallucinated or correlation-onl
 bounded and may omit some results, so a missing line is not by itself proof the evidence is false.
 Set confident_wrong=true if the result states a wrong root cause with confidence >= 0.7.
 Record your grade by calling the submit_grade tool exactly once. If you cannot call tools, reply with
-ONLY a JSON object: {"scores":{"root_cause":N,"evidence":N,"solution":N,"description":N,"calibration":N},"confident_wrong":bool,"rationale":"..."}.`
+ONLY a JSON object: {"scores":{"root_cause":N,"evidence":N,"solution":N,"description":N,"calibration":N},"confident_wrong":bool,"rationale":"..."}.` + "\n\n" + untrusted.SystemNotice
 
 const submitGradeName = "submit_grade"
 
@@ -112,15 +113,17 @@ const maxJudgeTranscriptBytes = 4000
 // transcript excerpt (first variadic arg) is appended, bounded, so the judge can
 // check evidence groundedness against the tool results the investigation saw.
 func (j ModelJudge) Grade(ctx context.Context, scn Scenario, inv providers.Investigation, transcript ...string) (Verdict, error) {
+	finding := untrusted.Wrap("model_finding", redact.Secrets(investigationText(inv)+confidenceLine(inv)))
 	user := fmt.Sprintf(`GROUND TRUTH
 root_cause: %s
 expected_action: %s
 must_reach_root: %t
 
 INVESTIGATION RESULT
-%s`, scn.GroundTruth.RootCause, scn.GroundTruth.ExpectedAction, scn.GroundTruth.MustReachRoot, investigationText(inv)+confidenceLine(inv))
+%s`, scn.GroundTruth.RootCause, scn.GroundTruth.ExpectedAction, scn.GroundTruth.MustReachRoot, finding)
 	if ex := boundedTranscript(transcript); ex != "" {
-		user += "\n\nTOOL TRANSCRIPT EXCERPT (bounded, may be truncated — check cited evidence against it)\n" + ex
+		user += "\n\nTOOL TRANSCRIPT EXCERPT (bounded, may be truncated — check cited evidence against it)\n" +
+			untrusted.Wrap("tool_transcript", ex)
 	}
 
 	resp, err := j.Model.Complete(ctx, providers.CompletionRequest{
@@ -170,7 +173,7 @@ func boundedTranscript(transcript []string) string {
 	if len(transcript) == 0 || transcript[0] == "" {
 		return ""
 	}
-	s := redact.Secrets(transcript[0])
+	s := redact.Secrets(untrusted.Unwrap(transcript[0]))
 	if len(s) > maxJudgeTranscriptBytes {
 		s = s[len(s)-maxJudgeTranscriptBytes:] // keep the tail (latest results)
 	}
