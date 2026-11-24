@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"log/slog"
 
 	"k8s.io/client-go/discovery"
@@ -17,10 +18,32 @@ import (
 	"github.com/Smana/runlore/internal/providers/cluster"
 )
 
+type kubeContextKey struct{}
+
+// withKubeContext attaches an explicit kubeconfig context name to ctx for CLI
+// commands (`lore investigate --kube-context`).
+func withKubeContext(ctx context.Context, kubeContext string) context.Context {
+	if kubeContext == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, kubeContextKey{}, kubeContext)
+}
+
+func kubeContextFrom(ctx context.Context) string {
+	v, _ := ctx.Value(kubeContextKey{}).(string)
+	return v
+}
+
 // KubeClientset builds a read-only clientset for pod-log access, or nil when no
 // cluster is reachable (e.g. local runs without a kubeconfig).
 func KubeClientset(log *slog.Logger) *kubernetes.Clientset {
-	restCfg, err := RestConfig()
+	return KubeClientsetForContext("", log)
+}
+
+// KubeClientsetForContext builds a read-only clientset for the given kubeconfig
+// context (empty uses RestConfig's default in-cluster/ambient resolution).
+func KubeClientsetForContext(kubeContext string, log *slog.Logger) *kubernetes.Clientset {
+	restCfg, err := RestConfigForContext(kubeContext)
 	if err != nil {
 		return nil
 	}
@@ -35,11 +58,23 @@ func KubeClientset(log *slog.Logger) *kubernetes.Clientset {
 // RestConfig builds a Kubernetes REST config from in-cluster config, falling back
 // to the local kubeconfig (respecting $KUBECONFIG, then ~/.kube/config).
 func RestConfig() (*rest.Config, error) {
-	if cfg, err := rest.InClusterConfig(); err == nil {
-		return cfg, nil
+	return RestConfigForContext("")
+}
+
+// RestConfigForContext builds a Kubernetes REST config. When kubeContext is empty
+// it preserves RestConfig's default behavior (in-cluster config, then ambient
+// kubeconfig). When kubeContext is non-empty it loads the local kubeconfig with
+// CurrentContext overridden to kubeContext, failing with a clear error if that
+// context does not exist rather than falling back to in-cluster config.
+func RestConfigForContext(kubeContext string) (*rest.Config, error) {
+	if kubeContext == "" {
+		if cfg, err := rest.InClusterConfig(); err == nil {
+			return cfg, nil
+		}
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	overrides := &clientcmd.ConfigOverrides{CurrentContext: kubeContext}
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
 }
 
 // BuildResourceSpecReader builds the read-only arbitrary-object spec reader, or nil when
@@ -58,7 +93,13 @@ func RestConfig() (*rest.Config, error) {
 // Discovery is memoised and lazy: the round trip happens on first use rather than at
 // startup, so an unreachable API server delays a tool call instead of blocking boot.
 func BuildResourceSpecReader(log *slog.Logger) providers.ResourceReader {
-	restCfg, err := RestConfig()
+	return BuildResourceSpecReaderForContext("", log)
+}
+
+// BuildResourceSpecReaderForContext is BuildResourceSpecReader scoped to an explicit
+// kubeconfig context (empty uses the default resolution).
+func BuildResourceSpecReaderForContext(kubeContext string, log *slog.Logger) providers.ResourceReader {
+	restCfg, err := RestConfigForContext(kubeContext)
 	if err != nil {
 		return nil
 	}

@@ -260,3 +260,60 @@ func TestGetApplicationNeverClaimsFluxSystem(t *testing.T) {
 		})
 	}
 }
+
+func TestListFailures(t *testing.T) {
+	healthy := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1",
+		"kind":       "Application",
+		"metadata":   map[string]any{"name": "ok-app", "namespace": "argocd"},
+		"spec":       map[string]any{"destination": map[string]any{"namespace": "apps"}},
+		"status": map[string]any{
+			"health": map[string]any{"status": "Healthy"},
+			"sync":   map[string]any{"status": "Synced"},
+		},
+	}}
+	degraded := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1",
+		"kind":       "Application",
+		"metadata":   map[string]any{"name": "checkout", "namespace": "argocd"},
+		"spec":       map[string]any{"destination": map[string]any{"namespace": "apps"}},
+		"status": map[string]any{
+			"health":         map[string]any{"status": "Degraded"},
+			"sync":           map[string]any{"status": "Synced"},
+			"operationState": map[string]any{"message": "deployment degraded"},
+		},
+	}}
+	outOfSync := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1",
+		"kind":       "Application",
+		"metadata":   map[string]any{"name": "payments", "namespace": "argocd"},
+		"spec":       map[string]any{"destination": map[string]any{"namespace": "billing"}},
+		"status": map[string]any{
+			"health": map[string]any{"status": "Healthy"},
+			"sync":   map[string]any{"status": "OutOfSync"},
+		},
+	}}
+
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{applicationGVR: "ApplicationList"},
+		healthy, degraded, outOfSync,
+	)
+	p := New(NewDynamicReader(client), nil)
+
+	all, err := p.ListFailures(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListFailures(all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("ListFailures(all) = %d items (%+v), want 2", len(all), all)
+	}
+
+	appsOnly, err := p.ListFailures(context.Background(), "apps")
+	if err != nil {
+		t.Fatalf("ListFailures(apps): %v", err)
+	}
+	if len(appsOnly) != 1 || appsOnly[0].Workload.Name != "checkout" || appsOnly[0].Reason != "Degraded" {
+		t.Fatalf("ListFailures(apps) = %+v, want only Degraded checkout", appsOnly)
+	}
+}

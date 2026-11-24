@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -272,7 +273,42 @@ func parseRevision(rev string) string {
 	return rev
 }
 
+// ListFailures returns a one-shot snapshot of unhealthy Argo CD Applications
+// (Health=Degraded, Sync=OutOfSync, or OperationPhase Failed/Error) without
+// starting watch informers. A missing Application CRD (404) returns nil, nil.
+func (p *Provider) ListFailures(ctx context.Context, namespace string) ([]providers.FailureEvent, error) {
+	apps, err := p.reader.ListApplications(ctx)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []providers.FailureEvent
+	for _, a := range apps {
+		if !matchesNamespace(a, namespace) {
+			continue
+		}
+		reason, failed := failureReason(a)
+		if !failed && a.SyncStatus == "OutOfSync" {
+			reason, failed = "OutOfSync", true
+		}
+		if !failed {
+			continue
+		}
+		out = append(out, providers.FailureEvent{
+			Workload: providers.Workload{Kind: "Application", Name: a.Name, Namespace: a.Namespace},
+			Engine:   providers.EngineArgoCD,
+			Reason:   reason,
+			Message:  a.Message,
+			When:     a.DeployedAt,
+		})
+	}
+	return out, nil
+}
+
 var (
-	_ providers.GitOpsProvider  = (*Provider)(nil)
-	_ providers.GitOpsInspector = (*Provider)(nil)
+	_ providers.GitOpsProvider      = (*Provider)(nil)
+	_ providers.GitOpsInspector     = (*Provider)(nil)
+	_ providers.GitOpsFailureLister = (*Provider)(nil)
 )

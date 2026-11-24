@@ -256,3 +256,11 @@ type GitOpsInspector interface {
 	// DependencyTree walks dependsOn/sourceRef edges to surface the root failure.
 	DependencyTree(ctx context.Context, w Workload) (DepNode, error)
 }
+
+// GitOpsFailureLister is an optional capability for one-shot listing of failing
+// GitOps objects without starting watch informers (used by `lore status`).
+type GitOpsFailureLister interface {
+	// ListFailures returns failing GitOps objects, optionally scoped to namespace
+	// (empty lists across all namespaces).
+	ListFailures(ctx context.Context, namespace string) ([]FailureEvent, error)
+}

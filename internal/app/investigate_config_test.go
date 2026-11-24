@@ -19,11 +19,16 @@ func TestResolveFromOpenAIEnv(t *testing.T) {
 	t.Chdir(dir)
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
 	t.Setenv("OPENAI_MODEL", "qwen3-30b")
+	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
 
-	cfg, err := resolveInvestigateConfig(defaultConfigPath, false)
+	cfg, src, err := resolveInvestigateConfig(defaultConfigPath, false, "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	if src != envOpenAIBaseURL {
+		t.Errorf("source = %q, want %q", src, envOpenAIBaseURL)
 	}
 	if cfg.Model.BaseURL != "http://localhost:8000/v1" {
 		t.Errorf("base_url = %q, want the env value", cfg.Model.BaseURL)
@@ -41,11 +46,17 @@ func TestResolveFromOpenAIEnv(t *testing.T) {
 func TestResolveFromAnthropicEnv(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("OPENAI_BASE_URL", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	t.Setenv("ANTHROPIC_MODEL", "")
+	t.Setenv("GEMINI_API_KEY", "")
 
-	cfg, err := resolveInvestigateConfig(defaultConfigPath, false)
+	cfg, src, err := resolveInvestigateConfig(defaultConfigPath, false, "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	if src != envAnthropicKey {
+		t.Errorf("source = %q, want %q", src, envAnthropicKey)
 	}
 	if cfg.Model.Provider != "anthropic" {
 		t.Errorf("provider = %q, want anthropic", cfg.Model.Provider)
@@ -62,12 +73,13 @@ func TestResolveWithNoEnvExplainsBothPaths(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("OPENAI_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
 
-	_, err := resolveInvestigateConfig(defaultConfigPath, false)
+	_, _, err := resolveInvestigateConfig(defaultConfigPath, false, "")
 	if err == nil {
 		t.Fatal("expected an error with no config and no env")
 	}
-	for _, want := range []string{"OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "runlore.yaml"} {
+	for _, want := range []string{"OPENAI_BASE_URL", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "runlore.yaml"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error must mention %q, got: %v", want, err)
 		}
@@ -78,7 +90,7 @@ func TestResolveWithNoEnvExplainsBothPaths(t *testing.T) {
 // path behind a surprise zero-config run against the wrong model.
 func TestExplicitMissingConfigStillErrors(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-	_, err := resolveInvestigateConfig(filepath.Join(t.TempDir(), "typo.yaml"), true)
+	_, _, err := resolveInvestigateConfig(filepath.Join(t.TempDir(), "typo.yaml"), true, "")
 	if err == nil {
 		t.Fatal("an explicitly named missing config must be an error")
 	}
@@ -94,9 +106,12 @@ func TestExistingConfigWins(t *testing.T) {
 		"model:\n  base_url: http://from-file:8000/v1\n  model: from-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := resolveInvestigateConfig(defaultConfigPath, false)
+	cfg, src, err := resolveInvestigateConfig(defaultConfigPath, false, "")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
+	}
+	if src != defaultConfigPath {
+		t.Errorf("source = %q, want %q", src, defaultConfigPath)
 	}
 	if cfg.Model.Model != "from-file" {
 		t.Errorf("model = %q, want the file's value", cfg.Model.Model)
@@ -118,7 +133,7 @@ func TestMalformedDefaultConfigIsError(t *testing.T) {
 		"model:\n  not_a_real_field: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := resolveInvestigateConfig(defaultConfigPath, false)
+	_, _, err := resolveInvestigateConfig(defaultConfigPath, false, "")
 	if err == nil {
 		t.Fatal("a malformed default config must be an error, not silently replaced by env synthesis")
 	}
@@ -133,9 +148,10 @@ func TestMalformedDefaultConfigIsError(t *testing.T) {
 func TestConfigFromEnvGetsInvestigationDefaults(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
+	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
-	envCfg, err := resolveInvestigateConfig(defaultConfigPath, false)
+	envCfg, _, err := resolveInvestigateConfig(defaultConfigPath, false, "")
 	if err != nil {
 		t.Fatalf("resolve (env): %v", err)
 	}
@@ -151,7 +167,7 @@ func TestConfigFromEnvGetsInvestigationDefaults(t *testing.T) {
 		"model:\n  provider: anthropic\n  model: claude-sonnet-5\n  api_key_env: ANTHROPIC_API_KEY\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fileCfg, err := resolveInvestigateConfig(filePath, true)
+	fileCfg, _, err := resolveInvestigateConfig(filePath, true, "")
 	if err != nil {
 		t.Fatalf("resolve (file): %v", err)
 	}
@@ -199,7 +215,7 @@ func TestConfigFromEnvIsValidated(t *testing.T) {
 	t.Setenv(envOpenAIBaseURL, "http://gpu.public.example/v1")
 	t.Setenv(envOpenAIKey, "sk-secret")
 	t.Setenv(envOpenAIModel, "gpt-4o")
-	if _, err := configFromEnv(); err == nil {
+	if _, _, err := configFromEnv(""); err == nil {
 		t.Fatal("an API key sent to a plaintext public endpoint must be rejected on the env path, " +
 			"exactly as it is when the same settings come from runlore.yaml")
 	}
@@ -207,7 +223,178 @@ func TestConfigFromEnvIsValidated(t *testing.T) {
 	// Control: the same shape over TLS is fine, so the assertion above is not just
 	// "configFromEnv always errors".
 	t.Setenv(envOpenAIBaseURL, "https://gpu.public.example/v1")
-	if _, err := configFromEnv(); err != nil {
+	if _, _, err := configFromEnv(""); err != nil {
 		t.Fatalf("a TLS endpoint must still be accepted: %v", err)
+	}
+}
+
+func TestConfigFromEnv(t *testing.T) {
+	clearEnv := func(t *testing.T) {
+		t.Helper()
+		for _, k := range []string{
+			"OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+			"ANTHROPIC_API_KEY", "ANTHROPIC_MODEL",
+			"GEMINI_API_KEY", "GEMINI_MODEL",
+		} {
+			t.Setenv(k, "")
+		}
+	}
+
+	cases := []struct {
+		name             string
+		env              map[string]string
+		providerOverride string
+		wantProvider     string
+		wantModel        string
+		wantBaseURL      string
+		wantAPIKeyEnv    string
+		wantSource       string
+		wantErrContains  string
+	}{
+		{
+			name:          "gemini default model",
+			env:           map[string]string{"GEMINI_API_KEY": "gk-test"},
+			wantProvider:  "gemini",
+			wantModel:     "gemini-4-neon",
+			wantAPIKeyEnv: "GEMINI_API_KEY",
+			wantSource:    "GEMINI_API_KEY",
+		},
+		{
+			name:          "gemini with GEMINI_MODEL override",
+			env:           map[string]string{"GEMINI_API_KEY": "gk-test", "GEMINI_MODEL": "gemini-4-carbon"},
+			wantProvider:  "gemini",
+			wantModel:     "gemini-4-carbon",
+			wantAPIKeyEnv: "GEMINI_API_KEY",
+			wantSource:    "GEMINI_API_KEY",
+		},
+		{
+			name:          "bare OPENAI_API_KEY",
+			env:           map[string]string{"OPENAI_API_KEY": "sk-test"},
+			wantProvider:  "openai",
+			wantModel:     "gpt-4o-mini",
+			wantBaseURL:   "https://api.openai.com/v1",
+			wantAPIKeyEnv: "OPENAI_API_KEY",
+			wantSource:    "OPENAI_API_KEY",
+		},
+		{
+			name:          "anthropic with ANTHROPIC_MODEL override",
+			env:           map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test", "ANTHROPIC_MODEL": "claude-opus-5"},
+			wantProvider:  "anthropic",
+			wantModel:     "claude-opus-5",
+			wantAPIKeyEnv: "ANTHROPIC_API_KEY",
+			wantSource:    "ANTHROPIC_API_KEY",
+		},
+		{
+			name: "precedence: OPENAI_BASE_URL beats all",
+			env: map[string]string{
+				"OPENAI_BASE_URL":   "http://localhost:8000/v1",
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+				"GEMINI_API_KEY":    "gk-test",
+				"OPENAI_API_KEY":    "sk-test",
+			},
+			wantProvider:  "",
+			wantModel:     "gpt-4o-mini",
+			wantBaseURL:   "http://localhost:8000/v1",
+			wantAPIKeyEnv: "OPENAI_API_KEY",
+			wantSource:    "OPENAI_BASE_URL",
+		},
+		{
+			name: "precedence: ANTHROPIC_API_KEY beats GEMINI and bare OPENAI",
+			env: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+				"GEMINI_API_KEY":    "gk-test",
+				"OPENAI_API_KEY":    "sk-test",
+			},
+			wantProvider:  "anthropic",
+			wantModel:     "claude-sonnet-5",
+			wantAPIKeyEnv: "ANTHROPIC_API_KEY",
+			wantSource:    "ANTHROPIC_API_KEY",
+		},
+		{
+			name: "precedence: GEMINI_API_KEY beats bare OPENAI_API_KEY",
+			env: map[string]string{
+				"GEMINI_API_KEY": "gk-test",
+				"OPENAI_API_KEY": "sk-test",
+			},
+			wantProvider:  "gemini",
+			wantModel:     "gemini-4-neon",
+			wantAPIKeyEnv: "GEMINI_API_KEY",
+			wantSource:    "GEMINI_API_KEY",
+		},
+		{
+			name: "explicit --provider gemini overrides ANTHROPIC_API_KEY",
+			env: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+				"GEMINI_API_KEY":    "gk-test",
+			},
+			providerOverride: "gemini",
+			wantProvider:     "gemini",
+			wantModel:        "gemini-4-neon",
+			wantAPIKeyEnv:    "GEMINI_API_KEY",
+			wantSource:       "GEMINI_API_KEY",
+		},
+		{
+			name: "explicit --provider gemini missing key names GEMINI_API_KEY",
+			env: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+			},
+			providerOverride: "gemini",
+			wantErrContains:  "GEMINI_API_KEY",
+		},
+		{
+			name: "explicit --provider openai uses bare key when no base URL",
+			env: map[string]string{
+				"ANTHROPIC_API_KEY": "sk-ant-test",
+				"OPENAI_API_KEY":    "sk-test",
+			},
+			providerOverride: "openai",
+			wantProvider:     "openai",
+			wantModel:        "gpt-4o-mini",
+			wantBaseURL:      "https://api.openai.com/v1",
+			wantAPIKeyEnv:    "OPENAI_API_KEY",
+			wantSource:       "OPENAI_API_KEY",
+		},
+		{
+			name:             "unknown --provider fails fast",
+			providerOverride: "bedrock",
+			wantErrContains:  "bedrock",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, src, err := configFromEnv(tc.providerOverride)
+			if tc.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErrContains)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("err = %q, want substring %q", err.Error(), tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("configFromEnv(%q): %v", tc.providerOverride, err)
+			}
+			if cfg.Model.Provider != tc.wantProvider {
+				t.Errorf("provider = %q, want %q", cfg.Model.Provider, tc.wantProvider)
+			}
+			if cfg.Model.Model != tc.wantModel {
+				t.Errorf("model = %q, want %q", cfg.Model.Model, tc.wantModel)
+			}
+			if cfg.Model.BaseURL != tc.wantBaseURL {
+				t.Errorf("base_url = %q, want %q", cfg.Model.BaseURL, tc.wantBaseURL)
+			}
+			if cfg.Model.APIKeyEnv != tc.wantAPIKeyEnv {
+				t.Errorf("api_key_env = %q, want %q", cfg.Model.APIKeyEnv, tc.wantAPIKeyEnv)
+			}
+			if src != tc.wantSource {
+				t.Errorf("source = %q, want %q", src, tc.wantSource)
+			}
+		})
 	}
 }

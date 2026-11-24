@@ -410,3 +410,61 @@ func TestGetResourceUnresolvableKindIsNotANegative(t *testing.T) {
 		t.Error("an unresolvable kind must not masquerade as a NotFound: nothing was looked up")
 	}
 }
+
+func TestListFailures(t *testing.T) {
+	readyKS := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+		"kind":       "Kustomization",
+		"metadata":   map[string]any{"name": "healthy-ks", "namespace": "flux-system"},
+		"spec":       map[string]any{"targetNamespace": "apps"},
+		"status": map[string]any{"conditions": []any{
+			map[string]any{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded"},
+		}},
+	}}
+	failingKS := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+		"kind":       "Kustomization",
+		"metadata":   map[string]any{"name": "checkout", "namespace": "flux-system"},
+		"spec":       map[string]any{"targetNamespace": "apps"},
+		"status": map[string]any{"conditions": []any{
+			map[string]any{
+				"type": "Ready", "status": "False",
+				"reason": "HealthCheckFailed", "message": "Deployment/apps/checkout-api not ready",
+			},
+		}},
+	}}
+	failingHR := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "helm.toolkit.fluxcd.io/v2",
+		"kind":       "HelmRelease",
+		"metadata":   map[string]any{"name": "harbor", "namespace": "tooling"},
+		"status": map[string]any{"conditions": []any{
+			map[string]any{
+				"type": "Ready", "status": "False",
+				"reason": "UpgradeFailed", "message": "timed out waiting for condition",
+			},
+		}},
+	}}
+
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		kustomizationGVR: "KustomizationList",
+		helmReleaseGVR:   "HelmReleaseList",
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, readyKS, failingKS, failingHR)
+	p := New(NewDynamicReader(client), nil)
+
+	all, err := p.ListFailures(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListFailures(all): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("ListFailures(all) = %d items (%+v), want 2", len(all), all)
+	}
+
+	appsOnly, err := p.ListFailures(context.Background(), "apps")
+	if err != nil {
+		t.Fatalf("ListFailures(apps): %v", err)
+	}
+	if len(appsOnly) != 1 || appsOnly[0].Workload.Kind != "Kustomization" || appsOnly[0].Workload.Name != "checkout" {
+		t.Fatalf("ListFailures(apps) = %+v, want only Kustomization/flux-system/checkout", appsOnly)
+	}
+}

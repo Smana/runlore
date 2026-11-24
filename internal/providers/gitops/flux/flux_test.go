@@ -44,6 +44,7 @@ type fakeReader struct {
 }
 
 func (f fakeReader) ListKustomizations(context.Context) ([]kustomization, error) { return f.ks, nil }
+func (f fakeReader) ListHelmReleases(context.Context) ([]helmRelease, error)     { return nil, nil }
 func (f fakeReader) GetGitRepository(_ context.Context, ns, name string) (gitRepository, error) {
 	if gr, ok := f.grs[ns+"/"+name]; ok {
 		return gr, nil

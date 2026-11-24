@@ -15,7 +15,8 @@ Every subcommand `lore` wires; `lore help` prints each one's flags.
 
 | Subcommand | Does |
 |---|---|
-| `lore investigate` | one on-demand investigation of an alert, findings printed |
+| `lore status` | zero-LLM cluster triage snapshot (unhealthy pods, failing GitOps objects, recent Warning events) |
+| `lore investigate` | one on-demand investigation of a target or alert, findings printed (text or `--json`) |
 | `lore demo investigate` | a full investigation on fake providers, recorded (`--offline`) or live |
 | `lore serve` | the in-cluster agent, reacting to incidents |
 | `lore catalog sync` | clone or pull the knowledge catalog and index it |
@@ -104,18 +105,46 @@ loop **live** against fake providers — it still needs no cluster, but it does 
 a model key (`ANTHROPIC_API_KEY` by default, or `--config` pointing at a
 `runlore.yaml`).
 
+## `lore status`
+
+`lore status [--namespace <ns>] [--kube-context <name>] [--json] [--exit-code]`
+runs a fast, **zero-LLM**, read-only triage snapshot against your active kubeconfig
+context — no API key and no `runlore.yaml` required.
+
+It reports:
+
+- **GitOps failures** — auto-detects Flux (`Kustomization` / `HelmRelease` with `Ready=False`) and Argo CD (`Application` with `Health=Degraded`, `Sync=OutOfSync`, or failed sync operation).
+- **Unhealthy pods** — `Pending`, `Failed`, `NotReady`, waiting container reasons (`CrashLoopBackOff`, `ImagePullBackOff`, `CreateContainerConfigError`, …), or restarts ≥ 3.
+- **Recent Warning events** — last 15 minutes, newest first (capped at 20).
+
+When issues are found, `lore status` prints concrete `Next step:` commands you can
+copy-paste straight into `lore investigate <kind>/<ns>/<name>`. Pass `--json` for
+structured output, and `--exit-code` in scripts or CI to exit `1` whenever failing
+GitOps objects or unhealthy pods are present (warning events alone still exit `0`).
+
 ## `lore investigate`
 
-`lore investigate --alert <name> [--message <text>] [--namespace <ns>]` runs one
-on-demand investigation against **your** stack and prints the findings — no
-`runlore.yaml` required. With no `--config`, it reads its model from the
-environment, in this order:
+```bash
+lore investigate [<ns>/<name> | <kind>/<ns>/<name>] \
+  [--alert <name>] [--namespace <ns>] [--message <text>] \
+  [--config <path>] [--provider openai|anthropic|gemini] [--model <name>] \
+  [--base-url <url>] [--effort <level>] \
+  [--metrics-url <url>] [--logs-url <url>] \
+  [--kube-context <name>] [--json] [--quiet]
+```
+
+`lore investigate` runs one on-demand investigation against **your** stack and prints
+the findings — no `runlore.yaml` required. You can pass a positional workload target
+(`apps/checkout-api` or `Deployment/apps/checkout-api`) with flags before or after it.
+With no `--config`, it reads its model from the environment, in this order:
 
 | Source | Effect |
 |---|---|
 | `OPENAI_BASE_URL` (+ optional `OPENAI_API_KEY`, `OPENAI_MODEL`) | any OpenAI-compatible endpoint — keyless if the endpoint itself needs no credential (e.g. a local vLLM/Ollama) |
-| `ANTHROPIC_API_KEY` | native Anthropic, checked if no `OPENAI_BASE_URL` is set |
-| neither | `investigate` exits with an error naming both options |
+| `ANTHROPIC_API_KEY` (+ optional `ANTHROPIC_MODEL`) | native Anthropic (default `claude-sonnet-5`) |
+| `GEMINI_API_KEY` (+ optional `GEMINI_MODEL`) | native Gemini (default `gemini-4-neon`) |
+| `OPENAI_API_KEY` (+ optional `OPENAI_MODEL`) | direct OpenAI (`https://api.openai.com/v1`, default `gpt-4o-mini`) |
+| none | `investigate` exits with an error naming all options |
 
 A `./runlore.yaml`, if present, is read automatically; `--config <path>` points at
 one explicitly (and a missing explicit path is a hard error — the flag is a promise,
@@ -126,10 +155,19 @@ stack without writing a file at all:
 
 | Flag | Overrides |
 |---|---|
+| `--provider` | model provider (`openai`, `anthropic`, `gemini`) — bypasses env auto-detection precedence |
 | `--model` | the model name |
 | `--base-url` | the OpenAI-compatible endpoint |
+| `--effort` | model reasoning effort level |
 | `--metrics-url` | PromQL endpoint — enables the `query_metrics` tool |
 | `--logs-url` | logs endpoint — enables the `query_logs` tool |
+| `--kube-context` | kubeconfig context to query |
+| `--json` | emit the final findings as indented JSON on stdout (suppresses stderr progress) |
+| `--quiet` | suppress stderr provider notice and live tool progress (`→ tool(...)`) |
+
+During live runs (unless `--quiet` or `--json` is set), `lore investigate` prints the
+chosen provider/model and one concise, secret-redacted `→ <tool>(...)` line per tool
+call to stderr while keeping stdout strictly for the final verdict.
 
 ### What degrades, and what that notice means
 
