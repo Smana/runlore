@@ -96,7 +96,8 @@ func submitFindingsSpec() providers.ToolSpec {
 "ruled_out":{"type":"array","items":{"type":"string"},"description":"hypotheses you considered and REJECTED, one line each naming the disproving evidence"},
 "data_gaps":{"type":"array","items":{"type":"string"},"description":"signals you could not obtain (tool errors, RBAC denials, truncated output) that limited the investigation - data limitations, NOT questions for a human. State the tool you called and the ACTUAL error it returned. Do NOT speculate about a cause you did not verify: if a metrics query returned nothing, call discover_metrics before claiming a metric or its name is absent; if a logs query returned nothing, call discover_log_fields; if a tool was refused, report the refusal rather than guessing why. An empty result is not evidence that the data does not exist."},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
-"description":{"type":"string"},"op":{"type":"string","enum":` + opEnumJSON() + `,"description":"executable GitOps op (Flux or Argo CD); omit for a suggestion only"},
+"description":{"type":"string"},"op":{"type":"string","enum":` + opEnumJSON() + `,"description":"executable op; omit for suggestion"},
+"change_ref":{"type":"string"},
 "reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
 "target":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}}},
 "required":["description"]}}},"required":["root_causes","verdict"]}`,
@@ -143,6 +144,7 @@ type findings struct {
 	Actions    []struct {
 		Description string `json:"description"`
 		Op          string `json:"op"`
+		ChangeRef   string `json:"change_ref"`
 		Reversible  bool   `json:"reversible"`
 		BlastRadius int    `json:"blast_radius"`
 		Target      struct {
@@ -274,6 +276,7 @@ func buildInvestigation(f findings) providers.Investigation {
 			Name:        a.Description,
 			Description: a.Description,
 			Op:          a.Op,
+			ChangeRef:   a.ChangeRef,
 			Target:      providers.Workload{Kind: a.Target.Kind, Name: a.Target.Name, Namespace: a.Target.Namespace},
 			Mutating:    true,
 			Reversible:  a.Reversible,

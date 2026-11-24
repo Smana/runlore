@@ -438,6 +438,10 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("action approved and executed", "id", id, "op", act.Op)
+	if act.Revert != nil && act.Revert.ResultURL != "" {
+		_, _ = fmt.Fprintf(w, "executed: %s %s (%s)\n", act.Op, act.Description, act.Revert.ResultURL)
+		return
+	}
 	_, _ = fmt.Fprintf(w, "executed: %s %s\n", act.Op, act.Description)
 }
 
@@ -567,7 +571,11 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = "❌ approval failed: " + aerr.Error()
 			s.log.Warn("slack approve failed", "id", act.Value, "user", p.User.Username, "err", aerr)
 		} else {
-			msg = fmt.Sprintf("✅ approved by @%s — executed: %s %s", p.User.Username, executed.Op, executed.Description)
+			if executed.Revert != nil && executed.Revert.ResultURL != "" {
+				msg = fmt.Sprintf("✅ approved by @%s — opened Draft revert PR: %s", p.User.Username, executed.Revert.ResultURL)
+			} else {
+				msg = fmt.Sprintf("✅ approved by @%s — executed: %s %s", p.User.Username, executed.Op, executed.Description)
+			}
 			s.log.Info("slack approval executed", "id", act.Value, "user_id", p.User.ID, "user", p.User.Username, "op", executed.Op)
 		}
 	case slackcard.RejectActionID:

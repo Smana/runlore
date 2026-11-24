@@ -99,9 +99,16 @@ var egressVerbatim = map[string]bool{
 	"Investigation.RootCauses.Provenance.Label": true,
 	"Investigation.RootCauses.Provenance.URL":   true,
 	"Investigation.RootCauses.Provenance.Kind":  true,
-	// Server-controlled action vocabulary and approval token.
-	"Investigation.Actions.Op":         true,
-	"Investigation.Actions.ApprovalID": true,
+	// Server-controlled action vocabulary, approval token, and server-derived revert target identifiers.
+	"Investigation.Actions.Op":                   true,
+	"Investigation.Actions.ApprovalID":           true,
+	"Investigation.Actions.Revert.Repo":          true,
+	"Investigation.Actions.Revert.RepoURL":       true,
+	"Investigation.Actions.Revert.CommitSHA":     true,
+	"Investigation.Actions.Revert.Branch":        true,
+	"Investigation.Actions.Revert.ProvenanceURL": true,
+	"Investigation.Actions.Revert.AuditID":       true,
+	"Investigation.Actions.Revert.ResultURL":     true,
 	// providers.Workload is a Kubernetes resource identifier the executor acts on,
 	// never free text — spelled out per reachable occurrence rather than waved
 	// through by type, so a new Workload-shaped field cannot be exempted silently.

@@ -833,6 +833,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				// load-bearing (see verifyFindings' doc comment for why the two differ).
 				inv, _ = li.verifyFindings(ctx, req, inv, messages, &verifyTotals)
 			}
+			resolveRevertTargets(&inv, observedChangesFrom(ctx), li.HostStyles, li.Log)
 			inv.Actions = li.reviewActions(ctx, inv.Actions)
 			attachProvenance(&inv, observedChangesFrom(ctx), li.HostStyles)
 			// A submission produced only because the final-step nudge forced it is a
@@ -1446,6 +1447,13 @@ var redactionSkipField = map[string]bool{
 	"Investigation.Verdict":        true, // server-controlled classification enum
 	"Action.Op":                    true, // server-controlled executable-operation enum
 	"Action.ApprovalID":            true, // server-generated approval token
+	"RevertTarget.Repo":            true, // server-derived allowlisted repo path
+	"RevertTarget.RepoURL":         true, // server-derived normalized HTTPS repo URL
+	"RevertTarget.CommitSHA":       true, // server-observed GitOps commit SHA
+	"RevertTarget.Branch":          true, // forge-resolved default branch name
+	"RevertTarget.ProvenanceURL":   true, // server-derived HTTPS commit link
+	"RevertTarget.AuditID":         true, // server-generated audit id
+	"RevertTarget.ResultURL":       true, // forge-returned Draft PR/MR URL
 	"Investigation.CuratedURL":     true, // curator-set KB link
 	"Investigation.PrevCuratedURL": true, // curator-set KB link (prior occurrence)
 	"Investigation.RecalledEntry":  true, // catalog path the answer was recalled from

@@ -5,6 +5,8 @@ package investigate
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -22,11 +24,12 @@ type observedFile struct {
 }
 
 type observedChange struct {
-	RepoURL string
-	FromRev string
-	ToRev   string
-	Commits []string // optional individual commit SHAs observed in source_diff
-	Files   []observedFile
+	RepoURL  string
+	FromRev  string
+	ToRev    string
+	Commits  []string // optional individual commit SHAs observed in source_diff
+	Files    []observedFile
+	IsGitOps bool // true only when recorded by what_changed (never source_diff)
 }
 
 // observedChanges records GitOps and source-repo changes actually materialized
@@ -72,9 +75,19 @@ func (o *observedChanges) snapshot() []observedChange {
 	return cp
 }
 
-// recordObservedChange records a server-observed Git change and its diff into
-// the investigation's context-scoped collector. No-op when ctx carries none.
+// recordObservedChange records a server-observed source-repo Git change and its
+// diff into the investigation's context-scoped collector. No-op when ctx carries none.
 func recordObservedChange(ctx context.Context, repoURL, fromRev, toRev string, diff providers.Diff, commitSHAs ...string) {
+	recordObservedChangeKind(ctx, false, repoURL, fromRev, toRev, diff, commitSHAs...)
+}
+
+// recordObservedGitOpsChange records a server-observed GitOps change from
+// what_changed. Only changes recorded here are eligible for op=revert_pr.
+func recordObservedGitOpsChange(ctx context.Context, repoURL, fromRev, toRev string, diff providers.Diff) {
+	recordObservedChangeKind(ctx, true, repoURL, fromRev, toRev, diff)
+}
+
+func recordObservedChangeKind(ctx context.Context, isGitOps bool, repoURL, fromRev, toRev string, diff providers.Diff, commitSHAs ...string) {
 	o := observedChangesFrom(ctx)
 	if o == nil {
 		return
@@ -90,11 +103,12 @@ func recordObservedChange(ctx context.Context, repoURL, fromRev, toRev string, d
 		})
 	}
 	o.add(observedChange{
-		RepoURL: repoURL,
-		FromRev: fromRev,
-		ToRev:   toRev,
-		Commits: commitSHAs,
-		Files:   files,
+		RepoURL:  repoURL,
+		FromRev:  fromRev,
+		ToRev:    toRev,
+		Commits:  commitSHAs,
+		Files:    files,
+		IsGitOps: isGitOps,
 	})
 }
 
@@ -246,4 +260,108 @@ func buildFileProvenance(base string, style provenance.ForgeStyle, rev string, f
 		return nil
 	}
 	return links
+}
+
+// resolveRevertTargets resolves Action.Revert strictly server-side from
+// observed GitOps changes (recorded by what_changed, never source_diff). Any
+// proposed revert_pr citing an unobserved SHA, a source_diff commit, a
+// multi-commit range, or an unnormalizable repo URL has Op stripped so it
+// degrades cleanly to a read-only suggestion.
+func resolveRevertTargets(inv *providers.Investigation, obs *observedChanges, styles provenance.HostStyles, log *slog.Logger) {
+	if inv == nil || len(inv.Actions) == 0 {
+		return
+	}
+	var changes []observedChange
+	if obs != nil {
+		changes = obs.snapshot()
+	}
+	var topSummary string
+	var topEvidence []string
+	if len(inv.RootCauses) > 0 {
+		topSummary = inv.RootCauses[0].Summary
+		topEvidence = inv.RootCauses[0].Evidence
+	}
+	for i := range inv.Actions {
+		a := &inv.Actions[i]
+		if a.Op != "revert_pr" {
+			a.Revert = nil // never accept model-authored RevertTarget
+			continue
+		}
+		a.Revert = nil
+		ref := strings.TrimSpace(a.ChangeRef)
+		if ref == "" && len(inv.RootCauses) > 0 {
+			ref = strings.TrimSpace(inv.RootCauses[0].ChangeRef)
+		}
+		target, ok := matchSingleGitOpsCommit(ref, changes, styles)
+		if !ok {
+			if log != nil {
+				log.Info("revert_pr downgraded to suggestion: no single server-observed GitOps commit matched", "change_ref", ref)
+			}
+			a.Op = ""
+			a.Mutating = false
+			continue
+		}
+		target.IncidentTitle = inv.Title
+		target.IncidentSummary = topSummary
+		target.Evidence = append([]string(nil), topEvidence...)
+		a.Revert = target
+	}
+}
+
+func matchSingleGitOpsCommit(ref string, changes []observedChange, styles provenance.HostStyles) (*providers.RevertTarget, bool) {
+	if ref == "" || strings.Contains(ref, "..") {
+		return nil, false
+	}
+	lowerRef := strings.ToLower(ref)
+	for _, ch := range changes {
+		if !ch.IsGitOps {
+			continue
+		}
+		if !isFullHexSHA(ch.ToRev) {
+			continue
+		}
+		if !matchesRevToken(lowerRef, ch.ToRev) {
+			continue
+		}
+		baseHTTPS, style, ok := provenance.NormalizeRepoHTTPS(ch.RepoURL, styles)
+		if !ok {
+			continue
+		}
+		repoPath := repoPathFromHTTPS(baseHTTPS)
+		if repoPath == "" {
+			continue
+		}
+		return &providers.RevertTarget{
+			Repo:          repoPath,
+			RepoURL:       baseHTTPS,
+			CommitSHA:     ch.ToRev,
+			ProvenanceURL: provenance.CommitURL(baseHTTPS, style, ch.ToRev),
+		}, true
+	}
+	return nil, false
+}
+
+func isFullHexSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func repoPathFromHTTPS(baseHTTPS string) string {
+	u, err := url.Parse(baseHTTPS)
+	if err != nil {
+		return ""
+	}
+	p := strings.Trim(u.Path, "/")
+	if p == "" || !strings.Contains(p, "/") {
+		return ""
+	}
+	return p
 }

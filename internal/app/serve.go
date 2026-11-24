@@ -126,7 +126,24 @@ func RunServe(version string, args []string) error {
 		return aerr
 	}
 	defer auditClose()
-	// Audit every cluster mutation at the single Execute seam (both rungs go through it).
+	// Audit every cluster/git mutation at the single Execute seam (both rungs go through it).
+	var revertNotifier *notify.Multi
+	onRevertOpened := func(ctx context.Context, act providers.Action, prURL string, reused bool) {
+		if revertNotifier == nil || prURL == "" {
+			return
+		}
+		verb := "Opened Draft revert PR"
+		if reused {
+			verb = "Reused existing open Draft revert PR"
+		}
+		repo := ""
+		if act.Revert != nil {
+			repo = act.Revert.Repo
+		}
+		_ = revertNotifier.DeliverLine(ctx, fmt.Sprintf("🔀 %s for %s: %s", verb, repo, prURL))
+	}
+	revertExec := BuildRevertExecutor(cfg, aud, onRevertOpened, log)
+	executor = CombineExecutors(executor, revertExec)
 	execForActions := executor
 	if executor != nil {
 		execForActions = action.NewAuditedExecutor(executor, aud)
@@ -237,6 +254,7 @@ func RunServe(version string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
 	}
+	revertNotifier = notifier
 	addFactoryNotifier(notifier, cfg, factoryLedger, factoryClient, factoryCuration, log)
 	// The soak check: leader-only (started in startWork), and told of each merge by the receiver.
 	factoryVerifier := BuildFactoryVerifier(cfg, deps, factoryLedger, factoryClient, notifier, metrics, log)

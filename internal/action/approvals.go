@@ -109,6 +109,10 @@ func (a *Approvals) Approve(ctx context.Context, id, actor string) (providers.Ac
 	}
 	// Defense in depth: re-evaluate the server-authoritative envelope at exec time.
 	act := deriveSafety(e.action)
+	if act.Revert != nil {
+		cp := *act.Revert
+		act.Revert = &cp
+	}
 	if reason := a.policy.violation(act); reason != "" {
 		recordAttempt(a.audit, actor, act, audit.DecisionDenied, reason)
 		return providers.Action{}, fmt.Errorf("action no longer within policy: %s", reason)

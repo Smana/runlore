@@ -18,12 +18,35 @@ const (
 // ladder. v1 ships ActionOff; the type exists so active tools can be added later
 // behind a gate without re-architecting (see docs/design.md §9, "Act").
 type ActionPolicy struct {
-	Mode             ActionMode  `yaml:"mode"`               // off | suggest | approve | auto (experimental, frozen)
-	Allow            ActionAllow `yaml:"allow"`              // envelope, enforced even in approve/auto
-	RequireApproval  bool        `yaml:"require_approval"`   // force a human click for gated actions
-	ApprovalTokenEnv string      `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints
-	AuditLogPath     string      `yaml:"audit_log_path"`     // append-only, hash-chained action audit log (required for auto)
-	Auto             AutoPolicy  `yaml:"auto"`               // rung-3 unattended-execution safety controls
+	Mode             ActionMode     `yaml:"mode"`               // off | suggest | approve | auto (experimental, frozen)
+	Allow            ActionAllow    `yaml:"allow"`              // envelope, enforced even in approve/auto
+	RequireApproval  bool           `yaml:"require_approval"`   // force a human click for gated actions
+	ApprovalTokenEnv string         `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints
+	AuditLogPath     string         `yaml:"audit_log_path"`     // append-only, hash-chained action audit log (required for auto)
+	Auto             AutoPolicy     `yaml:"auto"`               // rung-3 unattended-execution safety controls
+	RevertPR         RevertPRPolicy `yaml:"revert_pr"`          // approve-only deterministic Git-revert Draft PR/MR action
+}
+
+// RevertPRPolicy gates the approve-only deterministic Git-revert PR action.
+// Off by default; fails closed when allowed_repos is empty or credentials are
+// unconfigured. Dedicated forge credentials are preferred so KB markdown write
+// tokens are never implicitly reused for GitOps repository writes unless the
+// operator explicitly sets ReuseForgeCredentials: true.
+type RevertPRPolicy struct {
+	Enabled               bool           `yaml:"enabled"`
+	AllowedRepos          []string       `yaml:"allowed_repos"`
+	ProtectedPaths        []string       `yaml:"protected_paths"`
+	ReuseForgeCredentials bool           `yaml:"reuse_forge_credentials"`
+	Forge                 *RevertPRForge `yaml:"forge"`
+}
+
+// RevertPRForge holds dedicated forge credentials scoped to allowlisted GitOps
+// repositories for actions.revert_pr.
+type RevertPRForge struct {
+	Provider     string    `yaml:"provider"`       // "github" | "gitlab"
+	GitHubAPIURL string    `yaml:"github_api_url"` // optional GHES/test override
+	GitHubApp    GitHubApp `yaml:"github_app"`
+	GitLab       GitLab    `yaml:"gitlab"`
 }
 
 // AutoPolicy bounds unattended execution (mode "auto"). Even within these, auto

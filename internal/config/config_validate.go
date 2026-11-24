@@ -1047,6 +1047,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("logs.index %q must be lowercase (Elasticsearch/OpenSearch index names are), got mixed case", idx)
 		}
 	}
+	if err := c.validateRevertPR(); err != nil {
+		return err
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute
@@ -1096,4 +1099,58 @@ func within(child, parent string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// validateRevertPR enforces fail-closed invariants for actions.revert_pr.
+func (c *Config) validateRevertPR() error {
+	rp := c.Actions.RevertPR
+	if !rp.Enabled {
+		return nil
+	}
+	if c.Actions.Mode != ActionApprove {
+		return fmt.Errorf("actions.revert_pr.enabled requires actions.mode=approve (revert_pr is approve-only and hard-blocked from auto; got mode=%q)", c.Actions.Mode)
+	}
+	if len(rp.AllowedRepos) == 0 {
+		return fmt.Errorf("actions.revert_pr.enabled requires non-empty actions.revert_pr.allowed_repos (fail closed)")
+	}
+	for i, r := range rp.AllowedRepos {
+		trimmed := strings.TrimSpace(r)
+		if trimmed == "" || !strings.Contains(trimmed, "/") || strings.HasPrefix(trimmed, "/") || strings.HasSuffix(trimmed, "/") {
+			return fmt.Errorf("actions.revert_pr.allowed_repos[%d] %q must be a repository path like \"owner/repo\" or \"group/subgroup/project\"", i, r)
+		}
+	}
+	if rp.Forge != nil {
+		switch rp.Forge.Provider {
+		case "", "github":
+			ga := rp.Forge.GitHubApp
+			if ga.AppID == 0 || ga.InstallationID == 0 || (ga.PrivateKeyEnv == "" && ga.PrivateKeyRef == "") {
+				return fmt.Errorf("actions.revert_pr.forge (github) requires app_id, installation_id, and private_key_env or private_key_ref")
+			}
+		case "gitlab":
+			if rp.Forge.GitLab.TokenEnv == "" {
+				return fmt.Errorf("actions.revert_pr.forge (gitlab) requires gitlab.token_env")
+			}
+			if err := checkSecureKeyEndpoint("actions.revert_pr.forge.gitlab.base_url", "actions.revert_pr.forge.gitlab.token_env", rp.Forge.GitLab.BaseURL, rp.Forge.GitLab.TokenEnv); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("actions.revert_pr.forge.provider %q is invalid (want \"github\" or \"gitlab\")", rp.Forge.Provider)
+		}
+		return nil
+	}
+	if !rp.ReuseForgeCredentials {
+		return fmt.Errorf("actions.revert_pr.enabled requires dedicated actions.revert_pr.forge credentials or explicit actions.revert_pr.reuse_forge_credentials: true")
+	}
+	switch c.Forge.Provider {
+	case "gitlab":
+		if c.Forge.GitLab.TokenEnv == "" {
+			return fmt.Errorf("actions.revert_pr.reuse_forge_credentials is true but top-level forge.gitlab.token_env is empty")
+		}
+	default:
+		ga := c.Forge.GitHubApp
+		if ga.AppID == 0 || ga.InstallationID == 0 || (ga.PrivateKeyEnv == "" && ga.PrivateKeyRef == "") {
+			return fmt.Errorf("actions.revert_pr.reuse_forge_credentials is true but top-level forge.github_app credentials are incomplete")
+		}
+	}
+	return nil
 }

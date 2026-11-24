@@ -123,8 +123,8 @@ func guardUnobservedTargets(ctx context.Context, actions []providers.Action, aut
 	}
 	for i := range actions {
 		a := &actions[i]
-		if a.Op == "" || a.Target.Name == "" {
-			continue // already a suggestion, or no named target to validate
+		if a.Op == "" || a.Op == "revert_pr" || a.Target.Name == "" {
+			continue // already a suggestion, revert_pr (validated via observedChanges), or no named target
 		}
 		if o.matches(a.Target) {
 			continue
