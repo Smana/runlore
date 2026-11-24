@@ -245,10 +245,11 @@ func (v Verdict) ClaimsAction() bool {
 // relevance of the matching hit — recorded so the clear-match bar can be tuned from
 // live data, like the recall thresholds.
 type MatchedEntry struct {
-	Path  string  // catalog path of the matched entry (bundle-relative)
-	Title string  // entry title, for the human-facing line
-	URL   string  // web link to the entry when cheaply derivable; "" ⇒ notifier shows Path
-	Score float64 // BM25 relevance score of the matching kb_search hit
+	Path          string  // catalog path of the matched entry (bundle-relative)
+	Title         string  // entry title, for the human-facing line
+	URL           string  // web link to the entry when cheaply derivable; "" ⇒ notifier shows Path
+	SectionAnchor string  `json:"section_anchor,omitempty"` // e.g. "#resolution" when the matched entry has a ## Resolution heading
+	Score         float64 // BM25 relevance score of the matching kb_search hit
 }
 
 // PriorKnowledge is what the knowledge base already says about a recurring
@@ -311,11 +312,22 @@ func (g *EvidenceGrounding) IsUngrounded(idx int) bool {
 	return slices.Contains(g.UngroundedIndices, idx)
 }
 
+// ProvenanceLink is a server-constructed, verified HTTPS link pointing to the
+// exact change, file hunk, or KB section backing a finding. Never populated
+// from model output.
+type ProvenanceLink struct {
+	Label string `json:"label"`          // short human label, e.g. "aaa111..bbb222" or "apps/harbor/values.yaml#L42"
+	URL   string `json:"url"`            // validated https:// permalink
+	Kind  string `json:"kind,omitempty"` // "compare" | "commit" | "file" | "kb"
+}
+
 // Hypothesis is one ranked root-cause candidate with its evidence.
 type Hypothesis struct {
 	Summary         string
 	Confidence      float64
 	ChangeRef       string
+	ChangeURL       string           `json:"change_url,omitempty"`
+	Provenance      []ProvenanceLink `json:"provenance,omitempty"`
 	Evidence        []string
 	Grounding       *EvidenceGrounding `json:"grounding,omitempty"`
 	SuggestedAction string             // reversible-first

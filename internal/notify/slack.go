@@ -19,6 +19,7 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/provenance"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/slackcard"
 	"github.com/Smana/runlore/internal/thread"
@@ -593,6 +594,17 @@ func slackProgressBlocks(up providers.ProgressUpdate) []map[string]any {
 // are control characters" is exactly the kind of thing that drifts silently.
 func escapeMrkdwn(s string) string { return slackcard.EscapeMrkdwn(s) }
 
+// slackLink renders a validated HTTPS URL as a Slack mrkdwn link <url|label>,
+// escaping &, <, >, and | in label so untrusted text can never break link
+// syntax. Falls back to escaped plain text if rawURL is not a safe HTTPS URL.
+func slackLink(rawURL, label string) string {
+	escapedLabel := strings.ReplaceAll(escapeMrkdwn(label), "|", "&#124;")
+	if !provenance.SafeHTTPS(rawURL) {
+		return escapedLabel
+	}
+	return fmt.Sprintf("<%s|%s>", rawURL, escapedLabel)
+}
+
 // summaryBlocks renders the triage summary as Block Kit, optimized for a
 // woken-up on-call reading on a phone: everything actionable sits above the
 // first "Show more" collapse. Top-down: what/where (header) → verdict, alone →
@@ -748,8 +760,13 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// here — same reasoning as the Prior block above — entryLink surfaces the
 	// reference once, in the footer.
 	if mk := inv.MatchedKnowledge; mk != nil && inv.Prior == nil {
-		text := fmt.Sprintf("📚 *Matches known runbook:* %s — RunLore has prior knowledge for this incident.",
-			escapeMrkdwn(mk.Title))
+		title := escapeMrkdwn(mk.Title)
+		if mk.SectionAnchor != "" {
+			if u := matchedEntryURL(mk); provenance.SafeHTTPS(u) {
+				title = slackLink(u, mk.Title)
+			}
+		}
+		text := fmt.Sprintf("📚 *Matches known runbook:* %s — RunLore has prior knowledge for this incident.", title)
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(text, 2900)}})
 	}
 
@@ -954,7 +971,8 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 	// the prompt side. Operationally it points a woken-up on-call AWAY from the recent
 	// deploy, which is the first thing they should check.
 	if len(inv.RootCauses) > 0 {
-		if ch := inv.RootCauses[0].ChangeRef; ch != "" {
+		rc := inv.RootCauses[0]
+		if ch := rc.ChangeRef; ch != "" {
 			// Capped BEFORE escaping, which is the reverse of this file's other two
 			// truncate sites and deliberate. Those cap at 2900 — a last-resort guard on
 			// a pathological payload — where it does not matter that "&" costs 5 of the
@@ -962,7 +980,12 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 			// change_ref describing "1.14.2 -> 1.15.0 && <prod>" a materially smaller
 			// allowance than one without meta characters. Capping the source also means
 			// truncateWords only ever sees real prose, so no cut can sever an entity.
-			add("What changed", escapeMrkdwn(truncateWords(ch, slackWhatChangedRunes)))
+			display := truncateWords(ch, slackWhatChangedRunes)
+			if provenance.SafeHTTPS(rc.ChangeURL) {
+				add("What changed", slackLink(rc.ChangeURL, display))
+			} else {
+				add("What changed", escapeMrkdwn(display))
+			}
 		}
 	}
 	if inv.Occurrences > 1 && inv.Prior == nil {
@@ -980,8 +1003,15 @@ func detailBlocks(inv providers.Investigation) []map[string]any {
 	if len(inv.RootCauses) > 0 {
 		topEvidence = len(inv.RootCauses[0].Evidence)
 	}
+	hasProvenance := false
+	for _, rc := range inv.RootCauses {
+		if len(validProvenanceLinks(rc.Provenance)) > 0 {
+			hasProvenance = true
+			break
+		}
+	}
 	if len(inv.Unresolved) == 0 && len(inv.DataGaps) == 0 && len(inv.RuledOut) == 0 &&
-		len(inv.RootCauses) <= 1 && topEvidence <= 3 {
+		len(inv.RootCauses) <= 1 && topEvidence <= 3 && !hasProvenance {
 		return nil
 	}
 
@@ -999,7 +1029,17 @@ func detailBlocks(inv providers.Investigation) []map[string]any {
 			fmt.Fprintf(&s, "*%d. %s*", i+1, escapeMrkdwn(rc.Summary))
 		}
 		if rc.ChangeRef != "" {
-			fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", escapeMrkdwn(rc.ChangeRef))
+			if provenance.SafeHTTPS(rc.ChangeURL) {
+				fmt.Fprintf(&s, "\n📦 *What changed:* %s", slackLink(rc.ChangeURL, rc.ChangeRef))
+			} else {
+				fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", escapeMrkdwn(rc.ChangeRef))
+			}
+		}
+		if links := validProvenanceLinks(rc.Provenance); len(links) > 0 {
+			s.WriteString("\n*Provenance:*")
+			for _, p := range links {
+				fmt.Fprintf(&s, "\n• %s", slackLink(p.URL, p.Label))
+			}
 		}
 		for j, e := range rc.Evidence {
 			line := escapeMrkdwn(e)
@@ -1160,7 +1200,7 @@ func recallConfidenceNote(inv providers.Investigation, deliveredPct int) string 
 func entryLink(inv providers.Investigation) string {
 	url := cmp.Or(inv.CuratedURL, inv.PrevCuratedURL)
 	if url == "" && inv.MatchedKnowledge != nil {
-		url = inv.MatchedKnowledge.URL
+		url = matchedEntryURL(inv.MatchedKnowledge)
 	}
 	if url != "" {
 		return fmt.Sprintf("📚 <%s|view entry>", escapeMrkdwn(url))

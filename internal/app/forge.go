@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/provenance"
 
 	github "github.com/Smana/runlore/internal/forge/github"
 )
@@ -139,6 +140,13 @@ func forgeGitHost(cfg *config.Config) string {
 // non-ASCII host equals no clone URL's host at all — whatchanged.hostOf refuses
 // non-ASCII and returns "" — so the credential is confined to nothing until the
 // operator fixes the config that config.Validate already refused to load.
+// provenanceHostStyles derives the Git host -> forge URL style map from the
+// existing forge configuration (forge.provider, forge.git_host, forge.gitlab.base_url)
+// without introducing any new config keys.
+func provenanceHostStyles(cfg *config.Config) provenance.HostStyles {
+	return provenance.DefaultHostStyles(cfg.Forge.Provider, forgeGitHost(cfg), cfg.Forge.GitLab.BaseURL)
+}
+
 func asciiLowerHost(host string) string {
 	for i := 0; i < len(host); i++ {
 		if host[i] >= 0x80 {

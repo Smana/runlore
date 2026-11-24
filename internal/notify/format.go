@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/provenance"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/thread"
 )
@@ -311,7 +312,7 @@ func Format(inv providers.Investigation) string {
 	// mrkdwn-meta (& < >); the untrusted title/ref stay unescaped like every other
 	// field Format emits (the notifier escapes the whole output).
 	if mk := inv.MatchedKnowledge; mk != nil && inv.Prior == nil {
-		ref := mk.URL
+		ref := matchedEntryURL(mk)
 		if ref == "" {
 			ref = mk.Path
 		}
@@ -334,7 +335,14 @@ func Format(inv providers.Investigation) string {
 		// The change the root cause pins the incident on — previously rendered only
 		// in the Slack blocks, so Matrix/webhook/CLI readers never saw it.
 		if rc.ChangeRef != "" {
-			fmt.Fprintf(&b, "   What changed: %s\n", rc.ChangeRef)
+			if provenance.SafeHTTPS(rc.ChangeURL) {
+				fmt.Fprintf(&b, "   What changed: %s (%s)\n", rc.ChangeRef, rc.ChangeURL)
+			} else {
+				fmt.Fprintf(&b, "   What changed: %s\n", rc.ChangeRef)
+			}
+		}
+		for _, p := range validProvenanceLinks(rc.Provenance) {
+			fmt.Fprintf(&b, "   ↳ %s: %s\n", p.Label, p.URL)
 		}
 		for j, e := range rc.Evidence {
 			if rc.Grounding.IsUngrounded(j) {
@@ -544,4 +552,34 @@ func progressToolsSummary(used map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s×%d", n, used[n]))
 	}
 	return strings.Join(parts, ", ")
+}
+
+const maxRenderedProvenanceLinks = 5
+
+// validProvenanceLinks filters links to validated HTTPS URLs with non-empty
+// labels and caps the result at maxRenderedProvenanceLinks (5).
+func validProvenanceLinks(links []providers.ProvenanceLink) []providers.ProvenanceLink {
+	if len(links) == 0 {
+		return nil
+	}
+	out := make([]providers.ProvenanceLink, 0, min(len(links), maxRenderedProvenanceLinks))
+	for _, p := range links {
+		if len(out) >= maxRenderedProvenanceLinks {
+			break
+		}
+		if p.Label == "" || !provenance.SafeHTTPS(p.URL) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// matchedEntryURL returns mk.URL with mk.SectionAnchor appended when both are
+// safe HTTPS; otherwise returns mk.URL unchanged.
+func matchedEntryURL(mk *providers.MatchedEntry) string {
+	if mk == nil || mk.URL == "" {
+		return ""
+	}
+	return provenance.AppendAnchor(mk.URL, mk.SectionAnchor)
 }

@@ -143,6 +143,13 @@ func (t SourceDiffTool) Call(ctx context.Context, args string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	shas := make([]string, 0, len(sc.Commits))
+	for _, c := range sc.Commits {
+		if c.SHA != "" {
+			shas = append(shas, c.SHA)
+		}
+	}
+	recordObservedChange(ctx, cloneURL, sc.FromRef, sc.ToRef, sc.Diff, shas...)
 	return renderSourceChanges(sc, in.Paths), nil
 }
 

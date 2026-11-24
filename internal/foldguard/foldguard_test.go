@@ -256,6 +256,11 @@ var knownHostBoundaries = map[string]string{
 // is where "this one is protected, and by what" gets written down, which is
 // exactly the knowledge #495 was missing when it reused a fold that predated it.
 var knownHostComparisons = map[string]string{
+	"provenance NormalizeRepoHTTPS": "maps an observed Git remote's hostname to a forge URL style " +
+		"(GitHub vs GitLab) for display-only HTTPS permalinks. PROTECTED by asciiLowerHost, which " +
+		"refuses any byte >= 0x80 before folding to lowercase so simple folding and IDNA cannot " +
+		"disagree; unknown hosts fail closed and no network request or credential is ever attached.",
+
 	"whatchanged sshToHTTPS": "round-trip guard: the rewritten URL must re-parse to exactly the host " +
 		"go-git resolved, compared with EqualFold. PROTECTED by the isASCII(ep.Host) refusal a few " +
 		"lines above it in the same function — both operands are ASCII by then, so simple folding and " +

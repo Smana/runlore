@@ -20,6 +20,7 @@ import (
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/provenance"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -316,6 +317,11 @@ type LoopInvestigator struct {
 	// instead of the feature silently no-opping. 0 (recall disabled/unconfigured) ⇒ the
 	// tracker falls back to the historical 4.0 default (kbClearMatchScoreDefault).
 	KBMatchScore float64
+
+	// HostStyles maps known Git hostnames to their forge URL style (GitHub vs
+	// GitLab) for server-derived provenance permalinks. nil defaults to the
+	// public github.com and gitlab.com hosts; unknown hosts always fail closed.
+	HostStyles provenance.HostStyles
 }
 
 // system returns the system prompt, extended with action proposals when the policy is
@@ -370,6 +376,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// target), augmented by what_changed and the gitops inspector tools. reviewActions
 	// consults the set to guard executable targets (see guardUnobservedTargets).
 	ctx = WithObservedResources(ctx, req.Workload)
+	ctx = WithObservedChanges(ctx)
 	// Charge this investigation for the embeddings it causes. The hybrid-recall path
 	// embeds the query against a PAID endpoint — once for the recall lookup, again for
 	// the near-miss lookup that follows a non-fire — from inside a run that has spend
@@ -827,6 +834,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				inv, _ = li.verifyFindings(ctx, req, inv, messages, &verifyTotals)
 			}
 			inv.Actions = li.reviewActions(ctx, inv.Actions)
+			attachProvenance(&inv, observedChangesFrom(ctx), li.HostStyles)
 			// A submission produced only because the final-step nudge forced it is a
 			// degraded verdict, not a genuine resolution — label it distinctly (mirrors
 			// the "budget_exceeded" convention) so the completed-total metric separates
@@ -1444,6 +1452,11 @@ var redactionSkipField = map[string]bool{
 	"PriorKnowledge.EntryPath":     true, // catalog path of the merged entry
 	"MatchedEntry.Path":            true, // catalog path of the matched entry
 	"MatchedEntry.URL":             true, // server-derived web link to that entry
+	"MatchedEntry.SectionAnchor":   true, // server-derived section anchor (e.g. "#resolution")
+	"Hypothesis.ChangeURL":         true, // server-derived HTTPS compare/commit link
+	"ProvenanceLink.Label":         true, // server-derived file path + line label
+	"ProvenanceLink.URL":           true, // server-derived HTTPS file permalink
+	"ProvenanceLink.Kind":          true, // server-derived link kind enum
 	"Investigation.Fingerprint":    true, // deterministic alert dedup id
 	"Investigation.Fingerprints":   true, // coalesced batch dedup ids
 	"Investigation.TriggerKey":     true, // deterministic incident-identity dedup key

@@ -125,18 +125,34 @@ func boundPostedHead(rendered string, maxBytes int) string {
 // whole-line prefix of the source converts to exactly the complete tags the full
 // message would have produced for those lines. No cut can land inside "<strong>",
 // "&amp;" or "<br/>".
-func boundMatrixBodies(msg string) (body, formatted string) {
-	body, formatted = renderMatrixBodies(msg)
+func boundMatrixBodies(msg string, trustedHTML map[string]string) (body, formatted string) {
+	body, formatted = renderMatrixBodiesWithLinks(msg, trustedHTML)
 	if jsonBodyBytes(body) <= matrixDeliverBodyBytes && jsonBodyBytes(formatted) <= matrixDeliverBodyBytes {
 		return body, formatted
 	}
-	return renderMatrixBodies(boundMatrixSource(msg))
+	return renderMatrixBodiesWithLinks(boundMatrixSource(msg, trustedHTML), trustedHTML)
 }
 
 // renderMatrixBodies is the one place the two renderings of a Matrix message are
 // composed, so the bound below measures precisely what Deliver sends.
 func renderMatrixBodies(msg string) (body, formatted string) {
-	return escapeMatrixReply(plainFallback(msg)), mrkdwnToHTML(msg)
+	return renderMatrixBodiesWithLinks(msg, nil)
+}
+
+func renderMatrixBodiesWithLinks(msg string, trustedHTML map[string]string) (body, formatted string) {
+	if len(trustedHTML) == 0 {
+		return escapeMatrixReply(plainFallback(msg)), mrkdwnToHTML(msg)
+	}
+	lines := strings.Split(msg, "\n")
+	htmlLines := make([]string, len(lines))
+	for i, line := range lines {
+		if h, ok := trustedHTML[line]; ok {
+			htmlLines[i] = h
+		} else {
+			htmlLines[i] = mrkdwnToHTML(line)
+		}
+	}
+	return escapeMatrixReply(plainFallback(msg)), strings.Join(htmlLines, "<br/>")
 }
 
 // boundMatrixSource returns the head of msg — whole lines, plus the truncation
@@ -148,7 +164,7 @@ func renderMatrixBodies(msg string) (body, formatted string) {
 // all exclude "\n", and mrkdwnToHTML's html escape is per-character with the
 // newline itself rendered as the "<br/>" counted below. Rendering line by line
 // therefore gives the same bytes as rendering the joined prefix.
-func boundMatrixSource(msg string) string {
+func boundMatrixSource(msg string, trustedHTML map[string]string) string {
 	plainNotice, richNotice := renderMatrixBodies("\n" + postTruncatedNotice)
 	plainBudget := matrixDeliverBodyBytes - jsonBodyBytes(plainNotice)
 	richBudget := matrixDeliverBodyBytes - jsonBodyBytes(richNotice)
@@ -159,7 +175,7 @@ func boundMatrixSource(msg string) string {
 	lines := strings.Split(msg, "\n")
 	kept, plainSize, richSize := 0, 0, 0
 	for _, line := range lines {
-		plain, rich := renderMatrixBodies(line)
+		plain, rich := renderMatrixBodiesWithLinks(line, trustedHTML)
 		addPlain, addRich := jsonBodyBytes(plain), jsonBodyBytes(rich)
 		if kept > 0 {
 			addPlain += jsonBodyBytes("\n")   // the newline this line is joined by

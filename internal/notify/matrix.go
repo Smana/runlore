@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/provenance"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/thread"
 )
@@ -136,7 +137,7 @@ func (m *Matrix) send(ctx context.Context, room string, content map[string]any) 
 // was learned: the bodies took 16 KiB each and the stamp beside them took 78, so
 // three ceilings existed and none of them was a ceiling on the EVENT.
 func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error {
-	body, formatted := boundMatrixBodies(Format(inv))
+	body, formatted := boundMatrixBodies(Format(inv), matrixProvenanceHTML(inv))
 	content := map[string]any{
 		"msgtype": "m.notice",
 		// escapeMatrixReply on the PLAIN body, not just on thread replies: this
@@ -282,4 +283,38 @@ func plainFallback(s string) string {
 	s = boldRe.ReplaceAllString(s, "$1")
 	s = codeRe.ReplaceAllString(s, "$1")
 	return s
+}
+
+// matrixProvenanceHTML maps exact Format(inv) lines carrying server-derived
+// HTTPS provenance URLs to their safe HTML <a href="..."> equivalents. Untrusted
+// URLs elsewhere in the message are never touched (mrkdwnToHTML stays free of
+// URL auto-linkification).
+func matrixProvenanceHTML(inv providers.Investigation) map[string]string {
+	var links map[string]string
+	set := func(plainLine, htmlLine string) {
+		if links == nil {
+			links = map[string]string{}
+		}
+		links[plainLine] = htmlLine
+	}
+	if mk := inv.MatchedKnowledge; mk != nil && inv.Prior == nil && mk.SectionAnchor != "" {
+		if u := matchedEntryURL(mk); provenance.SafeHTTPS(u) {
+			plainLine := fmt.Sprintf("📚 Matches known runbook: %s — %s", mk.Title, u)
+			htmlLine := fmt.Sprintf(`📚 Matches known runbook: <a href="%s">%s</a>`, html.EscapeString(u), html.EscapeString(mk.Title))
+			set(plainLine, htmlLine)
+		}
+	}
+	for _, rc := range inv.RootCauses {
+		if rc.ChangeRef != "" && provenance.SafeHTTPS(rc.ChangeURL) {
+			plainLine := fmt.Sprintf("   What changed: %s (%s)", rc.ChangeRef, rc.ChangeURL)
+			htmlLine := fmt.Sprintf(`   What changed: <a href="%s">%s</a>`, html.EscapeString(rc.ChangeURL), html.EscapeString(rc.ChangeRef))
+			set(plainLine, htmlLine)
+		}
+		for _, p := range validProvenanceLinks(rc.Provenance) {
+			plainLine := fmt.Sprintf("   ↳ %s: %s", p.Label, p.URL)
+			htmlLine := fmt.Sprintf(`   ↳ <a href="%s">%s</a>`, html.EscapeString(p.URL), html.EscapeString(p.Label))
+			set(plainLine, htmlLine)
+		}
+	}
+	return links
 }
