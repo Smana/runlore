@@ -3,8 +3,10 @@
 package docsguard
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -28,7 +30,7 @@ func TestDecisionBackendsReadTheSameInEveryPlaceAnOperatorLooks(t *testing.T) {
 	sources := map[string]string{
 		"configuration.md": readDoc(t, filepath.Join(root, "website", "content", "docs", "configuration", "configuration.md")),
 		"values.yaml":      readDoc(t, filepath.Join(root, "deploy", "helm", "runlore", "values.yaml")),
-		"config.go":        readDoc(t, filepath.Join(root, "internal", "config", "config.go")),
+		"config.go":        readPackageGoDocs(t, filepath.Join(root, "internal", "config")),
 	}
 	fields := []backendField{
 		{"rerank_backend", config.RerankBackends},
@@ -133,4 +135,28 @@ func allWindows(text, key string, before, after int) (string, bool) {
 		b.WriteString("\n")
 		from = i + len(key)
 	}
+}
+
+// readPackageGoDocs concatenates all non-test *.go files in dir (sorted by
+// filename) so doc-comment checks continue to work when a package splits its
+// types across multiple domain files.
+func readPackageGoDocs(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		b.WriteString(readDoc(t, filepath.Join(dir, name)))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
