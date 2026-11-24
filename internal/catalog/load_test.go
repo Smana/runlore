@@ -248,6 +248,61 @@ func TestLoadSkipsHidden(t *testing.T) {
 	}
 }
 
+// TestLoadConfigMapSymlinks mirrors the exact directory layout Kubernetes
+// constructs for a mounted ConfigMap volume:
+//
+//	dir/
+//	  ..2026_11_24_13_20_37.12345/
+//	    helmrelease-upgrade-failure.md   (regular file)
+//	  ..data -> ..2026_11_24_13_20_37.12345
+//	  helmrelease-upgrade-failure.md -> ..data/helmrelease-upgrade-failure.md
+//
+// Every top-level entry is a symlink whose target resolves strictly inside dir
+// (via ..data). Load must index the entry exactly once while still skipping the
+// hidden ..data / ..2026_* trees and blocking any symlink escaping dir.
+func TestLoadConfigMapSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := "..2026_11_24_13_20_37.12345"
+	if err := os.MkdirAll(filepath.Join(dir, dataDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeEntry(t, filepath.Join(dir, dataDir), "helmrelease-upgrade-failure.md", `---
+type: Playbook
+title: HelmRelease upgrade failure
+description: Diagnose a stuck HelmRelease.
+---
+body
+`)
+	if err := os.Symlink(dataDir, filepath.Join(dir, "..data")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..data", "helmrelease-upgrade-failure.md"), filepath.Join(dir, "helmrelease-upgrade-failure.md")); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink pointing at a directory inside dir or a dangling symlink must
+	// be silently ignored, not cause errors or skipped entries.
+	if err := os.Symlink(dataDir, filepath.Join(dir, "subdir-link.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("does-not-exist.md", filepath.Join(dir, "dangling.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, skipped, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Fatalf("unexpected skipped entries: %v", skipped)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 ConfigMap entry loaded, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Path != "helmrelease-upgrade-failure.md" || entries[0].Title != "HelmRelease upgrade failure" {
+		t.Fatalf("unexpected entry: %+v", entries[0])
+	}
+}
+
 // TestParseEntryDate pins the one date grammar shared by kbvalidate and recall:
 // RFC3339 and bare date parse; empty and garbage report ok=false (distinct from a
 // zero-but-valid time).
