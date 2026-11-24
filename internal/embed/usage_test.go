@@ -132,7 +132,7 @@ func TestUsageSinkRecordAndTotalsRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				sink.record(3)
+				sink.Record(3)
 			}
 		}()
 		wg.Add(1)

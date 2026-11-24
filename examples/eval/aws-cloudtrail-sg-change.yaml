@@ -1,0 +1,43 @@
+# Hermetic replay case: Out-of-band AWS SecurityGroup edit caught via cloud_what_changed.
+name: aws-cloudtrail-sg-change
+alert_title: OrdersDBConnectionTimeout
+workload:
+  namespace: commerce
+  name: orders-api
+prompt: |
+  OrdersDBConnectionTimeout (critical, prod, namespace commerce): orders-api cannot
+  connect to RDS PostgreSQL orders-prod-db; all queries fail with TCP connect timeout.
+tools:
+  what_changed: |
+    flux Kustomization/commerce  aa1122..bb3344  (45 minutes before the alert)
+    --- commerce/email-notifier/values.yaml
+    -  retryLimit: 3
+    +  retryLimit: 5
+    (no GitOps changes to commerce/orders-api in the last 7 days)
+  pod_status: |
+    orders-api-7d8e9f-2kp1m      Running  ready=1/1  restarts=0  age=5d  node=ip-10-0-12-44
+    email-notifier-5c4d3e-8nq2r  Running  ready=1/1  restarts=0  age=45m node=ip-10-0-12-44
+  query_logs: |
+    orders-api  ERROR db connect failed: dial tcp 10.0.40.18:5432: i/o timeout
+    orders-api  ERROR db connect failed: dial tcp 10.0.40.18:5432: i/o timeout
+  cloud_what_changed: |
+    2026-11-24T11:14:02Z  RevokeSecurityGroupIngress  actor=arn:aws:sts::123456789012:assumed-role/AdminConsole/ops-manual
+      resource: sg-0a1b2c3d4e5f67890 (orders-prod-db-sg)
+      detail: revoked TCP port 5432 ingress from source security group sg-0987654321fedcba0 (eks-nodes-sg)
+  cloud_resource_health: |
+    RDS DBInstance orders-prod-db  status=available  endpoint=orders-prod-db.c9xyz.eu-west-3.rds.amazonaws.com:5432  vpcSecurityGroup=sg-0a1b2c3d4e5f67890
+expected:
+  must_contain: ["security group|securitygroup|sg-0a1b2c3d4e5f67890", "5432|ingress|revoked"]
+  min_confidence: 0.5
+  root_cause_entities: [sg-0a1b2c3d4e5f67890, orders-prod-db]
+  distractors: [email-notifier]
+ground_truth:
+  root_cause: |
+    An out-of-band CloudTrail RevokeSecurityGroupIngress call removed TCP port 5432
+    ingress from eks-nodes-sg on RDS security group sg-0a1b2c3d4e5f67890 (orders-prod-db-sg).
+    RDS orders-prod-db itself is available; the manual security group edit broke
+    connectivity. The email-notifier retryLimit bump is unrelated.
+  expected_sources: [cloud, logs]
+  optional_sources: [gitops, kubernetes]
+  expected_action: restore TCP 5432 ingress from eks-nodes-sg on sg-0a1b2c3d4e5f67890 (orders-prod-db-sg) via IaC / AWS console
+  must_reach_root: true

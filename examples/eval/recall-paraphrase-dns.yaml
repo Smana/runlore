@@ -1,0 +1,43 @@
+# Hermetic replay case: Lexical-mismatch paraphrase recall (DNS resolver failure).
+# Alert wording ("hostname lookups failing across cluster after resolver config reload")
+# deliberately avoids the KB entry's vocabulary ("CoreDNS", "Corefile", "CrashLoopBackOff")
+# to measure hybrid vs BM25 recall.
+name: recall-paraphrase-dns
+alert_title: ClusterHostnameLookupFailure
+workload:
+  namespace: kube-system
+  name: coredns
+prompt: |
+  ClusterHostnameLookupFailure (critical, prod, namespace kube-system): cluster-wide
+  hostname lookups are failing immediately after a resolver configuration reload.
+gate: false
+catalog_dir: fixtures/paraphrase-dns
+expect_recall: fired
+tools:
+  pod_status: |
+    coredns-7b8c9d-4kp1m        CrashLoopBackOff  ready=0/1  restarts=5  age=6m
+    coredns-7b8c9d-9nq2r        CrashLoopBackOff  ready=0/1  restarts=5  age=6m
+    kube-proxy-5a4b3c-1lm8k     Running           ready=1/1  restarts=0  age=19d
+  pod_logs: |
+    coredns-7b8c9d-4kp1m  plugin/reload: Corefile:14 - Error during parsing: Unknown directive 'foward'
+  what_changed: |
+    flux Kustomization/kube-system  88aa11..99bb22  (7 minutes before the alert)
+    --- kube-system/coredns/configmap.yaml
+    -        forward . /etc/resolv.conf
+    +        foward . /etc/resolv.conf
+  kube_events: |
+    2026-11-24T09:42:05Z Warning Pod/coredns-7b8c9d-4kp1m BackOff: Back-off restarting failed container coredns
+expected:
+  must_contain: ["corefile|configmap", "foward|typo|directive|syntax"]
+  min_confidence: 0.5
+  root_cause_entities: [coredns]
+  distractors: [kube-proxy]
+ground_truth:
+  root_cause: |
+    CoreDNS pods are in CrashLoopBackOff due to a typo ('foward' instead of 'forward')
+    in the coredns Corefile ConfigMap. The stored KB entry documents this exact failure
+    for kube-system/coredns. kube-proxy is healthy and unrelated.
+  expected_sources: [kubernetes, gitops]
+  optional_sources: [logs, kb]
+  expected_action: fix the typo in the coredns Corefile ConfigMap ('foward' -> 'forward') and let CoreDNS roll out
+  must_reach_root: true

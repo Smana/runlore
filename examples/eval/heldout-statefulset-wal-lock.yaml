@@ -1,0 +1,57 @@
+# HELD OUT. Do not tune the prompt against this case.
+#
+# Second held-out replay case (alongside hpa-ceiling-saturation.yaml). Never tune
+# systemPrompt or submit_findings field descriptions against this case — it exists
+# strictly as a blind measurement of multi-signal StatefulSet root-cause reasoning.
+#
+# Failure mode: after an ungraceful node termination, postgres-primary-0 cannot restart
+# because its mounted PVC retains a stale postmaster.pid lockfile and WAL recovery fails
+# with PANIC on a truncated WAL record. A coincident pgbouncer ConfigMap update in the
+# same namespace is the distractor.
+name: heldout-statefulset-wal-lock
+alert_title: PostgresPrimaryDown
+workload:
+  namespace: data
+  name: postgres-primary
+prompt: |
+  PostgresPrimaryDown (critical, prod, namespace data): StatefulSet postgres-primary
+  replica 0 has been failing to start for 11 minutes; write traffic is unavailable.
+gate: false
+tools:
+  what_changed: |
+    flux Kustomization/data  55ee11..66ff22  (15 minutes before the alert)
+    --- data/pgbouncer/configmap.yaml
+    -  max_client_conn = 500
+    +  max_client_conn = 600
+    (no changes to data/postgres-primary in the last 30 days)
+  pod_status: |
+    postgres-primary-0        CrashLoopBackOff  ready=0/1  restarts=5  age=11m  node=ip-10-0-14-88
+    pgbouncer-6c7d8e-2kp9m    Running           ready=1/1  restarts=0  age=15m  node=ip-10-0-14-12
+  kube_events: |
+    2026-11-24T07:48:02Z Warning Node/ip-10-0-14-21 NodeNotReady: Node ip-10-0-14-21 status is now: NodeNotReady (EC2 spot interruption)
+    2026-11-24T07:49:10Z Normal  Pod/postgres-primary-0 Scheduled: Successfully assigned data/postgres-primary-0 to ip-10-0-14-88
+    2026-11-24T07:49:18Z Warning Pod/postgres-primary-0 BackOff: Back-off restarting failed container postgres
+  pod_logs: |
+    postgres-primary-0  FATAL: lock file "postmaster.pid" already exists
+    postgres-primary-0  HINT: Is another postmaster (PID 1) running in data directory "/var/lib/postgresql/data/pgdata"?
+    postgres-primary-0  LOG: invalid record length at 0/1A0045B8: expected at least 24, got 0
+    postgres-primary-0  PANIC: could not locate a valid checkpoint record
+  query_metrics: |
+    kube_pod_container_status_restarts_total{namespace="data",pod="postgres-primary-0"} = 5
+    pg_up{namespace="data",instance="postgres-primary-0"} = 0
+expected:
+  must_contain: ["postmaster.pid|lock file|wal|checkpoint"]
+  min_confidence: 0.5
+  root_cause_entities: [postgres-primary]
+  distractors: [pgbouncer]
+ground_truth:
+  root_cause: |
+    Following an ungraceful node termination (NodeNotReady on ip-10-0-14-21),
+    postgres-primary-0 rescheduled onto a new node with its existing PVC containing a
+    stale postmaster.pid lock file and an invalid/corrupted WAL checkpoint record,
+    causing PostgreSQL startup to fail with FATAL/PANIC. The coincident pgbouncer
+    max_client_conn change is unrelated.
+  expected_sources: [kubernetes, logs]
+  optional_sources: [gitops, metrics]
+  expected_action: verify no other postgres process holds the volume, remove stale postmaster.pid and run pg_resetwal / restore from backup according to DR runbook
+  must_reach_root: true

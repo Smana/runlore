@@ -289,12 +289,103 @@ func TestHybridRecallEvalProductionFireRate(t *testing.T) {
 	}
 }
 
+// --- Paraphrase / lexical-mismatch fixtures + hard negatives ---
+
+// paraphraseEvalCases adds 5 lexical-mismatch positive pairs (synonym wording
+// with minimal token overlap against the target KB entry) and 2 hard-negative
+// near-miss pairs (same workload as an existing KB entry, different failure
+// mechanism). Kept separate from evalCases() so the pinned CI baselines above
+// remain apples-to-apples, and combined with evalCases() in TestHybridRecallEvalLive
+// so BM25 vs Hybrid can be compared side-by-side on genuine vocabulary mismatch.
+func paraphraseEvalCases() []evalCase {
+	return []evalCase{
+		// P1 — OOM / memory ceiling synonym against harbor-valkey-oom.md
+		{
+			name: "paraphrase_valkey_ram_ceiling", regime: "label",
+			labels:  map[string]string{"alertname": "ContainerTerminated", "namespace": "tooling", "statefulset": "harbor-valkey", "severity": "warning"},
+			annots:  map[string]string{"description": "Container killed by kernel due to RAM ceiling exceeded in cache store."},
+			targets: []string{"harbor-valkey-oom.md"},
+		},
+		// P2 — DNS resolution synonym against coredns-crashloop.md
+		{
+			name: "paraphrase_dns_lookup_broken", regime: "label",
+			labels:  map[string]string{"alertname": "NameResolutionBroken", "namespace": "kube-system", "deployment": "coredns", "severity": "critical"},
+			annots:  map[string]string{"description": "Cluster hostname lookups failing after resolver configuration reload error."},
+			targets: []string{"coredns-crashloop.md"},
+		},
+		// P3 — TLS certificate expiry synonym against cert-manager-acme-timeout.md
+		{
+			name: "paraphrase_tls_handshake_expiry", regime: "label",
+			labels:  map[string]string{"alertname": "TLSHandshakeFailing", "namespace": "cert-manager", "severity": "warning"},
+			annots:  map[string]string{"description": "X.509 leaf credential rotation stalled waiting for domain ownership verification."},
+			targets: []string{"cert-manager-acme-timeout.md"},
+		},
+		// P4 — Disk full / read-only index synonym against elasticsearch-disk-watermark.md
+		{
+			name: "paraphrase_es_storage_full", regime: "label",
+			labels:  map[string]string{"alertname": "LogIngestionRejected", "namespace": "logging", "statefulset": "elasticsearch", "severity": "critical"},
+			annots:  map[string]string{"description": "Search cluster refusing new writes because volume storage capacity is exhausted."},
+			targets: []string{"elasticsearch-disk-watermark.md"},
+		},
+		// P5 — CPU starvation / autoscaler cap synonym against checkout-cpu-throttle.md
+		{
+			name: "paraphrase_checkout_slow_surge", regime: "label",
+			labels:  map[string]string{"alertname": "StorefrontResponseSlow", "namespace": "shop", "deployment": "checkout", "severity": "warning"},
+			annots:  map[string]string{"description": "Tail response duration climbed during flash sale; pod count maxed out under compute starvation."},
+			targets: []string{"checkout-cpu-throttle.md"},
+		},
+		// HN1 — Hard negative: same workload as harbor-registry-iam-quota.md, unrelated network/TLS issue
+		{
+			name: "hardneg_harbor_upstream_502", regime: "label",
+			labels:  map[string]string{"alertname": "IngressBadGateway", "namespace": "tooling", "deployment": "harbor-registry", "severity": "warning"},
+			annots:  map[string]string{"description": "Edge load balancer returning HTTP 502 bad gateway on multipart blob uploads over 500MB."},
+			targets: nil,
+		},
+		// HN2 — Hard negative: same workload as checkout-cpu-throttle.md, unrelated DB pool exhaustion
+		{
+			name: "hardneg_checkout_db_pool", regime: "label",
+			labels:  map[string]string{"alertname": "DatabasePoolExhausted", "namespace": "shop", "deployment": "checkout", "severity": "critical"},
+			annots:  map[string]string{"description": "PostgreSQL connection pool saturated: pq: sorry, too many clients already."},
+			targets: nil,
+		},
+	}
+}
+
+// TestHybridRecallParaphraseCasesValid verifies every paraphrase positive target
+// resolves to a real entry in evalCatalogEntries and that no hard negative false-fires
+// under the production hybrid cosine gates.
+func TestHybridRecallParaphraseCasesValid(t *testing.T) {
+	cases := paraphraseEvalCases()
+	posCount, negCount := 0, 0
+	for _, c := range cases {
+		if c.negative() {
+			negCount++
+			continue
+		}
+		posCount++
+		for _, target := range c.targets {
+			if _, ok := evalCatalogEntries[target]; !ok {
+				t.Errorf("paraphrase case %s references missing catalog entry %q", c.name, target)
+			}
+		}
+	}
+	if posCount < 4 || negCount < 2 {
+		t.Fatalf("paraphrase suite must have >=4 positives and >=2 hard negatives, got pos=%d neg=%d", posCount, negCount)
+	}
+	cat := writeHybridEvalCatalog(t)
+	f := computeFireHybrid(t, cat, cases)
+	if f.negFired != 0 {
+		t.Fatalf("hard-negative case false-fired under production hybrid gates (%d/%d)", f.negFired, f.negatives)
+	}
+}
+
 // --- LIVE measurement regime: the numbers the cosine defaults must be derived from ---
 
 // TestHybridRecallEvalLive is the MEASUREMENT run: the same fixtures, a real
 // /embeddings endpoint. It prints, per positive case, the target's cosine + rank +
-// top-vs-runner-up margin, and per negative case the top cosine; then the two numbers
-// the defaults are derived from:
+// top-vs-runner-up margin, and per negative case the top cosine; then a side-by-side
+// BM25 vs Hybrid Recall@1 + false-fire summary; then the two numbers the defaults are
+// derived from:
 //
 //	floor candidate  = min(positive top-cosine)   — fire everything real
 //	ceiling guard    = max(negative top-cosine)   — never fire a negative
@@ -331,12 +422,13 @@ func TestHybridRecallEvalLive(t *testing.T) {
 		t.Fatal("live embedder produced no vectors (endpoint down? see the catalog WARN)")
 	}
 
+	allCases := append(evalCases(), paraphraseEvalCases()...)
 	var posTop, negTop, margins []float64
-	for _, c := range evalCases() {
+	for _, c := range allCases {
 		q := buildRecallQuery(c.request())
 		hits, err := cat.SearchHybrid(context.Background(), q, recallCandidateK)
 		if err != nil || len(hits) == 0 {
-			t.Logf("case %-28s: NO HITS (err=%v)", c.name, err)
+			t.Logf("case %-32s: NO HITS (err=%v)", c.name, err)
 			continue
 		}
 		margin := hits[0].Score
@@ -345,14 +437,35 @@ func TestHybridRecallEvalLive(t *testing.T) {
 		}
 		if c.negative() {
 			negTop = append(negTop, hits[0].Score)
-			t.Logf("case %-28s: NEGATIVE top=%.3f", c.name, hits[0].Score)
+			t.Logf("case %-32s: NEGATIVE top=%.3f", c.name, hits[0].Score)
 			continue
 		}
 		rank := rankOfTarget(hits, c.targets)
 		posTop = append(posTop, hits[0].Score)
 		margins = append(margins, margin)
-		t.Logf("case %-28s: rank=%d top=%.3f margin=%.3f", c.name, rank, hits[0].Score, margin)
+		t.Logf("case %-32s: rank=%d top=%.3f margin=%.3f", c.name, rank, hits[0].Score, margin)
 	}
+
+	// Side-by-side BM25 vs Hybrid summary (overall and paraphrase-only).
+	bm25All := computeRetrieval(t, cat, allCases)
+	hybAll := computeRetrievalHybrid(t, cat, allCases)
+	paraCases := paraphraseEvalCases()
+	bm25Para := computeRetrieval(t, cat, paraCases)
+	hybPara := computeRetrievalHybrid(t, cat, paraCases)
+	bm25Fire := computeFire(t, cat, allCases)
+	hybFire := computeFireHybrid(t, cat, allCases)
+
+	t.Logf("SIDE-BY-SIDE (%s):", model)
+	t.Logf("  ALL (%d pos):        BM25 Recall@1=%.2f (%d/%d) MRR=%.3f | Hybrid Recall@1=%.2f (%d/%d) MRR=%.3f",
+		bm25All.positives, bm25All.r1, bm25All.h1, bm25All.positives, bm25All.mrr,
+		hybAll.r1, hybAll.h1, hybAll.positives, hybAll.mrr)
+	t.Logf("  PARAPHRASE (%d pos): BM25 Recall@1=%.2f (%d/%d) MRR=%.3f | Hybrid Recall@1=%.2f (%d/%d) MRR=%.3f",
+		bm25Para.positives, bm25Para.r1, bm25Para.h1, bm25Para.positives, bm25Para.mrr,
+		hybPara.r1, hybPara.h1, hybPara.positives, hybPara.mrr)
+	t.Logf("  PROD-GATES FIRE:     BM25 fired=%d/%d neg=%d/%d | Hybrid fired=%d/%d neg=%d/%d",
+		bm25Fire.fired, bm25Fire.labelPositives, bm25Fire.negFired, bm25Fire.negatives,
+		hybFire.fired, hybFire.labelPositives, hybFire.negFired, hybFire.negatives)
+
 	sort.Float64s(posTop)
 	sort.Float64s(negTop)
 	sort.Float64s(margins)

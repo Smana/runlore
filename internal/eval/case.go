@@ -125,6 +125,8 @@ type CaseRecall struct {
 	RequireWorkloadMatch bool    `yaml:"require_workload_match"`
 	OutcomePrior         float64 `yaml:"outcome_prior"`
 	OutcomeFloor         float64 `yaml:"outcome_floor"`
+	HybridMinScore       float64 `yaml:"hybrid_min_score,omitempty"`
+	HybridMarginGap      float64 `yaml:"hybrid_margin_gap,omitempty"`
 }
 
 // Expected is the RCA scoring spec for a case.
@@ -199,9 +201,21 @@ func (c Case) gates() bool { return c.Gate == nil || *c.Gate }
 // has read it — entries and the index live in memory from then on — so the catalog
 // owns nothing on disk and the caller has no lifetime to manage.
 func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, error) {
+	return c.buildCatalogWithEmbedder(ctx, nil)
+}
+
+func (c Case) buildCatalogWithEmbedder(ctx context.Context, emb catalog.Embedder) (*catalog.Catalog, error) {
 	own := filepath.Join(c.dir, c.CatalogDir)
 	if c.CommonsDir == "" {
-		return catalog.New(own)
+		if emb == nil {
+			return catalog.New(own)
+		}
+		cat := catalog.NewEmpty()
+		cat.SetEmbedder(emb)
+		if _, err := cat.ReloadContext(ctx, own); err != nil {
+			return nil, fmt.Errorf("load catalog root %s: %w", own, err)
+		}
+		return cat, nil
 	}
 	commons := filepath.Join(c.dir, c.CommonsDir)
 	// An unreadable commons root is FATAL here, and only here. ReloadContext warns and
@@ -226,12 +240,21 @@ func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, error) {
 		defer func() { _ = os.RemoveAll(d) }()
 		own = d
 	}
-	cat, err := catalog.NewWithCommons(ctx, own, commons)
-	if err != nil {
-		// Named for the OWN root deliberately: the reload only ever returns an error for
-		// that root — a commons Load failure is warned and swallowed inside it, and the
-		// stat above is what catches the case that matters — so blaming the commons here
-		// would send a reader to the wrong directory.
+	if emb == nil {
+		cat, err := catalog.NewWithCommons(ctx, own, commons)
+		if err != nil {
+			// Named for the OWN root deliberately: the reload only ever returns an error for
+			// that root — a commons Load failure is warned and swallowed inside it, and the
+			// stat above is what catches the case that matters — so blaming the commons here
+			// would send a reader to the wrong directory.
+			return nil, fmt.Errorf("load catalog root %s: %w", own, err)
+		}
+		return cat, nil
+	}
+	cat := catalog.NewEmpty()
+	cat.SetEmbedder(emb)
+	cat.SetCommonsDir(commons)
+	if _, err := cat.ReloadContext(ctx, own); err != nil {
 		return nil, fmt.Errorf("load catalog root %s: %w", own, err)
 	}
 	return cat, nil

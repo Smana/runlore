@@ -12,8 +12,24 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
+)
+
+// HybridRecallConfig configures hybrid (BM25 + embedding cosine) instant recall for
+// the replay runner. Built from config.Catalog.InstantRecall + config.Model.Embeddings
+// in internal/app/eval.go, or injected directly in tests.
+type HybridRecallConfig struct {
+	Embedder  catalog.Embedder
+	MinScore  float64 // cosine floor (0 ⇒ production default 0.80)
+	MarginGap float64 // cosine margin over runner-up (0 ⇒ production default 0.05)
+}
+
+const (
+	defaultHybridMinScore  = 0.80
+	defaultHybridMarginGap = 0.05
 )
 
 // Runner replays cases through the investigation loop with a given model.
@@ -24,6 +40,10 @@ type Runner struct {
 	// zero value runs every case unbounded against the operator's paid model, which
 	// is what this runner did before it had the field.
 	Spend Spend
+	// Hybrid, when non-nil with a non-nil Embedder, attaches the embedder to each
+	// per-case catalog fixture and arms cosine-gated hybrid recall (matching
+	// production BuildCatalog + BuildModelAndTools).
+	Hybrid *HybridRecallConfig
 	// OnCaseDone, when set, is called after each case finishes its n repeats, in
 	// case order. RunN is sequential and holds every result until the whole campaign
 	// ends, so without this a nightly run emits nothing for its entire duration —
@@ -44,6 +64,12 @@ const (
 )
 
 func (r *Runner) runOne(ctx context.Context, c Case) Result {
+	counter, counted := r.Model.(UsageCounter)
+	var before providers.Usage
+	if counted {
+		before = counter.Total()
+	}
+
 	tools := make([]investigate.Tool, 0, len(c.Tools))
 	for name, output := range c.Tools {
 		tools = append(tools, staticTool{name: name, output: output})
@@ -52,8 +78,13 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	// the replay exercises the closed recall→verify loop exactly as production does
 	// (BuildModelAndTools). Cases without a fixture replay with no recall, unchanged.
 	var recall *investigate.Recall
+	reloadSink := &embed.UsageSink{}
 	if c.hasCatalog() {
-		cat, err := c.buildCatalog(ctx)
+		var emb catalog.Embedder
+		if r.Hybrid != nil {
+			emb = r.Hybrid.Embedder
+		}
+		cat, err := c.buildCatalogWithEmbedder(embed.WithUsageSink(ctx, reloadSink), emb)
 		if err != nil {
 			return Result{Name: c.Name, Missing: []string{noteCatalogFixtureError + err.Error()}}
 		}
@@ -78,6 +109,11 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 			RequireWorkloadMatch: rc.RequireWorkloadMatch,
 			OutcomePrior:         rc.OutcomePrior,
 			OutcomeFloor:         rc.OutcomeFloor,
+		}
+		if r.Hybrid != nil && r.Hybrid.Embedder != nil {
+			recall.Hybrid = cat
+			recall.HybridMinScore = cmp.Or(rc.HybridMinScore, r.Hybrid.MinScore, defaultHybridMinScore)
+			recall.HybridMarginGap = cmp.Or(rc.HybridMarginGap, r.Hybrid.MarginGap, defaultHybridMarginGap)
 		}
 	}
 	var got providers.Investigation
@@ -117,6 +153,23 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	if miss := checkRecall(c.ExpectRecall, decision); miss != "" {
 		res.Pass = false
 		res.Missing = append(res.Missing, miss)
+	}
+	// Attribute per-run token usage: completion delta (when Model is a UsageCounter)
+	// plus any embedding tokens billed during catalog reload and hybrid recall lookup.
+	_, reloadEmbedTokens := reloadSink.Totals()
+	if counted {
+		delta := usageDelta(before, counter.Total())
+		// got.Usage.InputTokens = loop + verify + query-embed; subtracting the completion
+		// delta isolates query-embed tokens without double-counting model calls.
+		queryEmbedTokens := max(0, got.Usage.InputTokens-delta.InputTokens)
+		delta.InputTokens += reloadEmbedTokens + queryEmbedTokens
+		res.Usage = delta
+	} else if reloadEmbedTokens > 0 || got.Usage.InputTokens > 0 || got.Usage.OutputTokens > 0 {
+		res.Usage = providers.Usage{
+			InputTokens:       got.Usage.InputTokens + reloadEmbedTokens,
+			OutputTokens:      got.Usage.OutputTokens,
+			CachedInputTokens: got.Usage.CachedInputTokens,
+		}
 	}
 	return res
 }
@@ -346,19 +399,8 @@ func (r *Runner) RunN(ctx context.Context, cases []Case, n int) Campaign {
 
 func (r *Runner) aggregateCase(ctx context.Context, c Case, n int) CaseAggregate {
 	results := make([]Result, 0, n)
-	counter, counted := r.Model.(UsageCounter)
 	for i := 0; i < n; i++ {
-		var before providers.Usage
-		if counted {
-			before = counter.Total()
-		}
-		res := r.runOne(ctx, c)
-		if counted {
-			// Sequential by construction (RunN → aggregateCase → runOne), so the
-			// delta over this window is exactly this run's spend.
-			res.Usage = usageDelta(before, counter.Total())
-		}
-		results = append(results, res)
+		results = append(results, r.runOne(ctx, c))
 	}
 	return aggregateResults(c, results)
 }

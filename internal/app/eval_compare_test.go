@@ -209,7 +209,7 @@ models:
 		t.Fatalf("model-a pass aggregation: %+v", a)
 	}
 	// Coverage: what_changed(gitops) + query_metrics(metrics) + query_logs(logs) = all 3 expected → 1.0.
-	if a.CoverageMedian != 1.0 {
+	if a.CoverageMedian == nil || *a.CoverageMedian != 1.0 {
 		t.Fatalf("model-a coverage median: %v", a.CoverageMedian)
 	}
 	// Judge graded every run: root_cause median 3, no confident-wrong.
