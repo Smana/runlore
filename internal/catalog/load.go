@@ -4,6 +4,7 @@ package catalog
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,6 +23,12 @@ import (
 // warn — so one bad entry never empties the catalog. A genuine walk/IO error is
 // still returned as the fatal error.
 func Load(dir string) (entries []Entry, skipped []string, err error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
+
 	werr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return werr
@@ -35,26 +42,32 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 			}
 			return nil
 		}
-		// Only regular files are entries. A catalog is synced from a Git repo — the
-		// shipped default points at a third-party public commons — and a mode-120000
-		// tree entry clones into a real symlink. WalkDir does not follow symlinks, but
-		// a symlink to a FILE arrives here with IsDir()==false, and os.ReadFile below
-		// DOES follow it: a relative target (go-billy only rewrites absolute ones into
-		// the clone root) reads the ServiceAccount token or /proc/self/environ into
-		// Entry.Body, into the search corpus, and back out through kb_get. Checking the
-		// type rather than resolving the target also covers fifos and device nodes,
-		// which would make the read block or allocate forever, and leaves no TOCTOU
-		// window between a path check and the open.
-		if !d.Type().IsRegular() {
+		// Only regular files and symlinks that resolve strictly inside dir are
+		// considered. A catalog may be synced from a Git repo (where a hostile
+		// mode-120000 symlink could attempt to read the ServiceAccount token or
+		// /proc/self/environ) OR mounted from a Kubernetes ConfigMap (where every
+		// top-level file is a symlink to ..data/<file> -> ..2026_*/<file>).
+		// Opening through os.OpenRoot enforces kernel-level confinement to dir
+		// with no TOCTOU window, and f.Stat().Mode().IsRegular() rejects targets
+		// that are directories, FIFOs, or device nodes before reading.
+		isSymlink := d.Type()&fs.ModeSymlink != 0
+		if !d.Type().IsRegular() && !isSymlink {
 			return nil
 		}
 		if !IsEntryFile(base) {
 			return nil
 		}
-		e, perr := parseEntry(dir, path)
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil {
+			return rerr
+		}
+		e, ok, perr := parseEntry(root, rel, isSymlink)
 		if perr != nil {
 			skipped = append(skipped, fmt.Sprintf("%s: %v", path, perr))
 			return nil // skip the bad entry; keep indexing the rest
+		}
+		if !ok {
+			return nil
 		}
 		entries = append(entries, e)
 		return nil
@@ -116,19 +129,40 @@ type entryMeta struct {
 	LastValidated string   `yaml:"last_validated"`
 }
 
-func parseEntry(root, path string) (Entry, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is within the operator-configured catalog directory
+func parseEntry(root *os.Root, rel string, isSymlink bool) (Entry, bool, error) {
+	f, err := root.Open(rel)
 	if err != nil {
-		return Entry{}, err
+		if isSymlink {
+			// Symlinks escaping root (rejected by os.OpenRoot) or dangling links
+			// are silently skipped rather than reported as parse errors.
+			return Entry{}, false, nil
+		}
+		return Entry{}, false, err
+	}
+	defer func() { _ = f.Close() }()
+
+	st, err := f.Stat()
+	if err != nil {
+		if isSymlink {
+			return Entry{}, false, nil
+		}
+		return Entry{}, false, err
+	}
+	if !st.Mode().IsRegular() {
+		return Entry{}, false, nil
+	}
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return Entry{}, false, err
 	}
 	fm, body := SplitFrontmatter(data)
 	var meta entryMeta
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
-			return Entry{}, err
+			return Entry{}, false, err
 		}
 	}
-	rel, _ := filepath.Rel(root, path)
 	return Entry{
 		Type: meta.Type, Title: meta.Title, Description: meta.Description,
 		AlertResource: meta.AlertResource,
@@ -136,7 +170,7 @@ func parseEntry(root, path string) (Entry, error) {
 		Timestamp: meta.Timestamp, Fingerprint: meta.Fingerprint,
 		Status: meta.Status, LastValidated: meta.LastValidated,
 		Body: string(body), Path: rel,
-	}, nil
+	}, true, nil
 }
 
 // SplitFrontmatter separates a leading "---\n...\n---\n" YAML block from the body.
