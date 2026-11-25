@@ -14,6 +14,40 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.21.0](https://github.com/Smana/runlore/compare/v0.20.0...v0.21.0) (2026-11-25)
+
+
+### Features
+
+* **actions:** add pure-Go approve-only deterministic git revert_pr action ([#634](https://github.com/Smana/runlore/issues/634)) ([473fc4a](https://github.com/Smana/runlore/commit/473fc4a8d925abbe847eebe3fbac5296c9ea3733))
+* **cli:** add zero-config target/env ergonomics to lore investigate and add lore status ([#631](https://github.com/Smana/runlore/issues/631)) ([cda0b0b](https://github.com/Smana/runlore/commit/cda0b0b4d07a97d0dee8561387bc5b299af8f9c3))
+* **eval:** close [#394](https://github.com/Smana/runlore/issues/394), wire hybrid recall into eval, and expand replay corpus to 17 cases ([#633](https://github.com/Smana/runlore/issues/633)) ([02fe5a8](https://github.com/Smana/runlore/commit/02fe5a889d5c6b4d61927181a9215ab260a501af))
+* **factory:** support static bearer and generic OAuth2 auth alongside ZITADEL ([#626](https://github.com/Smana/runlore/issues/626)) ([a188da7](https://github.com/Smana/runlore/commit/a188da7ed4cf77bf023120b5384d51a8030729c9))
+* **gemini:** support Gemini 3/4 thoughtSignature replay, thinkingLevel, and thoughtsTokenCount ([#627](https://github.com/Smana/runlore/issues/627)) ([03462b2](https://github.com/Smana/runlore/commit/03462b28809916de6a02635269bd2adbb6bbfc57))
+* **investigate:** surface evidence grounding alongside causal confidence ([#630](https://github.com/Smana/runlore/issues/630)) ([df7adf6](https://github.com/Smana/runlore/commit/df7adf69d504e2d00a02fde3c60c8d47d9d49e20))
+* **kbui,gcp:** add env-gated GCP live capture harness and zero-dep embedded KB HTML explorer ([#629](https://github.com/Smana/runlore/issues/629)) ([8916f46](https://github.com/Smana/runlore/commit/8916f462ca108f3fabbada3350477b8650665edc))
+* **provenance:** attach server-derived Git and KB permalinks to cards and KB PRs ([#632](https://github.com/Smana/runlore/issues/632)) ([5273f2f](https://github.com/Smana/runlore/commit/5273f2f4ff2dfc4765645cd94dd0dd75fc7d2fc5))
+* **security:** wrap untrusted LLM inputs in tag-escaped delimiters across all call sites ([#628](https://github.com/Smana/runlore/issues/628)) ([0160104](https://github.com/Smana/runlore/commit/01601047154d5bc5754ecd3489824cad8bd10d9a))
+
+
+### Bug Fixes
+
+* **catalog:** allow root-confined ConfigMap symlinks via os.OpenRoot ([#637](https://github.com/Smana/runlore/issues/637)) ([fb7dbb4](https://github.com/Smana/runlore/commit/fb7dbb4fc43c1b70a092f415bc1ec2d14e62b12d))
+* **cli:** list validate-kb in lore's usage, index the CLI, correct the factory docs ([#615](https://github.com/Smana/runlore/issues/615)) ([d8a6787](https://github.com/Smana/runlore/commit/d8a6787649e0d252f96b21e1b8b3c2c4231349ac))
+
+
+### Documentation
+
+* **chart:** mount the factory CA beside the config, not under it ([#613](https://github.com/Smana/runlore/issues/613)) ([293b7c7](https://github.com/Smana/runlore/commit/293b7c72c2fa0a24c571c2a3d490e83aac3efddf))
+* refresh README, ROADMAP, and design for v0.20 and guard README integrations ([#625](https://github.com/Smana/runlore/issues/625)) ([4c94b13](https://github.com/Smana/runlore/commit/4c94b1338f879898110e93002263f7918af8d242))
+* **superpowers:** add 10 design specs and implementation plans ([#623](https://github.com/Smana/runlore/issues/623)) ([d5e4653](https://github.com/Smana/runlore/commit/d5e46539f98ac88be20a89655e23c0ae04161cb3))
+* **superpowers:** mark 2026-11-24 specs and plans status after merge ([#638](https://github.com/Smana/runlore/issues/638)) ([47d6ade](https://github.com/Smana/runlore/commit/47d6adeacdf462a703a8f2ca03831f34b6b74873))
+
+
+### Code Refactoring
+
+* split config.go and providers.go into same-package domain files ([#624](https://github.com/Smana/runlore/issues/624)) ([21d91a7](https://github.com/Smana/runlore/commit/21d91a77ca7f5c4c363eecacc17e304133d772b6))
+
 ## [0.20.0](https://github.com/Smana/runlore/compare/v0.19.1...v0.20.0) (2026-11-04)
 
 
