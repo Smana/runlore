@@ -1,7 +1,7 @@
 # Design — Clickable provenance anchors in cards & KB PRs
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #632, merged 2026-11-24)
 - **Owner:** Smaine Kahlouch
 - **Touches:** `internal/providers/providers.go`, `internal/provenance/` (new), `internal/investigate/{loop.go,tools.go,observedchanges.go}`, `internal/notify/{format.go,slack.go,matrix.go}`, `internal/curator/curator.go`, `internal/app/investigate.go`
 

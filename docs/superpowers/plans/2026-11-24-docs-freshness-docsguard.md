@@ -1,5 +1,7 @@
 # Public Docs Freshness (`v0.20.0`) & `README.md` `docsguard` Implementation Plan
 
+> **Status:** Implemented (PR #625, merged 2026-11-24)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bring `README.md`, `ROADMAP.md`, `website/content/docs/concepts/design.md`, and `website/content/docs/integrations/_index.md` into sync with `v0.20.0`, remove duplicate unguarded integration/package lists from `design.md`, and add a `docsguard` test ensuring `README.md`'s integrations table can never silently drift again.
@@ -39,7 +41,7 @@
 **Files:**
 - Modify: `internal/docsguard/integration_pages_test.go`
 
-- [ ] **Step 1: Add `TestReadmeListsAllIntegrationPages` and `readmeSection` helper**
+- [x] **Step 1: Add `TestReadmeListsAllIntegrationPages` and `readmeSection` helper**
 
 In `internal/docsguard/integration_pages_test.go`:
 - Define `readmeSkippedIntegrationIDs` (`"grafana-mcp": true`, `"local-keyless": true`).
@@ -56,7 +58,7 @@ In `internal/docsguard/integration_pages_test.go`:
   - Assert `checked > 0`.
   - Assert every key in `readmeSkippedIntegrationIDs` is in `seenSkipped` (stale-skip guard).
 
-- [ ] **Step 2: Run the new test to verify it fails on current `README.md`**
+- [x] **Step 2: Run the new test to verify it fails on current `README.md`**
 
 ```bash
 go test -v ./internal/docsguard/... -run TestReadmeListsAllIntegrationPages
@@ -71,7 +73,7 @@ Expected: FAIL reporting missing canonical URLs including `loki`, `elasticsearch
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Update `## 🔌 Supported integrations` and learning-loop summary in `README.md`**
+- [x] **Step 1: Update `## 🔌 Supported integrations` and learning-loop summary in `README.md`**
 
 - Update every row in `## 🔌 Supported integrations` so every non-skipped integration links to its canonical `https://runlore.io/docs/integrations/<path>/` page:
   - **GitOps:** Flux · Argo CD
@@ -90,7 +92,7 @@ Expected: FAIL reporting missing canonical URLs including `loki`, `elasticsearch
 - In `## 📚 The learning loop`, add a short mention of deterministic injection screening (`threatcheck` gating `ready-to-merge`), thread-to-KB replies, and KB-over-HTTP / `lore kb resolve`, linking to existing docs (`learning-loop/`, `reviewing-knowledge/`).
 - In `## Project status & stability`, accurately reflect the broader integration surface (Loki/ES/OpenSearch, GitLab, Grafana/custom sources, templated notifiers).
 
-- [ ] **Step 2: Run `docsguard` to verify `TestReadmeListsAllIntegrationPages` passes**
+- [x] **Step 2: Run `docsguard` to verify `TestReadmeListsAllIntegrationPages` passes**
 
 ```bash
 go test -v ./internal/docsguard/...
@@ -107,7 +109,7 @@ Expected: PASS.
 - Modify: `website/content/docs/concepts/design.md`
 - Modify: `website/content/docs/integrations/_index.md`
 
-- [ ] **Step 1: Update `ROADMAP.md`**
+- [x] **Step 1: Update `ROADMAP.md`**
 
 - Remove the 4 shipped bullets from `## Next` and `## Later`:
   - Templated webhook source (`internal/source/custom`)
@@ -116,7 +118,7 @@ Expected: PASS.
   - Hot-path benchmarks (12 `Benchmark*` functions across `internal/`)
 - Keep all genuinely open items (`#392` until Item 1 lands, `#391`, `#394`, `#362`, hybrid recall graduation, multi-KB federation, frozen `auto` rung).
 
-- [ ] **Step 2: Deduplicate `design.md` §7 & §13 and fix `integrations/_index.md:45`**
+- [x] **Step 2: Deduplicate `design.md` §7 & §13 and fix `integrations/_index.md:45`**
 
 - In `website/content/docs/concepts/design.md`:
   - §7: Replace lines 302–314 (the stale provider table) with a short paragraph + `relref` link to `/docs/integrations/_index.md` as the single maintained integrations catalog. Keep the GCP footnote, cloud native-SDK note, GitOps comparison table, and auto-discovery notes intact.
@@ -124,7 +126,7 @@ Expected: PASS.
 - In `website/content/docs/integrations/_index.md`:
   - Line 45: change `"Google's models over the OpenAI-compatible endpoint — version caveats apply."` to `"Google's Gemini models over the native streamGenerateContent API."`.
 
-- [ ] **Step 3: Run full quality gate**
+- [x] **Step 3: Run full quality gate**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -132,7 +134,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: all tests (including `internal/docsguard` cross-page anchor and link checks) PASS, `gofmt -l .` prints nothing, `hack/lint.sh` reports `0 issues`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `docs: refresh README, ROADMAP, and design for v0.20 and guard README integrations`

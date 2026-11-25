@@ -1,5 +1,7 @@
 # Native Deterministic Git-Revert PR Action Implementation Plan
 
+> **Status:** Implemented (PR #634, merged 2026-11-24)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a pure-Go, `approve`-only `revert_pr` action that deterministically constructs an inverse commit for a single server-observed GitOps commit and opens a Draft PR (GitHub) or Draft MR (GitLab) against an allowlisted GitOps repository.
@@ -46,7 +48,7 @@
 - Modify: `internal/config/config.go`, `internal/config/config_test.go`
 - Modify: `internal/action/{safety.go,policy.go,auto.go,approvals.go}` + tests
 
-- [ ] **Step 1: Write failing tests for config validation and action gating**
+- [x] **Step 1: Write failing tests for config validation and action gating**
 
 - `internal/config/config_test.go`:
   - `actions.revert_pr.enabled: true` with `mode: auto` or `mode: off` → error.
@@ -58,7 +60,7 @@
   - `approve` rejects `revert_pr` when `Revert == nil`, when `Revert.Repo` is not in `allowed_repos`, or when `actions.revert_pr.enabled == false`.
   - `approve` accepts `revert_pr` when enabled + repo allowlisted + `Revert.CommitSHA != ""`, and re-validates on `Approve()`.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/config/... ./internal/action/... -run 'Test.*RevertPR'
@@ -66,13 +68,13 @@ go test ./internal/config/... ./internal/action/... -run 'Test.*RevertPR'
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement provider types, config validation, and action gate rules**
+- [x] **Step 3: Implement provider types, config validation, and action gate rules**
 
 - Add `ApproveOnly bool` to `OpSafety`, register `"revert_pr": {Reversible: true, Blast: 2, ApproveOnly: true}` in `providers.Ops`, add `Revert *RevertTarget` to `providers.Action`, and define `RevertForge`.
 - Add `RevertPR` config struct + fail-closed `Validate()` in `internal/config/config.go`.
 - Enforce `ApproveOnly` in `internal/action/auto.go` and `revert_pr` repo-allowlist checks in `internal/action/policy.go`.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 go test -race ./internal/providers/... ./internal/config/... ./internal/action/...
@@ -88,7 +90,7 @@ Expected: PASS.
 - Create: `internal/executor/revertpr/revertpr.go`
 - Create: `internal/executor/revertpr/revertpr_test.go`
 
-- [ ] **Step 1: Write failing unit tests with a fake `providers.RevertForge`**
+- [x] **Step 1: Write failing unit tests with a fake `providers.RevertForge`**
 
 Cover every invariant:
 - Clean revert of commit with 1 added file, 1 modified file, 1 removed file, 1 renamed file → exact inverse file actions submitted to `CreateRevertDraftPR` with `Draft: true`, branch `runlore/revert-<sha[:12]>`.
@@ -101,7 +103,7 @@ Cover every invariant:
 - Non-overlapping later edit (`HEAD` moved on unrelated files) → succeeds cleanly against current `headSHA`.
 - Idempotent dedup: `FindOpenPRByHead` returns existing open PR → returns that URL without calling `CreateRevertDraftPR`.
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 ```bash
 go test ./internal/executor/revertpr/...
@@ -109,11 +111,11 @@ go test ./internal/executor/revertpr/...
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `internal/executor/revertpr/revertpr.go`**
+- [x] **Step 3: Implement `internal/executor/revertpr/revertpr.go`**
 
 Implement protected path matching (`path.Match` + segment checks for `flux-system`/`kube-system`/`.github`/`.gitlab`), parent/size/overlap verification, blob materialization, branch naming, PR body rendering (redacted via `redact.Secrets`), and idempotent execution.
 
-- [ ] **Step 4: Run tests with race detector**
+- [x] **Step 4: Run tests with race detector**
 
 ```bash
 go test -race -v ./internal/executor/revertpr/...
@@ -129,14 +131,14 @@ Expected: PASS.
 - Create: `internal/forge/github/revert.go`, `internal/forge/github/revert_test.go`
 - Create: `internal/forge/gitlab/revert.go`, `internal/forge/gitlab/revert_test.go`
 
-- [ ] **Step 1: Write failing `httptest` fixture tests for GitHub and GitLab `RevertForge`**
+- [x] **Step 1: Write failing `httptest` fixture tests for GitHub and GitLab `RevertForge`**
 
 - `internal/forge/github/revert_test.go`:
   - `DefaultBranch`, `CommitDetail`, `CompareChangedFiles`, `FileBlob`, `FindOpenPRByHead`, and `CreateRevertDraftPR` (verifies base tree + blob creation + tree deletion (`sha: null`) + commit + ref creation + `POST /pulls` with `"draft": true`).
 - `internal/forge/gitlab/revert_test.go`:
   - `DefaultBranch`, `CommitDetail`, `CompareChangedFiles`, `FileBlob`, `FindOpenPRByHead`, and `CreateRevertDraftPR` (verifies `POST /repository/commits` with `start_branch`, `branch`, atomic `actions[]` (`create`/`update`/`delete`), and `POST /merge_requests` with `"Draft: "` title prefix).
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/forge/... -run TestRevert
@@ -144,11 +146,11 @@ go test ./internal/forge/... -run TestRevert
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `github/revert.go` and `gitlab/revert.go`**
+- [x] **Step 3: Implement `github/revert.go` and `gitlab/revert.go`**
 
 Reuse existing client auth (`github_app` installation token / GitLab private token), `httpx.SecureClient`, bounded `httpx.Drain`, and compile-time `var _ providers.RevertForge = (*Client)(nil)` checks.
 
-- [ ] **Step 4: Run forge tests**
+- [x] **Step 4: Run forge tests**
 
 ```bash
 go test -race ./internal/forge/...
@@ -165,7 +167,7 @@ Expected: PASS.
 - Modify: `internal/app/{action.go,serve.go}` + tests
 - Modify: `website/content/docs/concepts/design.md`, `website/content/docs/security/security-architecture.md`
 
-- [ ] **Step 1: Write failing tests for server-derived `RevertTarget` & composite action executor**
+- [x] **Step 1: Write failing tests for server-derived `RevertTarget` & composite action executor**
 
 - `internal/investigate/`:
   - Proposed `revert_pr` matching a single observed `what_changed` GitOps commit gets `Action.Revert` stamped server-side.
@@ -173,13 +175,13 @@ Expected: PASS.
 - `internal/app/`:
   - Composite executor dispatches `suspend`/`resume`/`reconcile` to Flux/Argo and `revert_pr` to `revertpr.Executor`, audit-logging every outcome and posting the opened Draft PR URL back to the incident thread.
 
-- [ ] **Step 2: Implement investigation wiring, app dispatch, and docs updates**
+- [x] **Step 2: Implement investigation wiring, app dispatch, and docs updates**
 
 - Update `submit_findings` tool schema to include `revert_pr` when enabled, resolve `Action.Revert` server-side from `observedChanges` (GitOps only).
 - Build dedicated `RevertForge` client from `cfg.Actions.RevertPR.Forge` (or reuse top-level forge when `ReuseForgeCredentials` is true) and wrap in a composite executor in `internal/app/action.go`.
 - Update `website/content/docs/concepts/design.md` §6 and `website/content/docs/security/security-architecture.md` §1 to document `revert_pr`, its `approve`-only + Draft-PR boundary, protected paths, and credential separation.
 
-- [ ] **Step 3: Run full quality gate**
+- [x] **Step 3: Run full quality gate**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -187,7 +189,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: all tests PASS, `gofmt -l .` prints nothing, `hack/lint.sh` reports `0 issues`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `feat(actions): add pure-Go approve-only deterministic git revert_pr action`

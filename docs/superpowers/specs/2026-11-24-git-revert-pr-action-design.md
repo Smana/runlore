@@ -1,7 +1,7 @@
 # Design — Native deterministic Git-revert PR action (`revert_pr`)
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #634, merged 2026-11-24)
 - **Owner:** Smaine Kahlouch
 - **Depends on:** Item 6 (`internal/investigate/observedchanges.go` server-side observed GitOps changes)
 - **Touches:** `internal/providers/providers.go`, `internal/config/config.go`, `internal/action/{safety.go,policy.go,auto.go,approvals.go}`, `internal/executor/revertpr/` (new), `internal/forge/{github,gitlab}/`, `internal/investigate/{loop.go,tools.go,observedchanges.go}`, `internal/app/{action.go,serve.go}`, `website/content/docs/concepts/design.md`, `website/content/docs/security/security-architecture.md`

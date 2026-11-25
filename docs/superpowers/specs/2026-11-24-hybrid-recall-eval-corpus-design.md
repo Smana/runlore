@@ -1,7 +1,7 @@
 # Design — Hybrid recall graduation (or cut), replay eval corpus expansion, and `#394`
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Partially implemented (PR #633, merged 2026-11-24 — #394, hybrid eval wiring, and 17-case corpus merged; live embedding benchmark pending)
 - **Owner:** Smaine Kahlouch
 - **Fixes:** [#394](https://github.com/Smana/runlore/issues/394)
 - **Touches:** `internal/eval/{eval.go,compare_run.go,compare_report.go,replay_report.go}`, `internal/investigate/hybrideval_test.go`, `internal/config/config.go`, `internal/catalog/hybrid.go`, `examples/eval/*.yaml`, `examples/eval/fixtures/`, `website/content/docs/configuration/configuration.md`, `ROADMAP.md`

@@ -1,5 +1,7 @@
 # Clickable Provenance Anchors Implementation Plan
 
+> **Status:** Implemented (PR #632, merged 2026-11-24)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn verified GitOps/source diffs (`ChangeRef`, changed files + hunk lines) and matched KB entries into 100% server-derived clickable HTTPS links across Slack, Matrix, CLI output, and drafted KB PRs, without adding lines to main Slack/Matrix cards or ever trusting model-authored URLs.
@@ -42,7 +44,7 @@
 - Create: `internal/provenance/provenance.go`
 - Create: `internal/provenance/provenance_test.go`
 
-- [ ] **Step 1: Write failing table-driven tests in `internal/provenance/provenance_test.go`**
+- [x] **Step 1: Write failing table-driven tests in `internal/provenance/provenance_test.go`**
 
 Cover:
 - `NormalizeRepoHTTPS`:
@@ -62,7 +64,7 @@ Cover:
   - `@@ -10,5 +0,0 @@` (deleted file) → `0`
   - Binary / empty patch → `0`
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 ```bash
 go test ./internal/provenance/...
@@ -70,11 +72,11 @@ go test ./internal/provenance/...
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `internal/provenance/provenance.go`**
+- [x] **Step 3: Implement `internal/provenance/provenance.go`**
 
 Implement `ForgeStyle`, `HostStyles`, `DefaultHostStyles(forgeProvider, gitHost, gitlabURL string)`, `NormalizeRepoHTTPS`, `CompareURL`, `CommitURL`, `FileURL`, `FirstAddedLine`, and `SafeHTTPS`.
 
-- [ ] **Step 4: Run tests with race detector**
+- [x] **Step 4: Run tests with race detector**
 
 ```bash
 go test -race -v ./internal/provenance/...
@@ -93,7 +95,7 @@ Expected: PASS.
 - Modify: `internal/investigate/loop.go`, `tools.go`, `recall.go`
 - Modify: `internal/app/investigate.go`
 
-- [ ] **Step 1: Write failing tests in `internal/investigate/observedchanges_test.go`**
+- [x] **Step 1: Write failing tests in `internal/investigate/observedchanges_test.go`**
 
 Cover:
 - Recorded GitOps change (`github.com/org/infra`, `aaa1111`..`bbb2222`, 6 changed files) matched against `Hypothesis{ChangeRef: "aaa1111..bbb2222", Evidence: ["apps/harbor/values.yaml bumped tag"]}`:
@@ -104,7 +106,7 @@ Cover:
 - Unknown host fails closed (`ChangeURL == ""`, `Provenance == nil`).
 - `MatchedKB` with a `## Resolution` section receives `SectionAnchor: "#resolution"`; without one receives `""`.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/investigate/... -run TestObservedChanges
@@ -112,7 +114,7 @@ go test ./internal/investigate/... -run TestObservedChanges
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `observedchanges.go` and wire into `loop.go`, `tools.go`, `recall.go`, and `app/investigate.go`**
+- [x] **Step 3: Implement `observedchanges.go` and wire into `loop.go`, `tools.go`, `recall.go`, and `app/investigate.go`**
 
 - Add `ProvenanceLink`, `Hypothesis.ChangeURL`, `Hypothesis.Provenance`, and `MatchedKB.SectionAnchor` in `internal/providers/providers.go`.
 - Add thread-safe `observedChanges` recorder (`sync.Mutex`, mirroring `observedResources`) passed via context or tool wrapper into `WhatChangedTool` and `SourceDiffTool` so each materialized diff records `{RepoURL, FromRev, ToRev, Files}` with zero extra Git calls.
@@ -120,7 +122,7 @@ Expected: FAIL.
 - Call `attachProvenance(&inv, observed, li.HostStyles)` in `loop.go` right after verify and before delivery/curation.
 - In `recall.go` / `kb_search` match assembly, check `catalog.Section(entry.Body, "Resolution") != ""` and set `MatchedKB.SectionAnchor = "#resolution"`.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 ```bash
 go test -race ./internal/investigate/... ./internal/app/...
@@ -138,7 +140,7 @@ Expected: PASS.
 - Modify: `internal/notify/matrix.go`, `matrix_test.go`
 - Modify: `internal/curator/curator.go`, `curator_test.go`
 
-- [ ] **Step 1: Write failing tests across `notify` and `curator`**
+- [x] **Step 1: Write failing tests across `notify` and `curator`**
 
 - `slack_test.go`:
   - Main card hyperlinks `What changed:` as `<https://github.com/org/infra/compare/a...b|a..b>` with zero added blocks/lines; label containing `|>` is escaped via `escapeMrkdwn`; non-HTTPS or malformed `ChangeURL` degrades to plain escaped code span.
@@ -148,7 +150,7 @@ Expected: PASS.
 - `format_test.go`: CLI prints `What changed: <ref> (<url>)` and indented `↳ <label>: <url>` lines.
 - `curator_test.go`: KB PR markdown renders `[<ref>](<url>)` and `### Provenance` file link list.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/notify/... ./internal/curator/... -run 'Test.*Provenance|Test.*ChangeURL'
@@ -156,12 +158,12 @@ go test ./internal/notify/... ./internal/curator/... -run 'Test.*Provenance|Test
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement safe per-surface link rendering**
+- [x] **Step 3: Implement safe per-surface link rendering**
 
 - Use `provenance.SafeHTTPS` guard before emitting any clickable link in `slack.go`, `matrix.go`, `format.go`, and `curator.go`.
 - Preserve byte-identical rendering whenever `ChangeURL == ""` and `len(Provenance) == 0` so all existing golden snapshots stay green.
 
-- [ ] **Step 4: Run full quality gate**
+- [x] **Step 4: Run full quality gate**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -169,7 +171,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: all tests PASS, `gofmt -l .` prints nothing, `hack/lint.sh` reports `0 issues`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `feat(provenance): attach server-derived Git and KB permalinks to cards and KB PRs`

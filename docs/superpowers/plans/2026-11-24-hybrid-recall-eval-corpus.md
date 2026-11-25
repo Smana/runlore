@@ -1,5 +1,7 @@
 # Hybrid Recall Graduation (or Cut), Eval Corpus Expansion & `#394` Implementation Plan
 
+> **Status:** Partially implemented (PR #633, merged 2026-11-24 — Tasks 1–3 merged; Task 4 live embedding benchmark pending)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close `#394` (vacuous `--compare` columns when `ground_truth` is absent), wire hybrid recall into `internal/eval`, expand `examples/eval/` from 7 to 17 hermetic replay cases (including paraphrase recall and a second held-out case), and execute the evidence-gated live benchmark to either graduate or deprecate/cut `catalog.instant_recall.hybrid`.
@@ -41,14 +43,14 @@
 - Modify: `internal/eval/compare_report.go`
 - Modify: `internal/eval/compare_report_test.go` (or create if absent)
 
-- [ ] **Step 1: Write failing tests in `internal/eval/compare_report_test.go`**
+- [x] **Step 1: Write failing tests in `internal/eval/compare_report_test.go`**
 
 Test three suites:
 1. All cases lack `ground_truth` → rendered markdown/table omits Judge and Coverage columns completely and prints a footnote explaining why; JSON includes `judged_cases: 0`, `coverage_cases: 0`.
 2. Mixed suite (2 of 5 cases have `ground_truth`) → columns render with explicit denominator or `—` when a model had 0 judged cases (never `0.0%` for unmeasured).
 3. Full `ground_truth` suite → renders identically to today.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/eval/... -run TestCompareReport
@@ -56,11 +58,11 @@ go test ./internal/eval/... -run TestCompareReport
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `JudgedCases` / `CoverageCases` tracking and conditional column rendering**
+- [x] **Step 3: Implement `JudgedCases` / `CoverageCases` tracking and conditional column rendering**
 
 Update `compare_run.go` to count cases where judge/coverage actually ran, and update `compare_report.go` to hide vacuous columns and display `—` / explicit denominators.
 
-- [ ] **Step 4: Run `internal/eval` tests**
+- [x] **Step 4: Run `internal/eval` tests**
 
 ```bash
 go test -race ./internal/eval/...
@@ -76,11 +78,11 @@ Expected: PASS.
 - Modify: `internal/eval/eval.go`, `internal/eval/eval_test.go`
 - Modify: `internal/investigate/hybrideval_test.go`
 
-- [ ] **Step 1: Write failing test in `internal/eval/eval_test.go` for hybrid recall wiring**
+- [x] **Step 1: Write failing test in `internal/eval/eval_test.go` for hybrid recall wiring**
 
 Inject a deterministic fake `catalog.Embedder` (distinct vectors for matching vs non-matching entries) and assert `lore eval` runs `SearchHybrid`, fires instant recall on a lexical-mismatch alert when cosine ≥ threshold, and attributes embedding token usage.
 
-- [ ] **Step 2: Run targeted test to verify failure**
+- [x] **Step 2: Run targeted test to verify failure**
 
 ```bash
 go test ./internal/eval/... -run TestEvalHybridRecall
@@ -88,12 +90,12 @@ go test ./internal/eval/... -run TestEvalHybridRecall
 
 Expected: FAIL.
 
-- [ ] **Step 3: Wire embedder & hybrid thresholds in `internal/eval/eval.go` and expand `hybrideval_test.go`**
+- [x] **Step 3: Wire embedder & hybrid thresholds in `internal/eval/eval.go` and expand `hybrideval_test.go`**
 
 - In `internal/eval/eval.go`, wire `embed.New(...)` when `cfg.Catalog.InstantRecall.Hybrid` and `cfg.Model.Embeddings` are configured, set `cat.SetEmbedder(...)`, and populate `recall.Hybrid`, `HybridMinScore`, `HybridMarginGap`.
 - In `internal/investigate/hybrideval_test.go`, add 4–6 lexical-mismatch/paraphrase positive cases (e.g. synonym wording for OOM, DNS, TLS expiry, PVC pending) and 2 hard-negative cases (same workload, different failure mechanism); emit a side-by-side BM25 vs Hybrid Recall@1 + false-fire table from `TestHybridRecallEvalLive`.
 
-- [ ] **Step 4: Run hermetic tests**
+- [x] **Step 4: Run hermetic tests**
 
 ```bash
 go test -race ./internal/eval/... ./internal/investigate/... -run 'Test.*Hybrid|TestEval'
@@ -118,14 +120,14 @@ Expected: PASS.
 - Create: `examples/eval/heldout-statefulset-wal-lock.yaml`
 - Create: matching KB fixture entries under `examples/eval/fixtures/` for the two paraphrase recall cases
 
-- [ ] **Step 1: Author the 10 compact, realistic replay YAML cases**
+- [x] **Step 1: Author the 10 compact, realistic replay YAML cases**
 
 Ensure each case:
 - Uses realistic tool output shapes matching RunLore's actual tool formatting (never hands the model its own answer in the alert text — remember #585).
 - Uses `must_contain`, `root_cause_entities`, `distractors`, and `min_confidence` (or `max_confidence` / `expect_inconclusive` for `correlation-only-inconclusive.yaml`; `expect_recall: true` for paraphrase recall cases).
 - Marks `heldout-statefulset-wal-lock.yaml` clearly in comments as held-out.
 
-- [ ] **Step 2: Add/run hermetic loader & schema validation test across all `examples/eval/*.yaml`**
+- [x] **Step 2: Add/run hermetic loader & schema validation test across all `examples/eval/*.yaml`**
 
 ```bash
 go test -race ./internal/eval/...

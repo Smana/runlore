@@ -1,7 +1,7 @@
 # Design — Gemini 3 & Gemini 4 support (`thoughtSignature` replay, `thinkingLevel`, and thinking-token billing)
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #627, merged 2026-11-24; closes #392)
 - **Owner:** Smaine Kahlouch
 - **Fixes:** [#392](https://github.com/Smana/runlore/issues/392)
 - **Touches:** `internal/model/gemini/gemini.go`, `internal/model/gemini/gemini_test.go`, `internal/config/config.go`, `internal/config/config_test.go`, `internal/app/model.go`, `internal/app/model_test.go`, `internal/eval/compare.go`, `internal/eval/compare_test.go`, `website/content/docs/integrations/llm/gemini.md`, `website/content/docs/configuration/configuration.md`, `ROADMAP.md`

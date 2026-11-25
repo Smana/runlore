@@ -1,7 +1,7 @@
 # Design — Live GCP CloudProvider verification & embedded read-only KB HTML explorer
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Partially implemented (PR #629, merged 2026-11-24 — Track B & Track A capture harness merged; live GKE Standard capture pending)
 - **Owner:** Smaine Kahlouch
 - **Touches:**
   - Track A: `internal/providers/cloud/gcp/{live_capture_test.go,testdata/,auditlog.go,resourcehealth.go}`, `website/content/docs/integrations/data-sources/gcp-cloud.md`, `website/content/docs/concepts/design.md`, `website/content/docs/integrations/_index.md`, `README.md`

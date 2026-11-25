@@ -1,7 +1,7 @@
 # Design — Zero-config Day-0 CLI ergonomics (`lore investigate` + `lore status`)
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #631, merged 2026-11-24)
 - **Owner:** Smaine Kahlouch
 - **Touches:** `cmd/lore/main.go`, `internal/app/{investigate_cmd.go,investigate_config.go,kube.go,status_cmd.go}`, `internal/providers/providers.go`, `internal/providers/gitops/{flux,argocd}/`, `internal/investigate/loop.go`, `website/content/docs/reference/cli.md`, `README.md`
 
