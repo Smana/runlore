@@ -1,5 +1,7 @@
 # Gemini 3 & Gemini 4 Support Implementation Plan
 
+> **Status:** Implemented (PR #627, merged 2026-11-24; closes #392)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make RunLore's native Gemini client work end-to-end on Gemini 3 and Gemini 4 (`gemini-4-neon`, `gemini-4-carbon`) by capturing and replaying `thoughtSignature` via `providers.Message.Opaque`, unlocking `model.effort` (`thinkingConfig.thinkingLevel`), folding `thoughtsTokenCount` into output token usage, filtering `thought: true` parts out of visible text, and updating docs.
@@ -47,13 +49,13 @@
 - Modify: `internal/model/gemini/gemini_test.go`
 - Modify: `internal/app/model.go` (update single call site so package compiles)
 
-- [ ] **Step 1: Write failing tests for `thinkingConfig.thinkingLevel` and `thoughtsTokenCount`**
+- [x] **Step 1: Write failing tests for `thinkingConfig.thinkingLevel` and `thoughtsTokenCount`**
 
 In `internal/model/gemini/gemini_test.go`, update existing `New(srv.URL, ..., 0)` calls to `New(srv.URL, ..., 0, "")` and add two failing tests:
 1. `TestEffortSendsThinkingLevel`: verifies `effort: "high"` sends `generationConfig.thinkingConfig.thinkingLevel == "HIGH"`, `effort: "xhigh"` sends `"XHIGH"`, and `effort: ""` omits `thinkingConfig` (`gotReq.GenerationConfig.ThinkingConfig == nil`).
 2. `TestUsageIncludesThoughtsTokenCount`: streams a final chunk with `{"promptTokenCount":200,"candidatesTokenCount":50,"thoughtsTokenCount":350,"cachedContentTokenCount":120}` and asserts `resp.Usage == providers.Usage{InputTokens: 200, OutputTokens: 400, CachedInputTokens: 120}`.
 
-- [ ] **Step 2: Run targeted tests to verify they fail**
+- [x] **Step 2: Run targeted tests to verify they fail**
 
 ```bash
 go test ./internal/model/gemini/... -run 'TestEffortSendsThinkingLevel|TestUsageIncludesThoughtsTokenCount'
@@ -61,7 +63,7 @@ go test ./internal/model/gemini/... -run 'TestEffortSendsThinkingLevel|TestUsage
 
 Expected: compile/test failure (`New` signature mismatch and missing `ThinkingConfig` / `ThoughtsTokenCount`).
 
-- [ ] **Step 3: Implement `effort`, `thinkingConfig`, and `ThoughtsTokenCount` in `internal/model/gemini/gemini.go` and `internal/app/model.go`**
+- [x] **Step 3: Implement `effort`, `thinkingConfig`, and `ThoughtsTokenCount` in `internal/model/gemini/gemini.go` and `internal/app/model.go`**
 
 In `internal/model/gemini/gemini.go`:
 - Add `effort string` field to `Client` and accept `effort string` as the 5th parameter of `New`.
@@ -80,7 +82,7 @@ In `internal/model/gemini/gemini.go`:
 - Add `ThoughtsTokenCount int` (`json:"thoughtsTokenCount"`) to `genResponse.UsageMetadata` and fold it into `out.Usage.OutputTokens` (`gr.UsageMetadata.CandidatesTokenCount + gr.UsageMetadata.ThoughtsTokenCount`).
 - Update `internal/app/model.go:74` to call `gemini.New(baseURL, model, apiKey, maxTokens, effort)` and update `NewModelClient`'s doc comment.
 
-- [ ] **Step 4: Run tests to verify Task 1 passes**
+- [x] **Step 4: Run tests to verify Task 1 passes**
 
 ```bash
 go test ./internal/model/gemini/... ./internal/app/...
@@ -96,7 +98,7 @@ Expected: PASS.
 - Modify: `internal/model/gemini/gemini.go`
 - Modify: `internal/model/gemini/gemini_test.go`
 
-- [ ] **Step 1: Write failing tests covering all replay & filtering contracts**
+- [x] **Step 1: Write failing tests covering all replay & filtering contracts**
 
 Add table-driven and multi-turn tests in `internal/model/gemini/gemini_test.go`:
 1. `TestThoughtSignatureMultiTurnReplay`:
@@ -118,7 +120,7 @@ Add table-driven and multi-turn tests in `internal/model/gemini/gemini_test.go`:
 6. `TestRequestPrefixStableWithThoughtSignature`:
    - Multi-step conversation with signed `Opaque` turns produces byte-identical prefixes across Turn 2 and Turn 3 (guards Gemini implicit prefix caching).
 
-- [ ] **Step 2: Run targeted tests to verify they fail**
+- [x] **Step 2: Run targeted tests to verify they fail**
 
 ```bash
 go test ./internal/model/gemini/... -run 'TestThoughtSignature|TestParallelFunctionCalls|TestThoughtParts|TestNoSignature|TestForeignOrCorrupt|TestRequestPrefixStable'
@@ -126,7 +128,7 @@ go test ./internal/model/gemini/... -run 'TestThoughtSignature|TestParallelFunct
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `part` fields, `opaqueEnvelope`, `accumulate`, and `toContents` in `internal/model/gemini/gemini.go`**
+- [x] **Step 3: Implement `part` fields, `opaqueEnvelope`, `accumulate`, and `toContents` in `internal/model/gemini/gemini.go`**
 
 - Extend `part`:
   ```go
@@ -173,7 +175,7 @@ Expected: FAIL.
   - In the `idToName` pre-pass, also index any `FunctionCall` inside decoded `m.Opaque` parts when `m.ToolCalls` is empty.
   - In `case "assistant"`: if `parts, ok := decodeOpaqueParts(m.Opaque); ok`, emit `content{Role: "model", Parts: parts}` directly; otherwise run the existing `m.Content` + `m.ToolCalls` synthesis.
 
-- [ ] **Step 4: Run gemini package tests with race detector**
+- [x] **Step 4: Run gemini package tests with race detector**
 
 ```bash
 go test -race -v ./internal/model/gemini/...
@@ -192,7 +194,7 @@ Expected: all PASS.
 - Modify: `internal/eval/compare.go`
 - Modify: `internal/eval/compare_test.go`
 
-- [ ] **Step 1: Update/add failing tests in config, app, and eval**
+- [x] **Step 1: Update/add failing tests in config, app, and eval**
 
 - In `internal/config/config_test.go` (`TestValidateEffort`):
   - Assert `provider: "gemini"` accepts `minimal`, `low`, `medium`, `high`, `xhigh`, and `""`.
@@ -203,7 +205,7 @@ Expected: all PASS.
 - In `internal/eval/compare_test.go`:
   - Replace the `"effort on gemini"` rejection case (`effort: high`) with an accepted `"effort on gemini"` case (`effort: xhigh`) and an invalid-level case (`effort: max`).
 
-- [ ] **Step 2: Run targeted tests to verify they fail**
+- [x] **Step 2: Run targeted tests to verify they fail**
 
 ```bash
 go test ./internal/config/... ./internal/app/... ./internal/eval/... -run 'TestValidateEffort|TestNewModelClient|TestLoadCompare'
@@ -211,7 +213,7 @@ go test ./internal/config/... ./internal/app/... ./internal/eval/... -run 'TestV
 
 Expected: FAIL on Gemini effort assertions.
 
-- [ ] **Step 3: Implement config & comment updates**
+- [x] **Step 3: Implement config & comment updates**
 
 - In `internal/config/config.go`:
   - Add `"gemini": {"minimal": true, "low": true, "medium": true, "high": true, "xhigh": true}` to `effortLevels`.
@@ -220,7 +222,7 @@ Expected: FAIL on Gemini effort assertions.
 - In `internal/eval/compare.go`:
   - Update comment near `ValidateEffort` to reflect Gemini's supported vocabulary.
 
-- [ ] **Step 4: Run package tests**
+- [x] **Step 4: Run package tests**
 
 ```bash
 go test -race ./internal/config/... ./internal/app/... ./internal/eval/...
@@ -237,7 +239,7 @@ Expected: PASS.
 - Modify: `website/content/docs/configuration/configuration.md`
 - Modify: `ROADMAP.md`
 
-- [ ] **Step 1: Update Gemini integration documentation**
+- [x] **Step 1: Update Gemini integration documentation**
 
 In `website/content/docs/integrations/llm/gemini.md`:
 - Remove the `## Gemini 3.x does not work` blocker section.
@@ -246,12 +248,12 @@ In `website/content/docs/integrations/llm/gemini.md`:
 - Document `max_tokens` headroom: `maxOutputTokens` caps both `thoughtsTokenCount` and visible output, so raise `model.max_tokens` (and `model.chat.max_tokens`, which defaults to `1024`) when running high/xhigh thinking models.
 - Document that `thoughtSignature` is replayed automatically via `Message.Opaque` and `thoughtsTokenCount` is included in `OutputTokens` and cost ceilings.
 
-- [ ] **Step 2: Update configuration reference and roadmap**
+- [x] **Step 2: Update configuration reference and roadmap**
 
 - In `website/content/docs/configuration/configuration.md`, update the `model.effort` paragraph to list `gemini`: `minimal`·`low`·`medium`·`high`·`xhigh` (sent as `generationConfig.thinkingConfig.thinkingLevel`).
 - In `ROADMAP.md`, remove the #392 row from `## Now`.
 
-- [ ] **Step 3: Run the full quality gate (including `internal/docsguard`)**
+- [x] **Step 3: Run the full quality gate (including `internal/docsguard`)**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -262,7 +264,7 @@ Expected:
 - `gofmt -l .` prints nothing.
 - `hack/lint.sh` reports `0 issues`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `feat(gemini): support Gemini 3/4 thoughtSignature replay, thinkingLevel, and thoughtsTokenCount`

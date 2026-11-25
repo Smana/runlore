@@ -1,5 +1,7 @@
 # Structural Untrusted-Data Delimiters (#362) Implementation Plan
 
+> **Status:** Implemented (PR #628, merged 2026-11-24; closes #362)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wrap every untrusted input entering RunLore's 8 LLM call sites in deterministic, tag-escaped `<untrusted_data source="...">...</untrusted_data>` boundaries without busting cross-investigation prompt caches or clipping closing tags on truncation.
@@ -46,7 +48,7 @@
 - Create: `internal/untrusted/untrusted.go`
 - Create: `internal/untrusted/untrusted_test.go`
 
-- [ ] **Step 1: Write failing table-driven tests in `internal/untrusted/untrusted_test.go`**
+- [x] **Step 1: Write failing table-driven tests in `internal/untrusted/untrusted_test.go`**
 
 Cover:
 - `Wrap("tool:pod_logs", "CrashLoopBackOff")` → `<untrusted_data source="tool:pod_logs">\nCrashLoopBackOff\n</untrusted_data>`.
@@ -55,7 +57,7 @@ Cover:
 - Hostile `source`: `"mcp:evil\" onclick=\"x"` → sanitized to `[A-Za-z0-9_.:/-]`; `""` → `"unknown"`.
 - `Unwrap`: strips outermost `<untrusted_data ...>\n...\n</untrusted_data>` back to inner content; returns plain strings unchanged; handles strings that start with `<untrusted_data` but lack a matching closing tag safely (returns original).
 
-- [ ] **Step 2: Run test to verify failure**
+- [x] **Step 2: Run test to verify failure**
 
 ```bash
 go test ./internal/untrusted/...
@@ -63,13 +65,13 @@ go test ./internal/untrusted/...
 
 Expected: FAIL (package does not exist yet).
 
-- [ ] **Step 3: Implement `internal/untrusted/untrusted.go`**
+- [x] **Step 3: Implement `internal/untrusted/untrusted.go`**
 
 - Compile `tagPattern = regexp.MustCompile("(?i)<(\\s*/?\\s*untrusted_data\\b)")` once at package init; replace matches with `&lt;$1`.
 - Implement `sanitizeSource(source string) string` keeping `[A-Za-z0-9_.:/-]` (others → `_`; empty → `"unknown"`).
 - Implement `SystemNotice`, `Wrap`, and `Unwrap` with doc comments on all exported symbols.
 
-- [ ] **Step 4: Run tests with race detector**
+- [x] **Step 4: Run tests with race detector**
 
 ```bash
 go test -race -v ./internal/untrusted/...
@@ -87,7 +89,7 @@ Expected: PASS.
 - Modify: `internal/investigate/rerank.go`, `internal/investigate/rerank_test.go`
 - Modify: `internal/investigate/summarize.go`, `internal/investigate/summarize_test.go`
 
-- [ ] **Step 1: Write failing tests for each of the 4 investigation call sites**
+- [x] **Step 1: Write failing tests for each of the 4 investigation call sites**
 
 - `loop_test.go`:
   - Tool result exceeding `MaxToolOutputBytes` is redacted, truncated, and STILL ends with `</untrusted_data>` (closing tag never truncated).
@@ -101,7 +103,7 @@ Expected: PASS.
 - `summarize_test.go`:
   - Elided tool outputs passed to the summarizer are unwrapped-then-wrapped cleanly; the returned digest inserted into history is wrapped as `compaction_digest`; `summarizePrompt` includes `SystemNotice`.
 
-- [ ] **Step 2: Run targeted tests to verify they fail**
+- [x] **Step 2: Run targeted tests to verify they fail**
 
 ```bash
 go test ./internal/investigate/... -run 'Test.*Untrusted|TestSeedPrompt|TestRenderForReview|TestRenderRerank|TestSummarize'
@@ -109,7 +111,7 @@ go test ./internal/investigate/... -run 'Test.*Untrusted|TestSeedPrompt|TestRend
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement wrapping across `loop.go`, `verify.go`, `rerank.go`, `summarize.go`**
+- [x] **Step 3: Implement wrapping across `loop.go`, `verify.go`, `rerank.go`, `summarize.go`**
 
 - `loop.go`:
   - Append `untrusted.SystemNotice` to `systemPrompt(engine)` (keeping it static across steps/investigations).
@@ -131,7 +133,7 @@ Expected: FAIL.
   - Wrap each `untrusted.Unwrap(e.content)` with `untrusted.Wrap("tool:"+e.tool, ...)`.
   - Wrap the inserted digest (`out[dest].Content`) with `untrusted.Wrap("compaction_digest", digest)`.
 
-- [ ] **Step 4: Run `internal/investigate` tests (including any existing prompt-shape assertions)**
+- [x] **Step 4: Run `internal/investigate` tests (including any existing prompt-shape assertions)**
 
 ```bash
 go test -race ./internal/investigate/...
@@ -149,14 +151,14 @@ Update any existing unit tests whose golden strings expect the unwrapped format,
 - Modify: `internal/kbimport/enrich.go`, `internal/kbimport/enrich_test.go`
 - Modify: `internal/eval/judge.go`, `internal/eval/judge_test.go`
 
-- [ ] **Step 1: Write failing tests for all 4 remaining call sites**
+- [x] **Step 1: Write failing tests for all 4 remaining call sites**
 
 - `chat_test.go`: assert `chatSystemPrompt` carries `untrusted.SystemNotice` and `renderContext` wraps investigation summary, thread history, and incoming user message in `<untrusted_data ...>` with breakout escaping.
 - `semantic_test.go`: assert `reviewSystemPrompt` carries `SystemNotice` and `renderEntry` wraps entry content as `kb_entry`.
 - `enrich_test.go`: assert `enrichSystemPrompt` carries `SystemNotice` and user prompt wraps imported document content as `imported_document`.
 - `judge_test.go`: assert `judgeSystem` carries `SystemNotice`, the model finding is wrapped as `model_finding`, and the ground-truth block is **not** inside `<untrusted_data>`.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/thread/... ./internal/kbvalidate/... ./internal/kbimport/... ./internal/eval/...
@@ -164,11 +166,11 @@ go test ./internal/thread/... ./internal/kbvalidate/... ./internal/kbimport/... 
 
 Expected: FAIL on the new assertions.
 
-- [ ] **Step 3: Implement wrapping in all 4 files**
+- [x] **Step 3: Implement wrapping in all 4 files**
 
 Apply `untrusted.SystemNotice` and `untrusted.Wrap` at `chat.go`, `semantic.go`, `enrich.go`, and `judge.go`.
 
-- [ ] **Step 4: Run tests across all 4 packages**
+- [x] **Step 4: Run tests across all 4 packages**
 
 ```bash
 go test -race ./internal/thread/... ./internal/kbvalidate/... ./internal/kbimport/... ./internal/eval/...
@@ -184,7 +186,7 @@ Expected: PASS.
 - Modify: `website/content/docs/security/security-architecture.md`
 - Modify: `ROADMAP.md`
 
-- [ ] **Step 1: Update security documentation and roadmap**
+- [x] **Step 1: Update security documentation and roadmap**
 
 - In `website/content/docs/security/security-architecture.md`:
   - Document `internal/untrusted` (`<untrusted_data source="...">...</untrusted_data>`, deterministic tag-escaping, `redact → truncate → wrap`, applied across all 8 LLM call sites while preserving static prefix caching).
@@ -192,7 +194,7 @@ Expected: PASS.
 - In `ROADMAP.md`:
   - Remove the `#362` row from `## Now`.
 
-- [ ] **Step 2: Run full quality gate**
+- [x] **Step 2: Run full quality gate**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -200,7 +202,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: all tests PASS, `gofmt -l .` prints nothing, `hack/lint.sh` reports `0 issues`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `feat(security): wrap untrusted LLM inputs in tag-escaped delimiters across all call sites`

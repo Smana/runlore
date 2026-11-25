@@ -1,7 +1,7 @@
 # Design — Public docs freshness (`v0.20.0`) & `README.md` `docsguard`
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #625, merged 2026-11-24)
 - **Owner:** Smaine Kahlouch
 - **Touches:** `internal/docsguard/integration_pages_test.go`, `README.md`, `ROADMAP.md`, `website/content/docs/concepts/design.md`, `website/content/docs/integrations/_index.md`
 

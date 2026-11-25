@@ -1,5 +1,7 @@
 # Evidence Grounding + Causal Confidence Implementation Plan
 
+> **Status:** Implemented (PR #630, merged 2026-11-24)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Surface a structured `EvidenceGrounding` signal (`traced / total` cited evidence bullets + exact unverified indices) alongside RunLore's existing scalar causal `Confidence`, computed inside the existing adversarial verify pass at zero extra LLM cost and surfaced across Slack/Matrix/CLI cards, KB PR drafts, Prometheus metrics, and `lore eval`.
@@ -43,7 +45,7 @@
 - Modify: `internal/investigate/verify.go`
 - Modify: `internal/investigate/verify_test.go`
 
-- [ ] **Step 1: Write failing tests in `internal/investigate/verify_test.go`**
+- [x] **Step 1: Write failing tests in `internal/investigate/verify_test.go`**
 
 Add table-driven tests covering:
 - `renderForReview` numbers evidence bullets `[0]`, `[1]`, `[2]`.
@@ -53,7 +55,7 @@ Add table-driven tests covering:
 - Multi-hypothesis rollup: hypothesis 0 kept (`2/2`), hypothesis 1 downgraded (`1/2`), hypothesis 2 rejected → `inv.Grounding = {Traced: 3, Total: 4}`.
 - Unrecognized verdict or missing verdict index → `rc.Grounding == nil` (not fabricated).
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/investigate/... -run TestVerifyGrounding
@@ -61,7 +63,7 @@ go test ./internal/investigate/... -run TestVerifyGrounding
 
 Expected: FAIL (compile error — `EvidenceGrounding` doesn't exist yet).
 
-- [ ] **Step 3: Implement `EvidenceGrounding` and `verify.go` updates**
+- [x] **Step 3: Implement `EvidenceGrounding` and `verify.go` updates**
 
 - In `internal/providers/providers.go`, define `EvidenceGrounding` with `Ratio() float64` and `IsUngrounded(i int) bool` helpers, and add `Grounding *EvidenceGrounding` to `Hypothesis` and `Investigation`.
 - In `internal/investigate/verify.go`:
@@ -71,7 +73,7 @@ Expected: FAIL (compile error — `EvidenceGrounding` doesn't exist yet).
   - Pass `hasTranscript := transcriptExcerpt(transcript) != ""` into `applyVerdicts`.
   - For each kept/downgraded root cause with `ok && hasTranscript && len(rc.Evidence) > 0`, compute `clampUngrounded(v.UngroundedEvidence, len(rc.Evidence))` and set `rc.Grounding`, then roll up across surviving `kept` hypotheses onto `inv.Grounding`.
 
-- [ ] **Step 4: Run tests with race detector**
+- [x] **Step 4: Run tests with race detector**
 
 ```bash
 go test -race ./internal/investigate/... ./internal/providers/...
@@ -89,13 +91,13 @@ Expected: PASS.
 - Modify: `internal/notify/matrix.go`, `matrix_test.go`
 - Modify: `internal/curator/curator.go`, `curator_test.go`
 
-- [ ] **Step 1: Write failing tests for rendering**
+- [x] **Step 1: Write failing tests for rendering**
 
 - `format_test.go`: `groundingBadge` returns `""` for nil/0-total, `"3/3 evidence traced"` for full, `"2/3 evidence traced — 1 unverified"` for partial; `Format(inv)` appends inline badge to confidence line and `(unverified)` to ungrounded evidence bullets.
 - `slack_test.go` & `matrix_test.go`: main card confidence block appends ` · 2/3 evidence traced — 1 unverified` when `inv.Grounding != nil`, leaves existing cards with `Grounding == nil` byte-identical; detail thread marks ungrounded bullet `*(unverified)*`.
 - `curator_test.go`: drafted KB PR body marks ungrounded bullets `*(unverified)*` and omits annotations when `Grounding == nil`.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/notify/... ./internal/curator/... -run 'Test.*Grounding'
@@ -103,12 +105,12 @@ go test ./internal/notify/... ./internal/curator/... -run 'Test.*Grounding'
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement rendering helpers and detail markers**
+- [x] **Step 3: Implement rendering helpers and detail markers**
 
 - Implement `groundingBadge(inv providers.Investigation) string` in `internal/notify/format.go` (shared by `Format`, `slack.go`, `matrix.go` so all three render identical copy).
 - Append `(unverified)` / `*(unverified)*` wherever `rc.Grounding.IsUngrounded(j)` is true in `format.go`, `slack.go` thread reply, `matrix.go` detail, and `curator.go` entry markdown.
 
-- [ ] **Step 4: Run notify & curator tests (including golden tests)**
+- [x] **Step 4: Run notify & curator tests (including golden tests)**
 
 ```bash
 go test -race ./internal/notify/... ./internal/curator/...
@@ -126,7 +128,7 @@ Expected: PASS.
 - Modify: `internal/eval/{case.go,score.go,replay_report.go,compare_run.go,compare_report.go}` + tests
 - Modify: `website/content/docs/operations/observability.md`, `deploy/observability/`
 
-- [ ] **Step 1: Write failing tests for metrics and eval**
+- [x] **Step 1: Write failing tests for metrics and eval**
 
 - `internal/eval/score_test.go`:
   - `Score` populates `GroundingTraced`/`GroundingTotal` from `inv.Grounding`.
@@ -135,7 +137,7 @@ Expected: PASS.
 - `internal/eval/replay_report_test.go` & `compare_report_test.go`: report includes median grounding column (`—` when unmeasured).
 - `internal/investigate/loop_test.go`: completed verified investigation records `runlore_investigation_grounding_ratio` when `inv.Grounding != nil`.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/eval/... ./internal/telemetry/... ./internal/investigate/... -run 'Test.*Grounding'
@@ -143,14 +145,14 @@ go test ./internal/eval/... ./internal/telemetry/... ./internal/investigate/... 
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement telemetry, eval, and observability docs**
+- [x] **Step 3: Implement telemetry, eval, and observability docs**
 
 - Add `InvestigationGroundingRatio` (`runlore_investigation_grounding_ratio`) in `internal/telemetry/metrics.go` + explicit histogram view buckets `[0, 0.25, 0.5, 0.75, 0.9, 1.0]` in `setup.go`.
 - Record it in `internal/investigate/loop.go` on delivery when `inv.Grounding != nil && inv.Grounding.Total > 0`.
 - Wire `GroundingTraced`, `GroundingTotal`, `MinGrounding`, and report columns across `internal/eval/`.
 - Document `runlore_investigation_grounding_ratio` in `website/content/docs/operations/observability.md` and add a Grafana panel in `deploy/observability/`.
 
-- [ ] **Step 4: Run full quality gate**
+- [x] **Step 4: Run full quality gate**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -158,7 +160,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: all tests (including `internal/docsguard/metric_names_test.go`) PASS, `gofmt -l .` prints nothing, `hack/lint.sh` reports `0 issues`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `feat(investigate): surface evidence grounding alongside causal confidence`

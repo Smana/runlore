@@ -1,5 +1,7 @@
 # Decouple `internal/factory` Auth & Split Core God-Files Implementation Plan
 
+> **Status:** Implemented (PR #624 + PR #626, merged 2026-11-24)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** (1) Split `internal/config/config.go` (3,033 LOC) and `internal/providers/providers.go` (2,610 LOC) into cohesive same-package domain files with zero behavior/API changes, and (2) generalize `internal/factory` authentication to support static Bearer tokens (`token_env`) and generic OAuth2 client-credentials (`oauth_scope` / `oauth_audience`) alongside 100% backwards-compatible ZITADEL `project_id_env`, with protocol documentation.
@@ -41,7 +43,7 @@
 - Modify/Create: `internal/providers/providers*.go`
 - Modify: `internal/docsguard/decision_backends_test.go`
 
-- [ ] **Step 1: Split `internal/config/config.go` into domain files**
+- [x] **Step 1: Split `internal/config/config.go` into domain files**
 
 Move declarations verbatim (preserving all doc comments, SPDX headers, and `package config`):
 - `config.go`: `Config`, `Logging`, `ServerConfig`, `ServerMCP`, `Telemetry`, `LeaderElection`, `Duration`
@@ -53,11 +55,11 @@ Move declarations verbatim (preserving all doc comments, SPDX headers, and `pack
 - `config_factory.go`: `Factory`, `FactoryCuration`, `FactoryVerify`, `FactoryWebhook`
 - `config_validate.go`: `ApplyDefaults`, `Validate`, `ValidateEffort`, `ValidateThinking`, `checkSecureKeyEndpoint`, and validation helpers
 
-- [ ] **Step 2: Update `internal/docsguard/decision_backends_test.go` to read all non-test `internal/config/*.go`**
+- [x] **Step 2: Update `internal/docsguard/decision_backends_test.go` to read all non-test `internal/config/*.go`**
 
 Add a tiny helper `readPackageGoDocs(t, dir)` that sorts and concatenates all non-test `*.go` files in `internal/config/`, replacing the single hardcoded `config.go` read at line 31.
 
-- [ ] **Step 3: Split `internal/providers/providers.go` into domain files**
+- [x] **Step 3: Split `internal/providers/providers.go` into domain files**
 
 Move declarations verbatim (preserving all doc comments, SPDX headers, and `package providers`):
 - `providers.go`: core enums (`Engine`, `ChangeType`, `ResourceScope`), `TimeWindow`, `Selector`
@@ -69,7 +71,7 @@ Move declarations verbatim (preserving all doc comments, SPDX headers, and `pack
 - `providers_investigation.go`: `Investigation`, `Hypothesis`, `Verdict`, `MatchedKB`, `AppliedResolution`
 - `providers_forge.go`: `IssueProvider`, `KBEntry`, `CuratedIssue`, `EntryPRState`, `PullSummary`, `Notifier`, `ProgressNotifier`, `PossibleDuplicateHeading`, card evidence parser
 
-- [ ] **Step 4: Run full quality gate to prove zero regressions**
+- [x] **Step 4: Run full quality gate to prove zero regressions**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -77,7 +79,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: 100% PASS, `gofmt -l .` empty, `hack/lint.sh` `0 issues`.
 
-- [ ] **Step 5: Commit pure refactor separately**
+- [x] **Step 5: Commit pure refactor separately**
 
 Commit using Conventional Commits (English, no co-author line):
 `refactor: split config.go and providers.go into same-package domain files`
@@ -90,7 +92,7 @@ Commit using Conventional Commits (English, no co-author line):
 - Modify: `internal/config/config_factory.go`, `internal/config/config_validate.go`, `internal/config/config_test.go`
 - Modify: `internal/factory/client.go`, `internal/factory/client_test.go`
 
-- [ ] **Step 1: Write failing tests in `internal/config/config_test.go` and `internal/factory/client_test.go`**
+- [x] **Step 1: Write failing tests in `internal/config/config_test.go` and `internal/factory/client_test.go`**
 
 - `config_test.go`:
   - Static bearer mode (`url` + `token_env` + `repository` + `max_cost_usd`) validates clean; public `http://` URL with `token_env` rejected by `checkSecureKeyEndpoint`.
@@ -103,7 +105,7 @@ Commit using Conventional Commits (English, no co-author line):
   - Generic OAuth2: posts `grant_type=client_credentials`, `client_id`, `client_secret`, optional `scope` and `audience` (omitted when empty), caches token, refreshes once on `401`.
   - ZITADEL (`project_id_env` set): continues posting `"openid urn:zitadel:iam:org:project:id:<id>:aud"`.
 
-- [ ] **Step 2: Run targeted tests to verify failure**
+- [x] **Step 2: Run targeted tests to verify failure**
 
 ```bash
 go test ./internal/config/... ./internal/factory/... -run 'Test.*Factory'
@@ -111,7 +113,7 @@ go test ./internal/config/... ./internal/factory/... -run 'Test.*Factory'
 
 Expected: FAIL.
 
-- [ ] **Step 3: Implement auth generalization in `config_factory.go`, `config_validate.go`, and `factory/client.go`**
+- [x] **Step 3: Implement auth generalization in `config_factory.go`, `config_validate.go`, and `factory/client.go`**
 
 - Add `TokenEnv`, `OAuthScope`, and `OAuthAudience` (`yaml:"token_env"`, `yaml:"oauth_scope"`, `yaml:"oauth_audience"`) to `config.Factory`.
 - Update `Validate()` for mutual exclusion and `checkSecureKeyEndpoint` on `factory.url` and `factory.token_url`.
@@ -121,7 +123,7 @@ Expected: FAIL.
   - In `accessToken`: return `(c.staticToken, false, nil)` immediately when `c.staticToken != ""`; otherwise build OAuth2 form using ZITADEL scope when `c.project != ""`, else `c.cfg.OAuthScope` (when non-empty) and `audience: c.cfg.OAuthAudience` (when non-empty).
   - In `CreateTask`: only perform the single `401` token-drop retry when `c.staticToken == ""`.
 
-- [ ] **Step 4: Run tests with race detector**
+- [x] **Step 4: Run tests with race detector**
 
 ```bash
 go test -race ./internal/config/... ./internal/factory/... ./internal/app/...
@@ -137,12 +139,12 @@ Expected: PASS.
 - Create: `website/content/docs/reference/remediation-factory.md` (and link from `website/content/docs/reference/_index.md`)
 - Modify: `website/content/docs/configuration/configuration.md`
 
-- [ ] **Step 1: Document protocol and auth modes**
+- [x] **Step 1: Document protocol and auth modes**
 
 - Update `configuration.md` with `factory.token_env`, `factory.oauth_scope`, and `factory.oauth_audience`.
 - Write `website/content/docs/reference/remediation-factory.md` describing the `POST /v1/tasks` request/response contract, `Idempotency-Key`, signed inbound webhook schema, post-soak verification, deferred curation, and all three auth modes (static Bearer, generic OAuth2, ZITADEL).
 
-- [ ] **Step 2: Run full quality gate (including `internal/docsguard` config-fence and link checks)**
+- [x] **Step 2: Run full quality gate (including `internal/docsguard` config-fence and link checks)**
 
 ```bash
 go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
@@ -150,7 +152,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 
 Expected: all tests PASS, `gofmt -l .` empty, `hack/lint.sh` `0 issues`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Commit using Conventional Commits (English, no co-author line), e.g.:
 `feat(factory): support static bearer and generic OAuth2 auth alongside ZITADEL`

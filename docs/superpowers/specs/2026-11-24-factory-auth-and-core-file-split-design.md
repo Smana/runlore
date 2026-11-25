@@ -1,7 +1,7 @@
 # Design — Decouple `internal/factory` auth & split core god-files
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #624 + PR #626, merged 2026-11-24)
 - **Owner:** Smaine Kahlouch
 - **Touches:** `internal/factory/{client.go,client_test.go}`, `internal/config/config*.go`, `internal/providers/providers*.go`, `internal/docsguard/decision_backends_test.go`, `website/content/docs/configuration/configuration.md`, `website/content/docs/integrations/remediation-factory.md` (or under `reference/`)
 

@@ -1,7 +1,7 @@
 # Design — Splitting scalar confidence into Evidence Grounding + Causal Confidence
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #630, merged 2026-11-24)
 - **Owner:** Smaine Kahlouch
 - **Touches:** `internal/providers/providers.go`, `internal/investigate/{verify.go,verify_test.go,loop.go}`, `internal/notify/{format.go,slack.go,matrix.go,card_golden_test.go}`, `internal/curator/curator.go`, `internal/eval/{case.go,score.go,replay_report.go,compare_run.go,compare_report.go}`, `internal/telemetry/{metrics.go,setup.go}`, `website/content/docs/operations/observability.md`, `deploy/observability/`
 

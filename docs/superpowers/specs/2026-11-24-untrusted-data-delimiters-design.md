@@ -1,7 +1,7 @@
 # Design — Structural untrusted-data delimiters across all LLM boundaries
 
 - **Date:** 2026-11-24
-- **Status:** Approved (grilling complete)
+- **Status:** Implemented (PR #628, merged 2026-11-24; closes #362)
 - **Owner:** Smaine Kahlouch
 - **Fixes:** [#362](https://github.com/Smana/runlore/issues/362)
 - **Touches:** `internal/untrusted/` (new), `internal/investigate/{loop.go,verify.go,rerank.go,summarize.go}`, `internal/thread/chat.go`, `internal/kbvalidate/semantic.go`, `internal/kbimport/enrich.go`, `internal/eval/judge.go`, `website/content/docs/security/security-architecture.md`, `ROADMAP.md`
