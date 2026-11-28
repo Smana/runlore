@@ -6,27 +6,27 @@ Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlo
 lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 ```
 
-**Latest run:** 2026-11-25T17:17:28Z · model `openai/glm-4.5-air` · **9/17 scenarios reached (53%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.68 (2.7M in / 127.9k out tokens)
+**Latest run:** 2026-11-28T15:33:42Z · model `openai/glm-4.5-air` · **9/17 scenarios reached (53%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.74 (3.0M in / 131.7k out tokens)
 
 ## Scenarios (latest run)
 
 | scenario | result | pass-rate | median confidence | grounding | recall | notes |
 |---|---|---|---|---|---|---|
 | argocd-degraded-sync | ✅ PASS | 100% (n=5) | 0.90 | — | — | — |
-| aws-cloudtrail-sg-change | ⚠️ FLAKY | 60% (n=5) | 0.95 | — | — | orders-prod-db |
+| aws-cloudtrail-sg-change | ✅ PASS | 80% (n=5) | 0.95 | — | — | orders-prod-db |
 | cert-manager-expiry | ✅ PASS | 100% (n=5) | 0.90 | — | — | — |
-| correlation-only-inconclusive | ⚠️ FLAKY | 40% (n=5) | 0.80 | — | — | over-claimed: banner-cdn |
-| dns-coredns-servfail | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | — | over-claimed: metrics-server |
+| correlation-only-inconclusive | ❌ MISS | 20% (n=5) | 0.60 | — | — | inconclusive\|unclear\|insufficient\|upstream\|unknown, over-claimed: banner-cdn |
+| dns-coredns-servfail | ✅ PASS | 80% (n=5) | 0.90 | — | — | over-claimed: metrics-server |
 | gitops-broken-kustomization | ✅ PASS | 100% (n=5) | 0.90 | — | — | — |
-| harbor-chart-bump | ✅ PASS | 80% (n=5) | 0.90 | — | — | harbor-db |
-| heldout-statefulset-wal-lock | ⚠️ FLAKY | 40% (n=5) | 0.90 | — | — | postgres-primary, postmaster.pid\|lock file\|wal\|checkpoint |
-| hpa-ceiling-saturation | ❌ MISS | 20% (n=5) | 0.90 | — | — | autoscal\|hpa, over-claimed: quote-engine |
-| network-cilium-policy-drop | ✅ PASS | 80% (n=5) | 1.00 | — | — | drop\|denied |
-| node-eviction-no-commons | ❌ MISS | 20% (n=5) | 0.70 | 83% | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
-| node-eviction-with-commons | ✅ PASS | 80% (n=5) | 0.60 | 50% | fired 0/5 · short-circuit 0/5 (expect: rejected) | report-worker, request |
+| harbor-chart-bump | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | — | harbor-db |
+| heldout-statefulset-wal-lock | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | — | over-claimed: pgbouncer, postgres-primary |
+| hpa-ceiling-saturation | ❌ MISS | 20% (n=5) | 0.90 | — | — | over-claimed: quote-engine |
+| network-cilium-policy-drop | ❌ MISS | 20% (n=5) | 0.95 | — | — | drop\|denied |
+| node-eviction-no-commons | ❌ MISS | 0% (n=5) | 0.80 | 88% | fired 0/5 · short-circuit 0/5 (expect: rejected) | report-worker, request |
+| node-eviction-with-commons | ✅ PASS | 100% (n=5) | 0.90 | 88% | fired 0/5 · short-circuit 0/5 (expect: rejected) | — |
 | poisoned-recall-rejected | ✅ PASS | 100% (n=5) | 0.90 | — | — | — |
 | poisoned-recall-verify | ✅ PASS | 100% (n=5) | 1.00 | 100% | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | — |
-| pvc-storageclass-unbound | ✅ PASS | 100% (n=5) | 0.90 | — | — | — |
+| pvc-storageclass-unbound | ✅ PASS | 80% (n=5) | 1.00 | — | — | clickhouse-shard-0 |
 | recall-paraphrase-dns | ❌ MISS | 0% (n=5) | 1.00 | 100% | fired 0/5 · short-circuit 0/5 (expect: fired) | expect_recall=fired but recall did not fire (rejected) |
 | recall-paraphrase-oom | ❌ MISS | 0% (n=5) | 0.90 | 100% | fired 0/5 · short-circuit 0/5 (expect: fired) | expect_recall=fired but recall did not fire (rejected) |
 
@@ -36,11 +36,11 @@ Median provider-reported tokens per case on `openai/glm-4.5-air`, priced at $0.2
 
 | path | cases | median in tok | median out tok | est. cost |
 |---|---|---|---|---|
-| full investigation | 17 | 22.0k | 1.2k | $0.006 |
+| full investigation | 17 | 20.9k | 1.2k | $0.006 |
 
 ## Confidence calibration
 
-- **Confidently wrong** (missed with median confidence ≥ 0.70): 8 — aws-cloudtrail-sg-change, correlation-only-inconclusive, dns-coredns-servfail, heldout-statefulset-wal-lock, hpa-ceiling-saturation, node-eviction-no-commons, recall-paraphrase-dns, recall-paraphrase-oom
+- **Confidently wrong** (missed with median confidence ≥ 0.70): 7 — harbor-chart-bump, heldout-statefulset-wal-lock, hpa-ceiling-saturation, network-cilium-policy-drop, node-eviction-no-commons, recall-paraphrase-dns, recall-paraphrase-oom
 - **Underconfident** (reached with median confidence < 0.50): none
 
 ## History
@@ -49,6 +49,7 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 
 | date | model | reached | pass-rate | est. cost |
 |---|---|---|---|---|
+| 2026-11-28T15:33:42Z | openai/glm-4.5-air | 9/17 | 53% | $0.74 |
 | 2026-11-25T17:17:28Z | openai/glm-4.5-air | 9/17 | 53% | $0.68 |
 | 2026-11-24T17:20:42Z | openai/glm-4.5-air | 8/17 | 47% | $0.77 |
 | 2026-11-23T17:20:06Z | openai/glm-4.5-air | 4/7 | 57% | $0.37 |
@@ -78,4 +79,3 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 | 2026-10-30T12:15:29Z | openai/glm-4.5-air | 4/7 | 57% | $0.42 |
 | 2026-10-29T12:25:04Z | openai/glm-4.5-air | 5/7 | 71% | $0.40 |
 | 2026-10-28T12:12:14Z | openai/glm-4.5-air | 4/7 | 57% | $0.37 |
-| 2026-10-27T11:43:35Z | openai/glm-4.5-air | 4/7 | 57% | $0.41 |
